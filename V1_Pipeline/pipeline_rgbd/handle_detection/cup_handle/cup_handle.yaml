@@ -1,0 +1,6 @@
+path: /Users/gabrieltaieb/Desktop/datasets/cup_handle
+train: images/train
+val:   images/val
+test:  images/test
+names:
+  0: handle

@@ -1,0 +1,73 @@
+commands:
+  CHESS:
+  - dataset/commands/CHESS/sample_025.wav
+  - dataset/commands/CHESS/sample_023.wav
+  - dataset/commands/CHESS/sample_019.wav
+  - dataset/commands/CHESS/sample_011.wav
+  - dataset/commands/CHESS/sample_004.wav
+  DROP:
+  - dataset/commands/DROP/sample_025.wav
+  - dataset/commands/DROP/sample_023.wav
+  - dataset/commands/DROP/sample_019.wav
+  - dataset/commands/DROP/sample_011.wav
+  - dataset/commands/DROP/sample_004.wav
+  GRAB:
+  - dataset/commands/GRAB/sample_025.wav
+  - dataset/commands/GRAB/sample_023.wav
+  - dataset/commands/GRAB/sample_019.wav
+  - dataset/commands/GRAB/sample_011.wav
+  - dataset/commands/GRAB/sample_004.wav
+  LUMBAR:
+  - dataset/commands/LUMBAR/sample_025.wav
+  - dataset/commands/LUMBAR/sample_023.wav
+  - dataset/commands/LUMBAR/sample_019.wav
+  - dataset/commands/LUMBAR/sample_011.wav
+  - dataset/commands/LUMBAR/sample_004.wav
+  START RPS:
+  - dataset/commands/START RPS/sample_025.wav
+  - dataset/commands/START RPS/sample_023.wav
+  - dataset/commands/START RPS/sample_019.wav
+  - dataset/commands/START RPS/sample_011.wav
+  - dataset/commands/START RPS/sample_004.wav
+  STOP RPS:
+  - dataset/commands/STOP RPS/sample_025.wav
+  - dataset/commands/STOP RPS/sample_023.wav
+  - dataset/commands/STOP RPS/sample_019.wav
+  - dataset/commands/STOP RPS/sample_011.wav
+  - dataset/commands/STOP RPS/sample_004.wav
+  YOLO:
+  - dataset/commands/YOLO/sample_025.wav
+  - dataset/commands/YOLO/sample_023.wav
+  - dataset/commands/YOLO/sample_019.wav
+  - dataset/commands/YOLO/sample_011.wav
+  - dataset/commands/YOLO/sample_004.wav
+garbage:
+- dataset/garbage/segment_169.wav
+- dataset/garbage/segment_053.wav
+- dataset/garbage/segment_015.wav
+- dataset/garbage/segment_042.wav
+- dataset/garbage/segment_013.wav
+- dataset/garbage/segment_036.wav
+- dataset/garbage/segment_060.wav
+- dataset/garbage/segment_123.wav
+- dataset/garbage/segment_061.wav
+- dataset/garbage/segment_019.wav
+- dataset/garbage/segment_065.wav
+- dataset/garbage/segment_030.wav
+- dataset/garbage/segment_149.wav
+- dataset/garbage/segment_002.wav
+- dataset/garbage/segment_118.wav
+- dataset/garbage/segment_127.wav
+- dataset/garbage/segment_119.wav
+- dataset/garbage/segment_160.wav
+wake:
+- dataset/wake_word/sample_042.wav
+- dataset/wake_word/sample_041.wav
+- dataset/wake_word/sample_091.wav
+- dataset/wake_word/sample_009.wav
+- dataset/wake_word/sample_065.wav
+- dataset/wake_word/sample_050.wav
+- dataset/wake_word/sample_001.wav
+- dataset/wake_word/sample_070.wav
+- dataset/wake_word/sample_015.wav
+- dataset/wake_word/sample_078.wav

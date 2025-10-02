@@ -1,0 +1,26 @@
+
+opencv-python         
+pillow
+opencv-contrib-python               
+
+# ───── Deep-Learning (YOLOv9 – Ultralytics 0.6.6) ────────────────────
+torch                
+torchvision
+ultralytics              
+tqdm                
+
+# ───── 3-D & géométrie ───────────────────────────────────────────────
+open3d            
+pyrealsense2-macosx
+
+# ───── NumPy / SciKit / Stats ────────────────────────────────────────
+numpy                 
+scikit-learn            
+
+feetech-servo-sdk #pour lerobot
+
+# ───── Bus série & moteurs (scripts robot) ───────────────────────────
+#pyserial>=3.5,<4.0                # pour les bus Feetech
+
+# ───── Facultatif mais souvent utile ────────────────────────────────
+# matplotlib>=3.8,<3.9            # si vous activez les visualisations Open3D + Matplotlib

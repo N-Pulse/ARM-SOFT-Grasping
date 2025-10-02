@@ -1,0 +1,10 @@
+numpy
+torch==2.6.0
+torchaudio==2.6.0
+sounddevice
+soundfile
+matplotlib
+scikit-learn
+pyyaml
+tqdm
+librosa

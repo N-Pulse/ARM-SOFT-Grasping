@@ -1,4 +1,4 @@
-# Intent Prediction Project by Darius Giannoli
+# Intent Prediction Project by Darius Giannoli & Gabriel Taieb
 
 This repository provides a modular pipeline for 3D object manipulation and voice-controlled robotics, integrating RGB-D perception, YOLO-based object detection, and voice recognition. The project is organized into several main components, each responsible for a specific part of the workflow.
 

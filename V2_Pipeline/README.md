@@ -6,7 +6,7 @@ chmod +x lerobot_setup.sh lerobot_il_pipeline.sh
 
 ---
 
-## `lerobot_setup.sh`
+## `setup/lerobot_setup.sh`
 
 Configuration for the follower and the leader arm + calibration:
 
@@ -24,7 +24,7 @@ Configuration for the follower and the leader arm + calibration:
 
 ---
 
-## `lerobot_il_pipeline.sh`
+## `setup/lerobot_il_pipeline.sh`
 
 Script for the full training pipeline:
 

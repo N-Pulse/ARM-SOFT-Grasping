@@ -1,0 +1,13 @@
+# so101_config.yaml
+port: "/dev/tty.usbmodemXXXX"
+motors:
+  j1: {id:1, model:"sts3215", offset:0.00, direction:+1, lim:[-1.2,1.2]}
+  j2: {id:2, model:"sts3215", offset:0.10, direction:-1, lim:[-0.8,1.2]}
+  j3: {id:3, model:"sts3215", offset:-0.05, direction:+1, lim:[-1.2,1.0]}
+  j4: {id:4, model:"sts3215", offset:0.00, direction:+1, lim:[-1.2,1.2]}
+  j5: {id:5, model:"sts3215", offset:0.00, direction:+1, lim:[-1.5,1.5]}
+  j6: {id:6, model:"sts3215", offset:0.00, direction:+1, lim:[0.0,0.8]}  # pince
+safety:
+  max_vel: 2.0
+  max_acc: 8.0
+  deadman_timeout: 0.3

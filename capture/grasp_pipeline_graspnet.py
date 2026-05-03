@@ -9,10 +9,10 @@ DexGraspNet2. Outputs 6-DoF parallel-jaw grasps (no finger joints).
 import sys
 import time
 
-sys.path.insert(0, "home/Desktop/npulse-cv/graspnet-baseline")
-sys.path.insert(0, "home/esktop/npulse-cv/graspnet-baseline/models")
-sys.path.insert(0, "home/Desktop/npulse-cv/graspnet-baseline/utils")
-sys.path.insert(0, "home/Desktop/npulse-cv/graspnet-baseline/dataset")
+sys.path.insert(0, "/home/npulse-cv/Desktop/npulse-cv/graspnet-baseline")
+sys.path.insert(0, "/home/npulse-cv/Desktop/npulse-cv/graspnet-baseline/models")
+sys.path.insert(0, "/home/npulse-cv/Desktop/npulse-cv/graspnet-baseline/utils")
+sys.path.insert(0, "/home/npulse-cv/Desktop/npulse-cv/graspnet-baseline/dataset")
 
 import numpy as np
 import open3d as o3d

@@ -10,9 +10,7 @@ import os
 import sys
 import time
 
-GRASPNET_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "../graspnet-baseline")
-GRASPNET_ROOT = os.path.normpath(GRASPNET_ROOT)
+GRASPNET_ROOT = "/home/npulse-cv/Desktop/npulse-cv/graspnet-baseline"
 
 sys.path.insert(0, GRASPNET_ROOT)
 sys.path.insert(0, os.path.join(GRASPNET_ROOT, "models"))
@@ -26,7 +24,7 @@ import torch
 from sklearn.cluster import DBSCAN
 
 from graspnetAPI import GraspGroup
-from models.graspnet import GraspNet, pred_decode
+from graspnet import GraspNet, pred_decode
 from collision_detector import ModelFreeCollisionDetector
 
 from object_isolation import ObjectIsolator

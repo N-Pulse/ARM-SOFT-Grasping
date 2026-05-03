@@ -6,13 +6,15 @@ Drop-in replacement for grasp_pipeline.py using graspnet-baseline instead of
 DexGraspNet2. Outputs 6-DoF parallel-jaw grasps (no finger joints).
 """
 
+import os
 import sys
 import time
 
-sys.path.insert(0, "/home/npulse-cv/Desktop/npulse-cv/graspnet-baseline")
-sys.path.insert(0, "/home/npulse-cv/Desktop/npulse-cv/graspnet-baseline/models")
-sys.path.insert(0, "/home/npulse-cv/Desktop/npulse-cv/graspnet-baseline/utils")
-sys.path.insert(0, "/home/npulse-cv/Desktop/npulse-cv/graspnet-baseline/dataset")
+_GRASPNET = os.path.expanduser("~/Desktop/npulse-cv/graspnet-baseline")
+sys.path.insert(0, _GRASPNET)
+sys.path.insert(0, os.path.join(_GRASPNET, "models"))
+sys.path.insert(0, os.path.join(_GRASPNET, "utils"))
+sys.path.insert(0, os.path.join(_GRASPNET, "dataset"))
 
 import numpy as np
 import open3d as o3d

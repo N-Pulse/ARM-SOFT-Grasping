@@ -10,11 +10,15 @@ import os
 import sys
 import time
 
-_GRASPNET = os.path.expanduser("~/Desktop/npulse-cv/graspnet-baseline")
-sys.path.insert(0, _GRASPNET)
-sys.path.insert(0, os.path.join(_GRASPNET, "models"))
-sys.path.insert(0, os.path.join(_GRASPNET, "utils"))
-sys.path.insert(0, os.path.join(_GRASPNET, "dataset"))
+GRASPNET_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "../graspnet-baseline")
+GRASPNET_ROOT = os.path.normpath(GRASPNET_ROOT)
+
+sys.path.insert(0, GRASPNET_ROOT)
+sys.path.insert(0, os.path.join(GRASPNET_ROOT, "models"))
+sys.path.insert(0, os.path.join(GRASPNET_ROOT, "dataset"))
+sys.path.insert(0, os.path.join(GRASPNET_ROOT, "utils"))
+sys.path.insert(0, os.path.join(GRASPNET_ROOT, "pointnet2"))
 
 import numpy as np
 import open3d as o3d

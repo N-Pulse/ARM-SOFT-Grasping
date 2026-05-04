@@ -329,20 +329,22 @@ def live_loop(model, device="cuda", run_execute=False):
                 v      = np.clip((texcoords[:, 1] * h).astype(int), 0, h - 1)
                 colors = bgr[v, u, ::-1] / 255.0
 
+                # isolate target object; grey out background in full-scene colours
                 if target_mask is not None:
-                    u_f = np.clip((texcoords[:, 0] * w).astype(int), 0, w - 1)
-                    v_f = np.clip((texcoords[:, 1] * h).astype(int), 0, h - 1)
-                    inside     = target_mask[v_f, u_f]
+                    inside     = target_mask[v, u]
                     obj_verts  = verts[inside]
                     obj_colors = colors[inside]
+                    preview_colors        = np.full_like(colors, 0.35)   # grey bg
+                    preview_colors[inside] = colors[inside]              # real colour on target
                 else:
-                    obj_verts, obj_colors = verts, colors
+                    obj_verts, obj_colors  = np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32)
+                    preview_colors         = colors
 
                 try:
                     frame_queue.get_nowait()
                 except queue.Empty:
                     pass
-                frame_queue.put((obj_verts, obj_colors, preview))
+                frame_queue.put((verts, preview_colors, obj_verts, obj_colors, preview))
         finally:
             pipeline.stop()
 
@@ -379,23 +381,26 @@ def live_loop(model, device="cuda", run_execute=False):
     try:
         while True:
             try:
-                obj_verts, obj_colors, preview = frame_queue.get_nowait()
+                full_verts, full_colors, obj_verts, obj_colors, preview = frame_queue.get_nowait()
 
                 cv2.imshow("Camera feed (YOLO — target in green)", preview)
                 cv2.waitKey(1)
 
+                # update live 3D preview — full scene, target in colour, bg grey
+                pcd.points = o3d.utility.Vector3dVector(full_verts)
+                pcd.colors = o3d.utility.Vector3dVector(full_colors)
+                if not geom_added:
+                    vis.add_geometry(pcd)
+                    geom_added = True
+                else:
+                    vis.update_geometry(pcd)
+
+                # keep isolated object for inference
                 if len(obj_verts) > 0:
-                    new_pcd = o3d.geometry.PointCloud()
-                    new_pcd.points = o3d.utility.Vector3dVector(obj_verts)
-                    new_pcd.colors = o3d.utility.Vector3dVector(obj_colors)
-                    latest["pcd"] = new_pcd
-                    pcd.points    = new_pcd.points
-                    pcd.colors    = new_pcd.colors
-                    if not geom_added:
-                        vis.add_geometry(pcd)
-                        geom_added = True
-                    else:
-                        vis.update_geometry(pcd)
+                    iso = o3d.geometry.PointCloud()
+                    iso.points = o3d.utility.Vector3dVector(obj_verts)
+                    iso.colors = o3d.utility.Vector3dVector(obj_colors)
+                    latest["pcd"] = iso
             except queue.Empty:
                 pass
 

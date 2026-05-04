@@ -376,6 +376,9 @@ def live_loop(model, device="cuda", run_execute=False):
     grasp_geoms = []
 
     def on_grasp(_vis):
+        if model is None:
+            print("[grasp] no checkpoint loaded — pass --checkpoint to enable inference")
+            return False
         for g in grasp_geoms:
             _vis.remove_geometry(g, reset_bounding_box=False)
         grasp_geoms.clear()
@@ -401,13 +404,20 @@ def live_loop(model, device="cuda", run_execute=False):
                 cv2.waitKey(1)
 
                 # update live 3D preview — full scene, target in colour, bg grey
-                pcd.points = o3d.utility.Vector3dVector(full_verts)
-                pcd.colors = o3d.utility.Vector3dVector(full_colors)
-                if not geom_added:
-                    vis.add_geometry(pcd)
-                    geom_added = True
-                else:
-                    vis.update_geometry(pcd)
+                if len(full_verts) > 0:
+                    pcd.points = o3d.utility.Vector3dVector(full_verts)
+                    pcd.colors = o3d.utility.Vector3dVector(full_colors)
+                    if not geom_added:
+                        vis.add_geometry(pcd)
+                        ctr = vis.get_view_control()
+                        ctr.set_lookat([0, 0, 0.4])
+                        ctr.set_front([0, 0, -1])
+                        ctr.set_up([0, -1, 0])
+                        ctr.set_zoom(0.5)
+                        geom_added = True
+                        print("[live] first frame received — point cloud visible")
+                    else:
+                        vis.update_geometry(pcd)
 
                 # keep isolated object for inference
                 if len(obj_verts) > 0:
@@ -431,12 +441,17 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=True,
-                        help="Path to GraspNet-baseline checkpoint (.tar)")
+    parser.add_argument("--checkpoint", default=None,
+                        help="Path to GraspNet-baseline checkpoint (.tar). "
+                             "Omit to run live preview only (G key disabled).")
     parser.add_argument("--device",   default="cuda")
     parser.add_argument("--execute", action="store_true",
                         help="Actually send commands to the robot")
     args = parser.parse_args()
 
-    model = load_model(args.checkpoint, device=args.device)
+    if args.checkpoint:
+        model = load_model(args.checkpoint, device=args.device)
+    else:
+        print("[warn] no checkpoint provided — live preview only, G key disabled")
+        model = None
     live_loop(model, device=args.device, run_execute=args.execute)

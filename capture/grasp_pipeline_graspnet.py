@@ -265,6 +265,7 @@ def live_loop(model, device="cuda", run_execute=False):
         yolo.fuse()
 
         try:
+            print("[capture] camera pipeline started, loading YOLO...")
             while not stop_event.is_set():
                 frames   = pipeline.wait_for_frames()
                 aligned  = align.process(frames)
@@ -345,11 +346,24 @@ def live_loop(model, device="cuda", run_execute=False):
                 except queue.Empty:
                     pass
                 frame_queue.put((verts, preview_colors, obj_verts, obj_colors, preview))
+        except Exception as exc:
+            print(f"[capture] FATAL ERROR in capture thread: {exc}")
+            import traceback; traceback.print_exc()
         finally:
             pipeline.stop()
 
     t = threading.Thread(target=capture_loop, daemon=True)
     t.start()
+    print("[capture] background thread started — waiting for first frame...")
+
+    # ── cv2 preview window — show immediately so user knows it's running ──────
+    CV2_WIN = "Camera feed (YOLO — target in green)"
+    cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
+    placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.putText(placeholder, "Waiting for camera...", (120, 240),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
+    cv2.imshow(CV2_WIN, placeholder)
+    cv2.waitKey(1)
 
     # ── Open3D visualiser (main thread) ───────────────────────────────────────
     vis = o3d.visualization.VisualizerWithKeyCallback()
@@ -383,7 +397,7 @@ def live_loop(model, device="cuda", run_execute=False):
             try:
                 full_verts, full_colors, obj_verts, obj_colors, preview = frame_queue.get_nowait()
 
-                cv2.imshow("Camera feed (YOLO — target in green)", preview)
+                cv2.imshow(CV2_WIN, preview)
                 cv2.waitKey(1)
 
                 # update live 3D preview — full scene, target in colour, bg grey

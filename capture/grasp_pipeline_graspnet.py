@@ -18,16 +18,20 @@ sys.path.insert(0, os.path.join(GRASPNET_ROOT, "dataset"))
 sys.path.insert(0, os.path.join(GRASPNET_ROOT, "utils"))
 sys.path.insert(0, os.path.join(GRASPNET_ROOT, "pointnet2"))
 
+import queue
+import threading
+
+import cv2
 import numpy as np
 import open3d as o3d
+import pyrealsense2 as rs
 import torch
 from sklearn.cluster import DBSCAN
+from ultralytics import YOLO
 
 from graspnetAPI import GraspGroup
 from graspnet import GraspNet, pred_decode
 from collision_detector import ModelFreeCollisionDetector
-
-from object_isolation import ObjectIsolator
 
 
 NUM_POINT = 20000   # points sampled from the cloud before feeding the model
@@ -226,24 +230,139 @@ def _run_grasp_inference(latest_pcd, model, device, run_execute):
 
 
 def live_loop(model, device="cuda", run_execute=False):
-    isolator = ObjectIsolator()
-    isolator.start()
+    MIN_DEPTH  = 0.07
+    MAX_DEPTH  = 0.70
+    YOLO_MODEL = "yolo11n-seg.pt"
+    YOLO_CONF  = 0.35
+    YOLO_IOU   = 0.45
+    IMG_CENTER = np.array([320.0, 240.0])
 
+    frame_queue = queue.Queue(maxsize=1)
+    stop_event  = threading.Event()
+
+    # ── background capture + YOLO thread ──────────────────────────────────────
+    def capture_loop():
+        # RealSense setup (mirrors pointcloud_open3d.py)
+        pipeline = rs.pipeline()
+        cfg      = rs.config()
+        cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16,  30)
+        cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        profile      = pipeline.start(cfg)
+        depth_sensor = profile.get_device().first_depth_sensor()
+        depth_sensor.set_option(rs.option.visual_preset, 4)
+
+        align    = rs.align(rs.stream.color)
+        spatial  = rs.spatial_filter()
+        temporal = rs.temporal_filter()
+        holes    = rs.hole_filling_filter()
+        spatial.set_option(rs.option.filter_smooth_alpha,  0.5)
+        spatial.set_option(rs.option.filter_smooth_delta,  20)
+        temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
+        temporal.set_option(rs.option.filter_smooth_delta, 20)
+        pc_util = rs.pointcloud()
+
+        yolo = YOLO(YOLO_MODEL)
+        yolo.fuse()
+
+        try:
+            while not stop_event.is_set():
+                frames   = pipeline.wait_for_frames()
+                aligned  = align.process(frames)
+                depth_fr = aligned.get_depth_frame()
+                color_fr = aligned.get_color_frame()
+                if not depth_fr or not color_fr:
+                    continue
+
+                depth_fr = spatial.process(depth_fr)
+                depth_fr = temporal.process(depth_fr)
+                depth_fr = holes.process(depth_fr)
+
+                bgr = np.asanyarray(color_fr.get_data())
+
+                # ── YOLO segmentation ──────────────────────────────────────
+                results    = yolo.predict(source=bgr, conf=YOLO_CONF,
+                                          iou=YOLO_IOU, verbose=False)
+                detections = []
+                for r in results:
+                    if r.masks is None:
+                        continue
+                    for mask_t, box in zip(r.masks.data, r.boxes.xyxy):
+                        m = cv2.resize(mask_t.cpu().numpy(),
+                                       (bgr.shape[1], bgr.shape[0]),
+                                       interpolation=cv2.INTER_NEAREST).astype(bool)
+                        detections.append((m, box.cpu().numpy().astype(int)))
+
+                # pick the object whose bbox centre is closest to image centre
+                target_mask, target_box = None, None
+                best_dist = float("inf")
+                for mask, box in detections:
+                    cx = (box[0] + box[2]) / 2
+                    cy = (box[1] + box[3]) / 2
+                    d  = np.linalg.norm(np.array([cx, cy]) - IMG_CENTER)
+                    if d < best_dist:
+                        best_dist, target_mask, target_box = d, mask, box
+
+                # ── annotate 2D preview ────────────────────────────────────
+                preview = bgr.copy()
+                if target_mask is not None:
+                    overlay = np.zeros_like(preview)
+                    overlay[target_mask] = (0, 255, 0)
+                    preview = cv2.addWeighted(preview, 0.7, overlay, 0.3, 0)
+                    x1, y1, x2, y2 = target_box
+                    cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(preview, "target", (x1, y1 - 6),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+                # ── build full-scene PCD then mask to object ───────────────
+                pc_util.map_to(color_fr)
+                pts_rs    = pc_util.calculate(depth_fr)
+                verts     = np.asanyarray(pts_rs.get_vertices()).view(np.float32).reshape(-1, 3)
+                texcoords = np.asanyarray(pts_rs.get_texture_coordinates()).view(np.float32).reshape(-1, 2)
+
+                depth_vals = np.linalg.norm(verts, axis=1)
+                valid      = (depth_vals > MIN_DEPTH) & (depth_vals < MAX_DEPTH)
+                verts      = verts[valid]
+                texcoords  = texcoords[valid]
+
+                h, w   = bgr.shape[:2]
+                u      = np.clip((texcoords[:, 0] * w).astype(int), 0, w - 1)
+                v      = np.clip((texcoords[:, 1] * h).astype(int), 0, h - 1)
+                colors = bgr[v, u, ::-1] / 255.0
+
+                if target_mask is not None:
+                    u_f = np.clip((texcoords[:, 0] * w).astype(int), 0, w - 1)
+                    v_f = np.clip((texcoords[:, 1] * h).astype(int), 0, h - 1)
+                    inside     = target_mask[v_f, u_f]
+                    obj_verts  = verts[inside]
+                    obj_colors = colors[inside]
+                else:
+                    obj_verts, obj_colors = verts, colors
+
+                try:
+                    frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                frame_queue.put((obj_verts, obj_colors, preview))
+        finally:
+            pipeline.stop()
+
+    t = threading.Thread(target=capture_loop, daemon=True)
+    t.start()
+
+    # ── Open3D visualiser (main thread) ───────────────────────────────────────
     vis = o3d.visualization.VisualizerWithKeyCallback()
     vis.create_window("N-Pulse — isolated object (press G to grasp, Q to quit)",
                       width=1280, height=720)
 
-    pcd          = o3d.geometry.PointCloud()
-    geom_added   = False
-    latest       = {"pcd": None}   # mutable box so the key callback can read it
-    grasp_geoms  = []              # currently displayed grasp geometries
+    pcd         = o3d.geometry.PointCloud()
+    geom_added  = False
+    latest      = {"pcd": None}
+    grasp_geoms = []
 
-    # ── key callbacks ─────────────────────────────────────────────────────────
     def on_grasp(_vis):
         for g in grasp_geoms:
             _vis.remove_geometry(g, reset_bounding_box=False)
         grasp_geoms.clear()
-
         new_geoms = _run_grasp_inference(latest["pcd"], model, device, run_execute)
         for g in new_geoms:
             _vis.add_geometry(g, reset_bounding_box=False)
@@ -259,22 +378,33 @@ def live_loop(model, device="cuda", run_execute=False):
 
     try:
         while True:
-            new_pcd = isolator.get_pcd()
-            if new_pcd is not None:
-                latest["pcd"] = new_pcd
-                pcd.points = new_pcd.points
-                pcd.colors = new_pcd.colors
-                if not geom_added:
-                    vis.add_geometry(pcd)
-                    geom_added = True
-                else:
-                    vis.update_geometry(pcd)
+            try:
+                obj_verts, obj_colors, preview = frame_queue.get_nowait()
+
+                cv2.imshow("Camera feed (YOLO — target in green)", preview)
+                cv2.waitKey(1)
+
+                if len(obj_verts) > 0:
+                    new_pcd = o3d.geometry.PointCloud()
+                    new_pcd.points = o3d.utility.Vector3dVector(obj_verts)
+                    new_pcd.colors = o3d.utility.Vector3dVector(obj_colors)
+                    latest["pcd"] = new_pcd
+                    pcd.points    = new_pcd.points
+                    pcd.colors    = new_pcd.colors
+                    if not geom_added:
+                        vis.add_geometry(pcd)
+                        geom_added = True
+                    else:
+                        vis.update_geometry(pcd)
+            except queue.Empty:
+                pass
 
             if not vis.poll_events():
                 break
             vis.update_renderer()
     finally:
-        isolator.stop()
+        stop_event.set()
+        cv2.destroyAllWindows()
         vis.destroy_window()
 
 

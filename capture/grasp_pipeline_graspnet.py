@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(GRASPNET_ROOT, "pointnet2"))
 
 import numpy as np
 import open3d as o3d
+import pyrealsense2 as rs
 import torch
 from sklearn.cluster import DBSCAN
 
@@ -30,7 +31,75 @@ from collision_detector import ModelFreeCollisionDetector
 from object_isolation import ObjectIsolator
 
 
-NUM_POINT = 20000   # points sampled from the cloud before feeding the model
+NUM_POINT  = 20000   # points sampled from the cloud before feeding the model
+MIN_DEPTH  = 0.07    # metres — D405 close-range minimum
+MAX_DEPTH  = 0.70
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RealSense point cloud capture (no YOLO — full scene)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def capture_snapshot(n_warmup: int = 30) -> o3d.geometry.PointCloud:
+    """
+    Capture one depth+colour frame from the D405 and return a full-scene PCD.
+    Runs n_warmup frames first so auto-exposure and temporal filters stabilise.
+    """
+    pipeline = rs.pipeline()
+    cfg      = rs.config()
+    cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16,  30)
+    cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+
+    profile      = pipeline.start(cfg)
+    depth_sensor = profile.get_device().first_depth_sensor()
+    depth_sensor.set_option(rs.option.visual_preset, 4)
+
+    align    = rs.align(rs.stream.color)
+    spatial  = rs.spatial_filter()
+    temporal = rs.temporal_filter()
+    holes    = rs.hole_filling_filter()
+    spatial.set_option(rs.option.filter_smooth_alpha,  0.5)
+    spatial.set_option(rs.option.filter_smooth_delta,  20)
+    temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
+    temporal.set_option(rs.option.filter_smooth_delta, 20)
+    pc_util  = rs.pointcloud()
+
+    try:
+        for _ in range(n_warmup):
+            pipeline.wait_for_frames()
+
+        frames     = pipeline.wait_for_frames()
+        aligned    = align.process(frames)
+        depth_fr   = aligned.get_depth_frame()
+        color_fr   = aligned.get_color_frame()
+
+        depth_fr = spatial.process(depth_fr)
+        depth_fr = temporal.process(depth_fr)
+        depth_fr = holes.process(depth_fr)
+
+        pc_util.map_to(color_fr)
+        points_rs = pc_util.calculate(depth_fr)
+
+        verts     = np.asanyarray(points_rs.get_vertices()).view(np.float32).reshape(-1, 3)
+        texcoords = np.asanyarray(points_rs.get_texture_coordinates()).view(np.float32).reshape(-1, 2)
+
+        depth_vals = np.linalg.norm(verts, axis=1)
+        valid      = (depth_vals > MIN_DEPTH) & (depth_vals < MAX_DEPTH)
+        verts      = verts[valid]
+        texcoords  = texcoords[valid]
+
+        bgr = np.asanyarray(color_fr.get_data())
+        h, w = bgr.shape[:2]
+        u = np.clip((texcoords[:, 0] * w).astype(int), 0, w - 1)
+        v = np.clip((texcoords[:, 1] * h).astype(int), 0, h - 1)
+        colors = bgr[v, u, ::-1] / 255.0
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(verts)
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+        return pcd
+    finally:
+        pipeline.stop()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -256,10 +325,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True,
                         help="Path to GraspNet-baseline checkpoint (.tar)")
-    parser.add_argument("--device",    default="cuda")
-    parser.add_argument("--execute",   action="store_true",
+    parser.add_argument("--device",   default="cuda")
+    parser.add_argument("--execute",  action="store_true",
                         help="Actually send commands to the robot")
+    parser.add_argument("--snapshot", action="store_true",
+                        help="Capture one frame from D405, run inference, then exit")
+    parser.add_argument("--warmup",   type=int, default=30,
+                        help="Warm-up frames for snapshot mode (default 30)")
     args = parser.parse_args()
 
     model = load_model(args.checkpoint, device=args.device)
-    live_loop(model, device=args.device, run_execute=args.execute)
+
+    if args.snapshot:
+        print("[capture] capturing snapshot from D405...")
+        pcd = capture_snapshot(n_warmup=args.warmup)
+        print(f"[capture] {len(pcd.points)} points captured")
+        _run_grasp_inference(pcd, model, args.device, args.execute)
+    else:
+        live_loop(model, device=args.device, run_execute=args.execute)

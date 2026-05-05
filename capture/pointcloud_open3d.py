@@ -28,10 +28,11 @@ class PointcloudViewer:
 
     def update(self, pcd: o3d.geometry.PointCloud):
         """Push a new pointcloud to the viewer."""
-        if len(pcd.points) == 0:
+        pts = np.asarray(pcd.points)
+        if len(pts) == 0:
             return
-        self._pcd.points = pcd.points
-        self._pcd.colors = pcd.colors
+        self._pcd.points = o3d.utility.Vector3dVector(pts)
+        self._pcd.colors = o3d.utility.Vector3dVector(np.asarray(pcd.colors))
         if not self._geom_added:
             self.vis.add_geometry(self._pcd)
             ctr = self.vis.get_view_control()

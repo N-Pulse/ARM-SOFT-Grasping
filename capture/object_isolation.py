@@ -195,10 +195,21 @@ class ObjectIsolator:
     # ── Background loop ───────────────────────────────────────────────────────
 
     def _loop(self):
-        pipeline, align, spatial, temporal, holes, pc_util = _build_pipeline()
-        model = YOLO(YOLO_MODEL)
-        model.fuse()
+        try:
+            pipeline, align, spatial, temporal, holes, pc_util = _build_pipeline()
+        except Exception as exc:
+            print(f"[ObjectIsolator] FATAL: could not start RealSense pipeline: {exc}")
+            return
 
+        try:
+            model = YOLO(YOLO_MODEL)
+            model.fuse()
+        except Exception as exc:
+            print(f"[ObjectIsolator] FATAL: could not load YOLO model '{YOLO_MODEL}': {exc}")
+            pipeline.stop()
+            return
+
+        print("[ObjectIsolator] camera + YOLO ready, streaming frames...")
         try:
             while not self._stop_event.is_set():
                 frames   = pipeline.wait_for_frames()
@@ -268,5 +279,9 @@ class ObjectIsolator:
                     pass
                 self._frame_queue.put((verts, full_colors, obj_verts, obj_colors, preview_bgr))
 
+        except Exception as exc:
+            import traceback
+            print(f"[ObjectIsolator] FATAL: exception in capture loop: {exc}")
+            traceback.print_exc()
         finally:
             pipeline.stop()

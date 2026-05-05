@@ -209,7 +209,9 @@ class ObjectIsolator:
             pipeline.stop()
             return
 
+        import time as _time
         print("[ObjectIsolator] camera + YOLO ready, streaming frames...")
+        _last_log = 0.0
         try:
             while not self._stop_event.is_set():
                 frames   = pipeline.wait_for_frames()
@@ -272,6 +274,14 @@ class ObjectIsolator:
                 else:
                     obj_verts  = np.zeros((0, 3), np.float32)
                     obj_colors = np.zeros((0, 3), np.float32)
+
+                now = _time.monotonic()
+                if now - _last_log >= 1.0:
+                    print(f"[ObjectIsolator] scene pts: {len(verts)}  "
+                          f"obj pts: {len(obj_verts)}  "
+                          f"detections: {len(detections)}  "
+                          f"target: {'yes' if target_mask is not None else 'no'}")
+                    _last_log = now
 
                 try:
                     self._frame_queue.get_nowait()

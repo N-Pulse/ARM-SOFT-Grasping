@@ -30,6 +30,7 @@ from collision_detector import ModelFreeCollisionDetector
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from object_isolation import ObjectIsolator
+from pointcloud_open3d import PointcloudViewer
 
 
 NUM_POINT = 20000   # points sampled from the cloud before feeding the model
@@ -244,13 +245,8 @@ def live_loop(model, device="cuda", run_execute=False):
     cv2.imshow(CV2_WIN, placeholder)
     cv2.waitKey(1)
 
-    # ── Open3D visualiser (main thread) ───────────────────────────────────────
-    vis = o3d.visualization.VisualizerWithKeyCallback()
-    vis.create_window("N-Pulse — live pointcloud (press G to grasp, Q to quit)",
-                      width=1280, height=720)
-
-    pcd         = o3d.geometry.PointCloud()
-    geom_added  = False
+    # ── Open3D viewer (main thread) ───────────────────────────────────────────
+    viewer      = PointcloudViewer("N-Pulse — live pointcloud (press G to grasp, Q to quit)")
     latest      = {"pcd": None}   # latest isolated object, updated every frame
     grasp_geoms = []
 
@@ -271,8 +267,8 @@ def live_loop(model, device="cuda", run_execute=False):
         _vis.close()
         return False
 
-    vis.register_key_callback(ord("G"), on_grasp)
-    vis.register_key_callback(ord("Q"), on_quit)
+    viewer.register_key(ord("G"), on_grasp)
+    viewer.register_key(ord("Q"), on_quit)
 
     try:
         while True:
@@ -283,33 +279,17 @@ def live_loop(model, device="cuda", run_execute=False):
                 cv2.imshow(CV2_WIN, preview_bgr)
                 cv2.waitKey(1)
 
-                # Update live 3D view — full scene, target in colour, bg grey
-                if len(full_pcd.points) > 0:
-                    pcd.points = full_pcd.points
-                    pcd.colors = full_pcd.colors
-                    if not geom_added:
-                        vis.add_geometry(pcd)
-                        ctr = vis.get_view_control()
-                        ctr.set_lookat([0, 0, 0.4])
-                        ctr.set_front([0, 0, -1])
-                        ctr.set_up([0, -1, 0])
-                        ctr.set_zoom(0.5)
-                        geom_added = True
-                        print("[live] first frame received — point cloud visible")
-                    else:
-                        vis.update_geometry(pcd)
+                viewer.update(full_pcd)
 
-                # Cache isolated object for G-key inference
                 if iso_pcd is not None:
                     latest["pcd"] = iso_pcd
 
-            if not vis.poll_events():
+            if not viewer.tick():
                 break
-            vis.update_renderer()
     finally:
         isolator.stop()
         cv2.destroyAllWindows()
-        vis.destroy_window()
+        viewer.destroy()
 
 
 if __name__ == "__main__":

@@ -1,132 +1,141 @@
-import pyrealsense2 as rs
+import queue
+import threading
+
 import numpy as np
 import open3d as o3d
-import threading
-import queue
+import pyrealsense2 as rs
 
-# Configure streams
-pipeline = rs.pipeline()
-config = rs.config()
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
 
-pc = rs.pointcloud()  # realsense utility that computes pointclouds from depth frames
-align = rs.align(rs.stream.color)
-
-profile = pipeline.start(config)
-
-# Depth sensor settings — reduce noise
-depth_sensor = profile.get_device().first_depth_sensor()
-depth_sensor.set_option(rs.option.visual_preset, 4)
-
-decimation    = rs.decimation_filter()
-depth_to_disp = rs.disparity_transform(True)
-spatial       = rs.spatial_filter()
-temporal      = rs.temporal_filter()
-disp_to_depth = rs.disparity_transform(False)
-hole_filling  = rs.hole_filling_filter()
-
-# Tune
-decimation.set_option(rs.option.filter_magnitude, 2)
-spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
-spatial.set_option(rs.option.filter_smooth_delta, 20)
-temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
-temporal.set_option(rs.option.filter_smooth_delta, 20)
-
-# Depth range clamp (meters) — D405 is optimized for close range (~7cm–50cm)
 MIN_DEPTH = 0.07
 MAX_DEPTH = 0.70
 
-# maxsize=1: renderer always gets the latest frame, stale frames are dropped
-frame_queue = queue.Queue(maxsize=1)
-stop_event = threading.Event()
+
+class PointcloudViewer:
+    """
+    Open3D live pointcloud window.  Must be created and ticked on the main thread
+    (GLFW/OpenGL requirement).  Accepts key callbacks via register_key().
+    """
+
+    def __init__(self, title="RealSense Live Pointcloud", width=1280, height=720):
+        self.vis = o3d.visualization.VisualizerWithKeyCallback()
+        self.vis.create_window(title, width=width, height=height)
+        self._pcd        = o3d.geometry.PointCloud()
+        self._geom_added = False
+
+    def register_key(self, key: int, callback):
+        """Register an Open3D key callback (callback signature: fn(vis) -> bool)."""
+        self.vis.register_key_callback(key, callback)
+
+    def update(self, pcd: o3d.geometry.PointCloud):
+        """Push a new pointcloud to the viewer."""
+        if len(pcd.points) == 0:
+            return
+        self._pcd.points = pcd.points
+        self._pcd.colors = pcd.colors
+        if not self._geom_added:
+            self.vis.add_geometry(self._pcd)
+            ctr = self.vis.get_view_control()
+            ctr.set_lookat([0, 0, 0.4])
+            ctr.set_front([0, 0, -1])
+            ctr.set_up([0, -1, 0])
+            ctr.set_zoom(0.2)
+            self._geom_added = True
+            print("[viewer] first frame — pointcloud visible")
+        else:
+            self.vis.update_geometry(self._pcd)
+
+    def tick(self) -> bool:
+        """Process events and redraw.  Returns False when the window is closed."""
+        if not self.vis.poll_events():
+            return False
+        self.vis.update_renderer()
+        return True
+
+    def destroy(self):
+        self.vis.destroy_window()
 
 
-def capture_loop():
-    while not stop_event.is_set():
-        frames = pipeline.wait_for_frames()
-        aligned = align.process(frames)
+# ── Standalone entry point ────────────────────────────────────────────────────
 
-        depth_frame = aligned.get_depth_frame()
-        color_frame = aligned.get_color_frame()
-        if not depth_frame or not color_frame:
-            continue
+def _capture_loop(frame_queue: queue.Queue, stop_event: threading.Event):
+    pipeline = rs.pipeline()
+    cfg      = rs.config()
+    cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16,  30)
+    cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+    profile      = pipeline.start(cfg)
+    depth_sensor = profile.get_device().first_depth_sensor()
+    depth_sensor.set_option(rs.option.visual_preset, 4)
 
-        #depth_frame = decimation.process(depth_frame)
-        #depth_frame = depth_to_disp.process(depth_frame)
-        depth_frame = spatial.process(depth_frame)
-        depth_frame = temporal.process(depth_frame)
-        #depth_frame = disp_to_depth.process(depth_frame)
-        depth_frame = hole_filling.process(depth_frame)
+    align    = rs.align(rs.stream.color)
+    spatial  = rs.spatial_filter()
+    temporal = rs.temporal_filter()
+    holes    = rs.hole_filling_filter()
+    spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
+    spatial.set_option(rs.option.filter_smooth_delta, 20)
+    temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
+    temporal.set_option(rs.option.filter_smooth_delta, 20)
+    pc_util = rs.pointcloud()
 
-        # Generate point cloud with color texture
-        pc.map_to(color_frame)
-        points = pc.calculate(depth_frame)
+    try:
+        while not stop_event.is_set():
+            frames    = pipeline.wait_for_frames()
+            aligned   = align.process(frames)
+            depth_fr  = aligned.get_depth_frame()
+            color_fr  = aligned.get_color_frame()
+            if not depth_fr or not color_fr:
+                continue
 
-        verts = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
-        texcoords = np.asanyarray(points.get_texture_coordinates()).view(np.float32).reshape(-1, 2)
+            depth_fr = spatial.process(depth_fr)
+            depth_fr = temporal.process(depth_fr)
+            depth_fr = holes.process(depth_fr)
 
-        # Remove invalid (zero) points and clamp to depth range
-        depth = np.linalg.norm(verts, axis=1)
-        mask = (depth > MIN_DEPTH) & (depth < MAX_DEPTH)
-        verts = verts[mask]
-        texcoords = texcoords[mask]
+            pc_util.map_to(color_fr)
+            points    = pc_util.calculate(depth_fr)
+            verts     = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
+            texcoords = np.asanyarray(points.get_texture_coordinates()).view(np.float32).reshape(-1, 2)
 
-        # Sample colors from the color frame
-        color_image = np.asanyarray(color_frame.get_data())  # BGR, HxW
-        h, w = color_image.shape[:2]
-        u = np.clip((texcoords[:, 0] * w).astype(int), 0, w - 1)
-        v = np.clip((texcoords[:, 1] * h).astype(int), 0, h - 1)
-        colors = color_image[v, u, ::-1] / 255.0  # BGR→RGB, normalize
+            depth  = np.linalg.norm(verts, axis=1)
+            valid  = (depth > MIN_DEPTH) & (depth < MAX_DEPTH)
+            verts     = verts[valid]
+            texcoords = texcoords[valid]
 
-        # Drop stale frame if renderer hasn't consumed it yet, then push latest
-        try:
-            frame_queue.get_nowait()
-        except queue.Empty:
-            pass
-        frame_queue.put((verts, colors))
+            bgr  = np.asanyarray(color_fr.get_data())
+            h, w = bgr.shape[:2]
+            u    = np.clip((texcoords[:, 0] * w).astype(int), 0, w - 1)
+            v    = np.clip((texcoords[:, 1] * h).astype(int), 0, h - 1)
+            colors = bgr[v, u, ::-1] / 255.0
 
-
-# Start capture+processing on a background thread
-t = threading.Thread(target=capture_loop, daemon=True)
-t.start()
-
-# Open3D visualizer — must stay on main thread (GLFW/OpenGL requirement)
-vis = o3d.visualization.Visualizer()
-vis.create_window("RealSense Live Pointcloud", width=1280, height=720)
-pcd = o3d.geometry.PointCloud()
-geom_added = False
-
-print("Streaming pointcloud... Close the window or press Ctrl+C to stop.")
-
-try:
-    while True:
-        try:
-            verts, colors = frame_queue.get(timeout=0.1)
+            pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(verts)
             pcd.colors = o3d.utility.Vector3dVector(colors)
 
-            if not geom_added:
-                vis.add_geometry(pcd)
+            try:
+                frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+            frame_queue.put(pcd)
+    finally:
+        pipeline.stop()
 
-                # Set a fixed viewpoint once — don't call reset_view_point again
-                ctr = vis.get_view_control()
-                ctr.set_lookat([0, 0, 0.4])   # look at ~40cm in front of camera
-                ctr.set_front([0, 0, -1])      # camera looks in -Z direction
-                ctr.set_up([0, -1, 0])         # Y is up (flipped for RealSense convention)
-                ctr.set_zoom(0.2)              # tweak to taste
 
-                geom_added = True
-            else:
-                vis.update_geometry(pcd)
-        except queue.Empty:
-            pass  # no new frame yet — keep the render loop alive
+if __name__ == "__main__":
+    frame_queue = queue.Queue(maxsize=1)
+    stop_event  = threading.Event()
 
-        if not vis.poll_events():
-            break
-        vis.update_renderer()
+    t = threading.Thread(target=_capture_loop, args=(frame_queue, stop_event), daemon=True)
+    t.start()
+    print("Streaming pointcloud... close the window or press Ctrl+C to stop.")
 
-finally:
-    stop_event.set()
-    pipeline.stop()
-    vis.destroy_window()
+    viewer = PointcloudViewer()
+    try:
+        while True:
+            try:
+                pcd = frame_queue.get(timeout=0.1)
+                viewer.update(pcd)
+            except queue.Empty:
+                pass
+            if not viewer.tick():
+                break
+    finally:
+        stop_event.set()
+        viewer.destroy()

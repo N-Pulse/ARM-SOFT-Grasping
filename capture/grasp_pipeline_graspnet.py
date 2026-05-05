@@ -232,6 +232,7 @@ def live_loop(model, device="cuda", run_execute=False):
     # ObjectIsolator handles camera + YOLO on its own background thread.
     # It applies the same central-object selection criteria as the isolation
     # algorithm, so pressing G always grasps the same object shown in the preview.
+    # create pointcloud object here?
     isolator = ObjectIsolator()
     isolator.start()
     print("[capture] background thread started — waiting for first frame...")

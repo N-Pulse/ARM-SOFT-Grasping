@@ -45,8 +45,24 @@ FPS              = 30
 MIN_DEPTH_M      = 0.07
 MAX_DEPTH_M      = 0.70
 
-_PT_MODEL        = "yolo11n-seg.pt"
-_ENGINE_MODEL    = "yolo11n-seg.engine"
+# Resolve model paths relative to this file so YOLO doesn't fall back to
+# downloading the weights when the script is launched from a different cwd.
+_THIS_DIR        = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT    = os.path.dirname(_THIS_DIR)
+
+
+def _find_model(filename: str) -> str:
+    """Search for `filename` next to this script, in the project root, and cwd."""
+    for base in (_THIS_DIR, _PROJECT_ROOT, os.getcwd()):
+        candidate = os.path.join(base, filename)
+        if os.path.exists(candidate):
+            return candidate
+    # Fall back to the bare filename (lets ultralytics download/resolve it).
+    return filename
+
+
+_PT_MODEL        = _find_model("yolo11n-seg.pt")
+_ENGINE_MODEL    = _find_model("yolo11n-seg.engine")
 YOLO_MODEL       = _ENGINE_MODEL if os.path.exists(_ENGINE_MODEL) else _PT_MODEL
 
 YOLO_CONF        = 0.35

@@ -1,14 +1,12 @@
 """
-GraspNet-baseline inference → cluster & select → execute.
-Live D405 viewer on the main thread; press G to run grasp inference.
-
-Drop-in replacement for grasp_pipeline.py using graspnet-baseline instead of
-DexGraspNet2. Outputs 6-DoF parallel-jaw grasps (no finger joints).
+GraspNet-baseline inference — continuous, no key press needed.
+Grasp pose is projected and drawn directly onto the cv2 preview window.
 """
 
 import os
 import sys
 import time
+import threading
 
 GRASPNET_ROOT = "/home/npulse-cv/Desktop/npulse-cv/graspnet-baseline"
 
@@ -20,7 +18,6 @@ sys.path.insert(0, os.path.join(GRASPNET_ROOT, "pointnet2"))
 
 import cv2
 import numpy as np
-import open3d as o3d
 import torch
 from sklearn.cluster import DBSCAN
 
@@ -30,14 +27,16 @@ from collision_detector import ModelFreeCollisionDetector
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from object_isolation import ObjectIsolator
-from pointcloud_open3d import PointcloudViewer
-
 
 NUM_POINT = 20000
 
+# ── D405 intrinsics at 640x480 (replace with exact values if you have them) ──
+FX, FY = 460.0, 460.0
+CX, CY = 320.0, 240.0
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# GraspNet-baseline inference
+# GraspNet model
 # ──────────────────────────────────────────────────────────────────────────────
 
 def load_model(checkpoint_path: str, device: str = "cuda"):
@@ -58,10 +57,8 @@ def load_model(checkpoint_path: str, device: str = "cuda"):
 
 
 def _prepare_input(pcd, device):
-    pts    = np.asarray(pcd.points,  dtype=np.float32)
-    colors = np.asarray(pcd.colors,  dtype=np.float32)
-
-    n = len(pts)
+    pts = np.asarray(pcd.points, dtype=np.float32)
+    n   = len(pts)
     if n >= NUM_POINT:
         idxs = np.random.choice(n, NUM_POINT, replace=False)
     else:
@@ -69,22 +66,15 @@ def _prepare_input(pcd, device):
             np.arange(n),
             np.random.choice(n, NUM_POINT - n, replace=True),
         ])
-
-    pts_s    = pts[idxs]
-    colors_s = colors[idxs] if len(colors) == n else np.zeros((NUM_POINT, 3), dtype=np.float32)
-
-    end_points = {
-        "point_clouds": torch.from_numpy(pts_s[np.newaxis]).to(device),
-        "cloud_colors": torch.from_numpy(colors_s[np.newaxis]).to(device),
-    }
-    return end_points
+    pts_s = pts[idxs]
+    return {"point_clouds": torch.from_numpy(pts_s[np.newaxis]).to(device)}
 
 
 def infer(model, pcd, device="cuda", collision_thresh=0.01):
     end_points = _prepare_input(pcd, device)
     with torch.no_grad():
-        end_points   = model(end_points)
-        grasp_preds  = pred_decode(end_points)
+        end_points  = model(end_points)
+        grasp_preds = pred_decode(end_points)
 
     gg = GraspGroup(grasp_preds[0].detach().cpu().numpy())
 
@@ -95,29 +85,24 @@ def infer(model, pcd, device="cuda", collision_thresh=0.01):
     gg = gg[~collision_mask]
 
     if len(gg) == 0:
-        return (np.zeros((0, 3)), np.zeros((0, 3, 3)),
-                np.zeros((0,)),   np.zeros((0,)))
+        return np.zeros((0, 3)), np.zeros((0, 3, 3)), np.zeros((0,)), np.zeros((0,))
 
-    return (
-        gg.translations,
-        gg.rotation_matrices,
-        gg.scores,
-        gg.widths,
-    )
+    return gg.translations, gg.rotation_matrices, gg.scores, gg.widths
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Cluster + select
+# Cluster + select best grasp
 # ──────────────────────────────────────────────────────────────────────────────
 
-def cluster_and_select(trans, rot, scores, widths, tip_pos,
-                       eps=0.02, min_samples=3, proximity_w=0.3):
+def cluster_and_select(trans, rot, scores, widths,
+                       eps=0.02, min_samples=3):
     if len(trans) == 0:
         return None, None, None
 
-    labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(trans)
-    best_score, best_idx = -np.inf, None
+    tip_pos = trans[scores.argmax()]   # use highest-score grasp as proximity anchor
+    labels  = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(trans)
 
+    best_score, best_idx = -np.inf, None
     for label in set(labels):
         if label == -1:
             continue
@@ -129,7 +114,7 @@ def cluster_and_select(trans, rot, scores, widths, tip_pos,
         best_graspness  = cluster_scores.max()
         centroid        = cluster_trans.mean(axis=0)
         proximity_bonus = 1.0 / (1.0 + np.linalg.norm(centroid - tip_pos))
-        combined        = (1 - proximity_w) * best_graspness + proximity_w * proximity_bonus
+        combined        = 0.7 * best_graspness + 0.3 * proximity_bonus
 
         if combined > best_score:
             best_score = combined
@@ -141,173 +126,168 @@ def cluster_and_select(trans, rot, scores, widths, tip_pos,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Execute (placeholder — no robot yet)
+# Project 3-D grasp → cv2 overlay
 # ──────────────────────────────────────────────────────────────────────────────
 
-def execute(rot_cam, trans_cam, width, T_cam_to_base, robot):
-    grasp_cam = np.eye(4, dtype=np.float32)
-    grasp_cam[:3, :3] = rot_cam
-    grasp_cam[:3,  3] = trans_cam
-    grasp_base = T_cam_to_base @ grasp_cam
-    robot.approach(grasp_base)
-    robot.set_width(width)
-    robot.lift()
+def _project(pt_3d):
+    """Project a single (3,) camera-frame point to (u, v) pixel."""
+    x, y, z = pt_3d
+    if z <= 0:
+        return None
+    u = int(FX * x / z + CX)
+    v = int(FY * y / z + CY)
+    return u, v
 
 
-def run_grasp_pipeline(pcd, tip_pos_camera, T_cam_to_base, robot,
-                       model, device="cuda"):
-    trans, rot, scores, widths = infer(model, pcd, device)
-    best_rot, best_trans, best_width = cluster_and_select(
-        trans, rot, scores, widths, tip_pos_camera
-    )
-    if best_rot is None:
-        raise RuntimeError("No valid grasp cluster found.")
-    execute(best_rot, best_trans, best_width, T_cam_to_base, robot)
+def draw_grasp_on_image(img, rot, trans, width):
+    """
+    Draw the best grasp pose onto a BGR image in-place.
+
+    GraspNet convention used here:
+      - jaw separation : along rot[:,0]  (X axis)
+      - approach dir   : along rot[:,2]  (Z axis)
+    """
+    half_w   = width / 2.0
+    left_3d  = trans + rot @ np.array([ half_w, 0,    0   ], dtype=np.float32)
+    right_3d = trans + rot @ np.array([-half_w, 0,    0   ], dtype=np.float32)
+    tip_3d   = trans + rot @ np.array([0,       0,    0.06], dtype=np.float32)
+
+    center_px = _project(trans)
+    left_px   = _project(left_3d)
+    right_px  = _project(right_3d)
+    tip_px    = _project(tip_3d)
+
+    if None in (center_px, left_px, right_px, tip_px):
+        return
+
+    # jaw line (red)
+    cv2.line(img, left_px,   right_px,  (0, 0, 255), 2)
+    # approach arrow (green)
+    cv2.arrowedLine(img, center_px, tip_px, (0, 255, 0), 2, tipLength=0.3)
+    # grasp centre dot (yellow)
+    cv2.circle(img, center_px, 5, (0, 255, 255), -1)
+    # score label
+    cv2.putText(img, f"grasp", (center_px[0] + 8, center_px[1] - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Live viewer + on-demand grasp inference
+# Background inference thread
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _grasp_geometry(rot, trans, width):
-    """Coordinate frame + gripper jaw lines for one grasp pose."""
-    frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.04)
-    frame.rotate(rot, center=(0, 0, 0))
-    frame.translate(trans)
+class GraspInferenceThread:
+    """
+    Runs GraspNet inference on a background thread.
+    Always works on the latest available point cloud.
+    """
 
-    half_w       = width / 2.0
-    left         = trans + rot @ np.array([ half_w, 0, 0], dtype=np.float32)
-    right        = trans + rot @ np.array([-half_w, 0, 0], dtype=np.float32)
-    approach_tip = trans + rot @ np.array([0, 0, 0.06],    dtype=np.float32)
+    def __init__(self, model, device="cuda", interval=0.5):
+        self._model    = model
+        self._device   = device
+        self._interval = interval          # seconds between inference runs
+        self._lock     = threading.Lock()
+        self._pcd      = None              # latest input
+        self._result   = None              # (rot, trans, width) or None
+        self._thread   = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
 
-    jaws = o3d.geometry.LineSet(
-        points=o3d.utility.Vector3dVector([left, right, trans, approach_tip]),
-        lines=o3d.utility.Vector2iVector([[0, 1], [2, 3]]),
-    )
-    jaws.colors = o3d.utility.Vector3dVector([[1, 0, 0], [0, 1, 0]])
-    return [frame, jaws]
+    def update_pcd(self, pcd):
+        with self._lock:
+            self._pcd = pcd
 
+    def get_grasp(self):
+        """Returns (rot, trans, width) or None. Non-blocking."""
+        with self._lock:
+            return self._result
 
-def _run_grasp_inference(latest_pcd, model, device, run_execute):
-    """Called when the user presses G. Returns list of o3d geometries, or []."""
-    if latest_pcd is None or len(latest_pcd.points) == 0:
-        print("[grasp] no point cloud available yet")
-        return []
+    def _loop(self):
+        while True:
+            with self._lock:
+                pcd = self._pcd
 
-    print(f"[grasp] running inference on {len(latest_pcd.points)} points...")
-    t0 = time.time()
-    trans, rot, scores, widths = infer(model, latest_pcd, device)
-    elapsed = time.time() - t0
+            if pcd is not None and len(pcd.points) >= 50:
+                try:
+                    t0 = time.monotonic()
+                    trans, rot, scores, widths = infer(self._model, pcd, self._device)
+                    best_rot, best_trans, best_width = cluster_and_select(
+                        trans, rot, scores, widths
+                    )
+                    elapsed = time.monotonic() - t0
+                    if best_rot is not None:
+                        print(f"[grasp] {elapsed:.2f}s  "
+                              f"candidates: {len(trans)}  "
+                              f"trans: {best_trans.round(3)}")
+                    else:
+                        print(f"[grasp] {elapsed:.2f}s  no valid grasp found")
 
-    if len(trans) > 0:
-        print(f"[grasp] {elapsed:.2f}s  grasps: {len(trans)}  "
-              f"scores: min={scores.min():.3f}  max={scores.max():.3f}  mean={scores.mean():.3f}")
-    else:
-        print(f"[grasp] {elapsed:.2f}s  no grasps survived collision filter")
-        return []
+                    with self._lock:
+                        self._result = (best_rot, best_trans, best_width) \
+                                       if best_rot is not None else None
+                except Exception as exc:
+                    print(f"[grasp] inference error: {exc}")
 
-    tip_pos_camera = np.asarray(latest_pcd.points).mean(axis=0).astype(np.float32)
-    best_rot, best_trans, best_width = cluster_and_select(
-        trans, rot, scores, widths, tip_pos_camera
-    )
-    if best_rot is None:
-        print("[grasp] no valid cluster")
-        return []
-
-    print(f"[grasp] best trans = {best_trans}")
-    print(f"[grasp] best width = {best_width:.4f} m")
-
-    if run_execute:
-        T_cam_to_base = np.eye(4, dtype=np.float32)
-        robot         = None
-        execute(best_rot, best_trans, best_width, T_cam_to_base, robot)
-        print("[grasp] executed")
-
-    return _grasp_geometry(best_rot, best_trans, best_width)
+            time.sleep(self._interval)
 
 
-def live_loop(model, device="cuda", run_execute=False):
+# ──────────────────────────────────────────────────────────────────────────────
+# Main live loop
+# ──────────────────────────────────────────────────────────────────────────────
 
-    # ── Start isolator first, wait for YOLO before touching the GPU with Open3D
+def live_loop(model, device="cuda"):
+
+    # ── Start isolator; wait for YOLO before anything else uses the GPU ───────
     isolator = ObjectIsolator()
     isolator.start()
-
     print("[capture] waiting for YOLO to load...")
     isolator.ready.wait()
-    print("[capture] YOLO ready — opening viewer.\n")
+    print("[capture] YOLO ready.\n")
 
-    # ── cv2 preview window ────────────────────────────────────────────────────
-    CV2_WIN = "Camera feed (YOLO — target in green)"
+    # ── Start grasp inference thread ──────────────────────────────────────────
+    grasp_thread = GraspInferenceThread(model, device=device, interval=0.5)
+
+    # ── cv2 display loop ──────────────────────────────────────────────────────
+    CV2_WIN = "N-Pulse — camera + grasp (q to quit)"
     cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
-    placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.putText(placeholder, "Waiting for first frame...", (80, 240),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
-    cv2.imshow(CV2_WIN, placeholder)
-    cv2.waitKey(1)
 
-    # ── Open3D viewer — only created after YOLO is done ───────────────────────
-    viewer      = PointcloudViewer("N-Pulse — live pointcloud (press G to grasp, Q to quit)")
-    latest      = {"pcd": None}
-    grasp_geoms = []
-
-    def on_grasp(_vis):
-        if model is None:
-            print("[grasp] no checkpoint loaded — pass --checkpoint to enable inference")
-            return False
-        for g in grasp_geoms:
-            _vis.remove_geometry(g, reset_bounding_box=False)
-        grasp_geoms.clear()
-        new_geoms = _run_grasp_inference(latest["pcd"], model, device, run_execute)
-        for g in new_geoms:
-            _vis.add_geometry(g, reset_bounding_box=False)
-        grasp_geoms.extend(new_geoms)
-        return False
-
-    def on_quit(_vis):
-        _vis.close()
-        return False
-
-    viewer.register_key(ord("G"), on_grasp)
-    viewer.register_key(ord("Q"), on_quit)
+    print("Running — press q to quit.\n")
 
     try:
         while True:
             frame = isolator.get_full_frame()
+
             if frame is not None:
-                full_pcd, iso_pcd, preview_bgr = frame
+                _, iso_pcd, preview_bgr = frame
+
+                # Feed latest isolated object to inference thread
+                if iso_pcd is not None:
+                    grasp_thread.update_pcd(iso_pcd)
+
+                # Overlay latest grasp result (if any) on the preview
+                result = grasp_thread.get_grasp()
+                if result is not None:
+                    rot, trans, width = result
+                    draw_grasp_on_image(preview_bgr, rot, trans, width)
 
                 cv2.imshow(CV2_WIN, preview_bgr)
-                cv2.waitKey(1)
 
-                viewer.update(full_pcd)
-
-                if iso_pcd is not None:
-                    latest["pcd"] = iso_pcd
-
-            if not viewer.tick():
+            if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
+
+    except KeyboardInterrupt:
+        pass
     finally:
         isolator.stop()
         cv2.destroyAllWindows()
-        viewer.destroy()
 
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", default=None,
-                        help="Path to GraspNet-baseline checkpoint (.tar). "
-                             "Omit to run live preview only (G key disabled).")
-    parser.add_argument("--device",  default="cuda")
-    parser.add_argument("--execute", action="store_true",
-                        help="Actually send commands to the robot")
+    parser.add_argument("--checkpoint", required=True,
+                        help="Path to GraspNet-baseline checkpoint (.tar).")
+    parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
-    if args.checkpoint:
-        model = load_model(args.checkpoint, device=args.device)
-    else:
-        print("[warn] no checkpoint provided — live preview only, G key disabled")
-        model = None
-
-    live_loop(model, device=args.device, run_execute=args.execute)
+    model = load_model(args.checkpoint, device=args.device)
+    live_loop(model, device=args.device)

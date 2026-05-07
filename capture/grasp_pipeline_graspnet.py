@@ -33,7 +33,7 @@ from object_isolation import ObjectIsolator
 from pointcloud_open3d import PointcloudViewer
 
 
-NUM_POINT = 20000   # points sampled from the cloud before feeding the model
+NUM_POINT = 20000
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -74,8 +74,8 @@ def _prepare_input(pcd, device):
     colors_s = colors[idxs] if len(colors) == n else np.zeros((NUM_POINT, 3), dtype=np.float32)
 
     end_points = {
-        "point_clouds":  torch.from_numpy(pts_s[np.newaxis]).to(device),
-        "cloud_colors":  torch.from_numpy(colors_s[np.newaxis]).to(device),
+        "point_clouds": torch.from_numpy(pts_s[np.newaxis]).to(device),
+        "cloud_colors": torch.from_numpy(colors_s[np.newaxis]).to(device),
     }
     return end_points
 
@@ -83,14 +83,13 @@ def _prepare_input(pcd, device):
 def infer(model, pcd, device="cuda", collision_thresh=0.01):
     end_points = _prepare_input(pcd, device)
     with torch.no_grad():
-        end_points = model(end_points)
-        grasp_preds = pred_decode(end_points)
+        end_points   = model(end_points)
+        grasp_preds  = pred_decode(end_points)
 
     gg = GraspGroup(grasp_preds[0].detach().cpu().numpy())
 
-    # collision filtering against the full cloud
-    cloud_pts = np.asarray(pcd.points, dtype=np.float32)
-    detector  = ModelFreeCollisionDetector(cloud_pts, voxel_size=0.01)
+    cloud_pts      = np.asarray(pcd.points, dtype=np.float32)
+    detector       = ModelFreeCollisionDetector(cloud_pts, voxel_size=0.01)
     collision_mask = detector.detect(gg, approach_dist=0.05,
                                      collision_thresh=collision_thresh)
     gg = gg[~collision_mask]
@@ -176,7 +175,6 @@ def _grasp_geometry(rot, trans, width):
     frame.rotate(rot, center=(0, 0, 0))
     frame.translate(trans)
 
-    # GraspNet convention: approach = col 0 (X), closing = col 1 (Y)
     half_w       = width / 2.0
     left         = trans + rot @ np.array([ half_w, 0, 0], dtype=np.float32)
     right        = trans + rot @ np.array([-half_w, 0, 0], dtype=np.float32)
@@ -200,6 +198,7 @@ def _run_grasp_inference(latest_pcd, model, device, run_execute):
     t0 = time.time()
     trans, rot, scores, widths = infer(model, latest_pcd, device)
     elapsed = time.time() - t0
+
     if len(trans) > 0:
         print(f"[grasp] {elapsed:.2f}s  grasps: {len(trans)}  "
               f"scores: min={scores.min():.3f}  max={scores.max():.3f}  mean={scores.mean():.3f}")
@@ -207,7 +206,6 @@ def _run_grasp_inference(latest_pcd, model, device, run_execute):
         print(f"[grasp] {elapsed:.2f}s  no grasps survived collision filter")
         return []
 
-    # Placeholder tip: cloud centroid. Swap for real BNO085 tip (camera frame).
     tip_pos_camera = np.asarray(latest_pcd.points).mean(axis=0).astype(np.float32)
     best_rot, best_trans, best_width = cluster_and_select(
         trans, rot, scores, widths, tip_pos_camera
@@ -229,26 +227,27 @@ def _run_grasp_inference(latest_pcd, model, device, run_execute):
 
 
 def live_loop(model, device="cuda", run_execute=False):
-    # ObjectIsolator handles camera + YOLO on its own background thread.
-    # It applies the same central-object selection criteria as the isolation
-    # algorithm, so pressing G always grasps the same object shown in the preview.
-    # create pointcloud object here?
+
+    # ── Start isolator first, wait for YOLO before touching the GPU with Open3D
     isolator = ObjectIsolator()
     isolator.start()
-    print("[capture] background thread started — waiting for first frame...")
 
-    # ── cv2 preview window — show immediately so user knows it's running ──────
+    print("[capture] waiting for YOLO to load...")
+    isolator.ready.wait()
+    print("[capture] YOLO ready — opening viewer.\n")
+
+    # ── cv2 preview window ────────────────────────────────────────────────────
     CV2_WIN = "Camera feed (YOLO — target in green)"
     cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
     placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.putText(placeholder, "Waiting for camera...", (120, 240),
+    cv2.putText(placeholder, "Waiting for first frame...", (80, 240),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
     cv2.imshow(CV2_WIN, placeholder)
     cv2.waitKey(1)
 
-    # ── Open3D viewer (main thread) ───────────────────────────────────────────
+    # ── Open3D viewer — only created after YOLO is done ───────────────────────
     viewer      = PointcloudViewer("N-Pulse — live pointcloud (press G to grasp, Q to quit)")
-    latest      = {"pcd": None}   # latest isolated object, updated every frame
+    latest      = {"pcd": None}
     grasp_geoms = []
 
     def on_grasp(_vis):
@@ -300,7 +299,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", default=None,
                         help="Path to GraspNet-baseline checkpoint (.tar). "
                              "Omit to run live preview only (G key disabled).")
-    parser.add_argument("--device",   default="cuda")
+    parser.add_argument("--device",  default="cuda")
     parser.add_argument("--execute", action="store_true",
                         help="Actually send commands to the robot")
     args = parser.parse_args()
@@ -310,4 +309,5 @@ if __name__ == "__main__":
     else:
         print("[warn] no checkpoint provided — live preview only, G key disabled")
         model = None
+
     live_loop(model, device=args.device, run_execute=args.execute)

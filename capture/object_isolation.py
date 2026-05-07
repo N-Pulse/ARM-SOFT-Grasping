@@ -223,6 +223,11 @@ class ObjectIsolator:
             model = YOLO(YOLO_MODEL)
             if not YOLO_MODEL.endswith(".engine"):
                 model.fuse()
+            print("[ObjectIsolator] YOLO loaded ✓ — warming up...")
+
+            model.predict(source=np.zeros((320, 320, 3), dtype=np.uint8),
+                          imgsz=YOLO_IMGSZ, verbose=False)
+            print("[ObjectIsolator] warm-up done ✓ — streaming frames...")
         except Exception as exc:
             print(f"[ObjectIsolator] FATAL: could not load YOLO model: {exc}")
             pipeline.stop()

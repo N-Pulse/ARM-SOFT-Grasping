@@ -1,72 +1,64 @@
 """
 test_obj_iso.py
-
-Tests ObjectIsolator with a live Open3D visualiser + cv2 YOLO preview.
-
-Usage:
-    python test_obj_iso.py
-
-Controls:
-    Press q in the cv2 window, or close the Open3D window to stop.
 """
 
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "capture"))
 
-import cv2
+import numpy as np
 import open3d as o3d
 from object_isolation import ObjectIsolator
 
-
 def run():
-    vis        = o3d.visualization.Visualizer()
+    isolator = ObjectIsolator(min_points=50)
+    isolator.start()
+
+    vis = o3d.visualization.Visualizer()
     vis.create_window("Stage 1 — Isolated Object Point Cloud", width=1280, height=720)
     pcd        = o3d.geometry.PointCloud()
     geom_added = False
 
-    print("Starting ObjectIsolator...")
-    print("Close the Open3D window or press q in the preview to stop.\n")
+    print("Running Stage 1 — YOLO segmentation + point cloud isolation.")
+    print("Close the window or press Ctrl+C to stop.\n")
 
-    with ObjectIsolator(min_points=50) as isolator:
-        try:
-            while True:
-                result = isolator.get_full_frame()
+    try:
+        while True:
+            # mirror monolithic: block up to 100ms waiting for a frame
+            result = isolator._frame_queue.get(timeout=0.1) if not isolator._frame_queue.empty() else None
 
-                if result is not None:
-                    full_pcd, iso_pcd, preview_bgr = result
+            if result is not None:
+                verts, full_colors, obj_verts, obj_colors, _ = result
 
-                    # Open3D: show isolated object (fall back to full scene)
-                    target_pcd = iso_pcd if iso_pcd is not None else full_pcd
-                    pcd.points = target_pcd.points
-                    pcd.colors = target_pcd.colors
+                # use isolated object if available, else full scene
+                if len(obj_verts) > 0:
+                    pts, cols = obj_verts, obj_colors
+                else:
+                    pts, cols = verts, full_colors
 
-                    if not geom_added:
-                        vis.add_geometry(pcd)
-                        ctr = vis.get_view_control()
-                        ctr.set_lookat([0, 0, 0.3])
-                        ctr.set_front([0, 0, -1])
-                        ctr.set_up([0, -1, 0])
-                        ctr.set_zoom(0.25)
-                        geom_added = True
-                    else:
-                        vis.update_geometry(pcd)
+                pcd.points = o3d.utility.Vector3dVector(pts)
+                pcd.colors = o3d.utility.Vector3dVector(cols)
 
-                    # cv2: YOLO segmentation overlay
-                    cv2.imshow("Stage 1 — YOLO Preview", preview_bgr)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
+                if not geom_added:
+                    vis.add_geometry(pcd)
+                    ctr = vis.get_view_control()
+                    ctr.set_lookat([0, 0, 0.3])
+                    ctr.set_front([0, 0, -1])
+                    ctr.set_up([0, -1, 0])
+                    ctr.set_zoom(0.25)
+                    geom_added = True
+                else:
+                    vis.update_geometry(pcd)
 
-                if not vis.poll_events():
-                    break
-                vis.update_renderer()
+            if not vis.poll_events():
+                break
+            vis.update_renderer()
 
-        except KeyboardInterrupt:
-            pass
-        finally:
-            vis.destroy_window()
-            cv2.destroyAllWindows()
-
+    except KeyboardInterrupt:
+        pass
+    finally:
+        isolator.stop()
+        vis.destroy_window()
 
 if __name__ == "__main__":
     run()

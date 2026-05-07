@@ -280,6 +280,8 @@ class ObjectIsolator:
                     detections = _detect_masks(model, bgr)
                     last_mask, last_box = _select_central(detections)
 
+                if last_mask is None:
+                    continue
                 # Build subsampled point cloud
                 pc_util.map_to(color_fr)
                 points_rs = pc_util.calculate(depth_fr)

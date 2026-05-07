@@ -14,6 +14,10 @@ def run():
     isolator = ObjectIsolator(min_points=50)
     isolator.start()
 
+    print("Waiting for YOLO to load...")
+    isolator.ready.wait()
+    print("YOLO ready — opening window.")
+
     vis = o3d.visualization.Visualizer()
     vis.create_window("Stage 1 — Isolated Object Point Cloud", width=1280, height=720)
     pcd        = o3d.geometry.PointCloud()

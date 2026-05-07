@@ -159,6 +159,7 @@ class ObjectIsolator:
     """
 
     def __init__(self, min_points: int = 50):
+        self.ready = threading.Event()   # set after YOLO warm-up
         self._min_points  = min_points
         self._frame_queue = queue.Queue(maxsize=1)
         self._stop_event  = threading.Event()
@@ -244,6 +245,7 @@ class ObjectIsolator:
             model.predict(source=np.zeros((320, 320, 3), dtype=np.uint8),
                           imgsz=YOLO_IMGSZ, verbose=False)
             print("[ObjectIsolator] warm-up done ✓ — streaming frames...")
+            self.ready.set()
         except Exception as exc:
             print(f"[ObjectIsolator] FATAL: could not load YOLO model: {exc}")
             pipeline.stop()

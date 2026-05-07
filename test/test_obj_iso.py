@@ -1,14 +1,25 @@
 """
 test_obj_iso.py
+
+Tests ObjectIsolator with a live Open3D visualiser.
+Waits for YOLO to finish loading before opening the window
+so Open3D and YOLO don't fight over GPU memory.
+
+Usage:
+    python test_obj_iso.py
+
+Controls:
+    Close the Open3D window or press Ctrl+C to stop.
 """
 
 import sys
 import os
+import queue
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "capture"))
 
-import numpy as np
 import open3d as o3d
 from object_isolation import ObjectIsolator
+
 
 def run():
     isolator = ObjectIsolator(min_points=50)
@@ -16,29 +27,23 @@ def run():
 
     print("Waiting for YOLO to load...")
     isolator.ready.wait()
-    print("YOLO ready — opening window.")
+    print("YOLO ready — opening window.\n")
 
     vis = o3d.visualization.Visualizer()
     vis.create_window("Stage 1 — Isolated Object Point Cloud", width=1280, height=720)
     pcd        = o3d.geometry.PointCloud()
     geom_added = False
 
-    print("Running Stage 1 — YOLO segmentation + point cloud isolation.")
-    print("Close the window or press Ctrl+C to stop.\n")
+    print("Running — close the window or press Ctrl+C to stop.")
 
     try:
         while True:
-            # mirror monolithic: block up to 100ms waiting for a frame
-            result = isolator._frame_queue.get(timeout=0.1) if not isolator._frame_queue.empty() else None
+            try:
+                verts, full_colors, obj_verts, obj_colors, _ = \
+                    isolator._frame_queue.get(timeout=0.1)
 
-            if result is not None:
-                verts, full_colors, obj_verts, obj_colors, _ = result
-
-                # use isolated object if available, else full scene
-                if len(obj_verts) > 0:
-                    pts, cols = obj_verts, obj_colors
-                else:
-                    pts, cols = verts, full_colors
+                pts  = obj_verts  if len(obj_verts)  > 0 else verts
+                cols = obj_colors if len(obj_colors) > 0 else full_colors
 
                 pcd.points = o3d.utility.Vector3dVector(pts)
                 pcd.colors = o3d.utility.Vector3dVector(cols)
@@ -54,6 +59,9 @@ def run():
                 else:
                     vis.update_geometry(pcd)
 
+            except queue.Empty:
+                pass
+
             if not vis.poll_events():
                 break
             vis.update_renderer()
@@ -63,6 +71,7 @@ def run():
     finally:
         isolator.stop()
         vis.destroy_window()
+
 
 if __name__ == "__main__":
     run()

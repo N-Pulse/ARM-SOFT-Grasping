@@ -45,19 +45,15 @@ FPS              = 30
 MIN_DEPTH_M      = 0.07
 MAX_DEPTH_M      = 0.70
 
-# Resolve model paths relative to this file so YOLO doesn't fall back to
-# downloading the weights when the script is launched from a different cwd.
 _THIS_DIR        = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT    = os.path.dirname(_THIS_DIR)
 
 
 def _find_model(filename: str) -> str:
-    """Search for `filename` next to this script, in the project root, and cwd."""
     for base in (_THIS_DIR, _PROJECT_ROOT, os.getcwd()):
         candidate = os.path.join(base, filename)
         if os.path.exists(candidate):
             return candidate
-    # Fall back to the bare filename (lets ultralytics download/resolve it).
     return filename
 
 
@@ -69,8 +65,8 @@ YOLO_CONF        = 0.35
 YOLO_IOU         = 0.45
 YOLO_IMGSZ       = 320
 
-YOLO_SKIP_FRAMES = 3    # run YOLO every N frames, reuse mask in between
-SUBSAMPLE        = 2    # keep every Nth point cloud point
+YOLO_SKIP_FRAMES = 3
+SUBSAMPLE        = 2
 
 IMG_CENTER       = np.array([COLOR_WIDTH / 2, COLOR_HEIGHT / 2])
 
@@ -136,15 +132,6 @@ def _select_central(detections):
     return best_mask, best_box
 
 
-def _mask_pcd_to_seg(verts, texcoords, colors, seg_mask):
-    """Keep only points whose UV falls inside the segmentation mask."""
-    h, w = seg_mask.shape
-    u = np.clip((texcoords[:, 0] * w).astype(int), 0, w - 1)
-    v = np.clip((texcoords[:, 1] * h).astype(int), 0, h - 1)
-    inside = seg_mask[v, u]
-    return verts[inside], colors[inside]
-
-
 # ─── Public class ─────────────────────────────────────────────────────────────
 
 class ObjectIsolator:
@@ -159,7 +146,7 @@ class ObjectIsolator:
     """
 
     def __init__(self, min_points: int = 50):
-        self.ready = threading.Event()   # set after YOLO warm-up
+        self.ready        = threading.Event()   # set after YOLO warm-up
         self._min_points  = min_points
         self._frame_queue = queue.Queue(maxsize=1)
         self._stop_event  = threading.Event()
@@ -241,10 +228,9 @@ class ObjectIsolator:
             if not YOLO_MODEL.endswith(".engine"):
                 model.fuse()
             print("[ObjectIsolator] YOLO loaded ✓ — warming up...")
-
             model.predict(source=np.zeros((320, 320, 3), dtype=np.uint8),
                           imgsz=YOLO_IMGSZ, verbose=False)
-            print("[ObjectIsolator] warm-up done ✓ — streaming frames...")
+            print("[ObjectIsolator] warm-up done ✓")
             self.ready.set()
         except Exception as exc:
             print(f"[ObjectIsolator] FATAL: could not load YOLO model: {exc}")
@@ -254,13 +240,15 @@ class ObjectIsolator:
         import time as _time
         print("[ObjectIsolator] camera + YOLO ready, streaming frames...")
 
-        frame_idx  = 0
-        last_mask  = None
-        last_box   = None
-        _last_log  = 0.0
+        frame_idx = 0
+        last_mask = None
+        last_box  = None
+        _last_log = 0.0
 
         try:
             while not self._stop_event.is_set():
+
+                # ── 1. Grab aligned RGB-D frame ───────────────────────────
                 frames   = pipeline.wait_for_frames()
                 aligned  = align.process(frames)
                 depth_fr = aligned.get_depth_frame()
@@ -274,7 +262,7 @@ class ObjectIsolator:
 
                 bgr = np.asanyarray(color_fr.get_data())
 
-                # YOLO every YOLO_SKIP_FRAMES frames
+                # ── 2. YOLO every YOLO_SKIP_FRAMES frames ─────────────────
                 frame_idx += 1
                 if frame_idx % YOLO_SKIP_FRAMES == 0:
                     detections = _detect_masks(model, bgr)
@@ -282,7 +270,8 @@ class ObjectIsolator:
 
                 if last_mask is None:
                     continue
-                # Build subsampled point cloud
+
+                # ── 3. Build subsampled point cloud ───────────────────────
                 pc_util.map_to(color_fr)
                 points_rs = pc_util.calculate(depth_fr)
                 verts     = np.asanyarray(points_rs.get_vertices()) \
@@ -300,21 +289,16 @@ class ObjectIsolator:
                 v = np.clip((texcoords[:, 1] * h).astype(int), 0, h - 1)
                 colors = bgr[v, u, ::-1] / 255.0
 
-                # Full scene: target in colour, background grey
-                if last_mask is not None:
-                    inside      = last_mask[v, u]
-                    full_colors = np.full_like(colors, 0.35)
-                    full_colors[inside] = colors[inside]
-                    obj_verts_raw  = verts[inside]
-                    obj_colors_raw = colors[inside]
-                else:
-                    full_colors    = colors
-                    obj_verts_raw  = np.zeros((0, 3), np.float32)
-                    obj_colors_raw = np.zeros((0, 3), np.float32)
+                # ── 4. Mask along segmentation contour ────────────────────
+                inside         = last_mask[v, u]
+                full_colors    = np.full_like(colors, 0.35)
+                full_colors[inside] = colors[inside]
+                obj_verts_raw  = verts[inside]
+                obj_colors_raw = colors[inside]
 
-                # cv2 preview
+                # ── 5. cv2 preview with YOLO overlay ──────────────────────
                 preview_bgr = bgr.copy()
-                if last_mask is not None and last_box is not None:
+                if last_box is not None:
                     overlay = np.zeros_like(preview_bgr)
                     overlay[last_mask] = (0, 255, 0)
                     preview_bgr = cv2.addWeighted(preview_bgr, 0.7, overlay, 0.3, 0)
@@ -336,6 +320,7 @@ class ObjectIsolator:
                           f"target: {'yes' if last_mask is not None else 'no'}")
                     _last_log = now
 
+                # ── 6. Push to queue (drop stale frame) ───────────────────
                 try:
                     self._frame_queue.get_nowait()
                 except queue.Empty:

@@ -15,7 +15,11 @@ Controls:
 import time
 import cv2
 import open3d as o3d
-from stage1 import ObjectIsolator
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "capture"))
+
+from object_isolation import ObjectIsolator
 
 
 def run():

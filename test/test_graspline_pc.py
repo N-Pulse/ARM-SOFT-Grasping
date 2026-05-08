@@ -11,10 +11,18 @@ import argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "capture"))
 
+import torch
 import numpy as np
 import open3d as o3d
 
 from grasp_pipeline_graspnet import load_model, infer, cluster_and_select
+
+def _best_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 # ── Gripper geometry constants ────────────────────────────────────────────────
 
@@ -96,6 +104,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--ply",        required=True,  help="Input .ply point cloud.")
     parser.add_argument("--checkpoint", required=True,  help="GraspNet checkpoint (.tar).")
-    parser.add_argument("--device",     default="cuda")
+    parser.add_argument("--device",     default=_best_device())
     args = parser.parse_args()
     run(args.ply, args.checkpoint, device=args.device)

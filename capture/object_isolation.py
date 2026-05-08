@@ -233,7 +233,7 @@ def _detect_masks(model, bgr_image):
             x1, y1, x2, y2 = box.cpu().numpy().astype(int)
             bbox_center     = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
 
-            detections.append((mask_resized, np.array([x1, y1, x2, y2]), bbox_center))
+            detections.append((mask_resized, np.array([x1, y1, x2, y2]), bbox_center, cls_id))
 
     return detections
 
@@ -260,13 +260,13 @@ def _select_central(detections, locked_center=None):
     (mask, box, center) of the chosen detection, or (None, None, None).
     """
     if not detections:
-        return None, None, None
+        return None, None, None, None
 
     if locked_center is not None:
         # Try to re-acquire the locked target by proximity
         best = min(detections, key=lambda d: np.linalg.norm(d[2] - locked_center))
         if np.linalg.norm(best[2] - locked_center) <= TARGET_LOCK_MAX_DRIFT:
-            return best   # (mask, box, center) — lock holds
+            return best   # (mask, box, center, cls_id) — lock holds
 
         # Locked target has drifted too far or vanished; fall through
         # to the image-centre strategy below
@@ -413,8 +413,9 @@ class ObjectIsolator:
         print("[ObjectIsolator] camera + YOLO ready, streaming frames...")
 
         frame_idx = 0
-        last_mask = None   # most recent segmentation mask (H, W) bool
-        last_box  = None   # most recent bbox [x1, y1, x2, y2]
+        last_mask    = None   # most recent segmentation mask (H, W) bool
+        last_box     = None   # most recent bbox [x1, y1, x2, y2]
+        last_cls_id  = None   # COCO class ID of the locked target
 
         # ── Target-lock state ─────────────────────────────────────────────
         locked_center = None   # bbox centre of the locked target (ndarray or None)
@@ -455,7 +456,7 @@ class ObjectIsolator:
 
                     # Pass the locked centre only when the lock is still valid
                     lc = locked_center if lock_active else None
-                    new_mask, new_box, new_center = _select_central(
+                    new_mask, new_box, new_center, new_cls_id = _select_central(
                         detections, locked_center=lc
                     )
 
@@ -463,6 +464,7 @@ class ObjectIsolator:
                         last_mask     = new_mask
                         last_box      = new_box
                         locked_center = new_center
+                        last_cls_id   = new_cls_id
 
                         # Start a fresh lock if there is none or the previous one expired
                         if not lock_active:
@@ -479,6 +481,7 @@ class ObjectIsolator:
                         last_box      = None
                         locked_center = None
                         lock_start    = None
+                        last_cls_id   = None
 
                 # No target yet — nothing to publish
                 if last_mask is None:
@@ -534,14 +537,15 @@ class ObjectIsolator:
                     x1, y1, x2, y2 = last_box
                     cv2.rectangle(preview_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                    # Show remaining lock time in the label
+                    # Show class name + remaining lock time in the label
+                    cls_name = model.names[last_cls_id] if last_cls_id is not None else "?"
                     if lock_start is not None:
                         remaining = max(
                             0.0, TARGET_LOCK_SECONDS - (_time.monotonic() - lock_start)
                         )
-                        label = f"target  lock {remaining:.0f}s"
+                        label = f"{cls_name}  lock {remaining:.0f}s"
                     else:
-                        label = "target"
+                        label = cls_name
                     cv2.putText(
                         preview_bgr, label, (x1, y1 - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1,

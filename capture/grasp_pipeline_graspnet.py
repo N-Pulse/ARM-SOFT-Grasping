@@ -1,6 +1,6 @@
 """
 GraspNet-baseline inference — continuous, no key press needed.
-Grasp pose is projected and drawn directly onto the cv2 preview window.
+Grasp pose is drawn on the 3D point cloud viewer.
 """
 
 import os
@@ -29,10 +29,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from object_isolation import ObjectIsolator
 
 NUM_POINT = 20000
-
-# ── D405 intrinsics at 640x480 (replace with exact values if you have them) ──
-FX, FY = 460.0, 460.0
-CX, CY = 320.0, 240.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -126,52 +122,6 @@ def cluster_and_select(trans, rot, scores, widths,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Project 3-D grasp → cv2 overlay
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _project(pt_3d):
-    """Project a single (3,) camera-frame point to (u, v) pixel."""
-    x, y, z = pt_3d
-    if z <= 0:
-        return None
-    u = int(FX * x / z + CX)
-    v = int(FY * y / z + CY)
-    return u, v
-
-
-def draw_grasp_on_image(img, rot, trans, width):
-    """
-    Draw the best grasp pose onto a BGR image in-place.
-
-    GraspNet convention used here:
-      - jaw separation : along rot[:,0]  (X axis)
-      - approach dir   : along rot[:,2]  (Z axis)
-    """
-    half_w   = width / 2.0
-    left_3d  = trans + rot @ np.array([ half_w, 0,    0   ], dtype=np.float32)
-    right_3d = trans + rot @ np.array([-half_w, 0,    0   ], dtype=np.float32)
-    tip_3d   = trans + rot @ np.array([0,       0,    0.06], dtype=np.float32)
-
-    center_px = _project(trans)
-    left_px   = _project(left_3d)
-    right_px  = _project(right_3d)
-    tip_px    = _project(tip_3d)
-
-    if None in (center_px, left_px, right_px, tip_px):
-        return
-
-    # jaw line (red)
-    cv2.line(img, left_px,   right_px,  (0, 0, 255), 2)
-    # approach arrow (green)
-    cv2.arrowedLine(img, center_px, tip_px, (0, 255, 0), 2, tipLength=0.3)
-    # grasp centre dot (yellow)
-    cv2.circle(img, center_px, 5, (0, 255, 255), -1)
-    # score label
-    cv2.putText(img, f"grasp", (center_px[0] + 8, center_px[1] - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # Background inference thread
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -261,12 +211,6 @@ def live_loop(model, device="cuda"):
                 # Feed latest isolated object to inference thread
                 if iso_pcd is not None:
                     grasp_thread.update_pcd(iso_pcd)
-
-                # Overlay latest grasp result (if any) on the preview
-                result = grasp_thread.get_grasp()
-                if result is not None:
-                    rot, trans, width = result
-                    draw_grasp_on_image(preview_bgr, rot, trans, width)
 
                 cv2.imshow(CV2_WIN, preview_bgr)
 

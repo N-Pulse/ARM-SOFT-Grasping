@@ -7,8 +7,15 @@ D405, runs YOLO segmentation, and exposes the isolated object point cloud
 
 Key behaviours
 --------------
-  - Only graspable table objects are detected; persons and vehicles are
-    excluded via YOLO_EXCLUDE_CLASSES (whitelist also available).
+  - Only graspable table objects are detected:
+      · Persons, vehicles, and dining tables are excluded via
+        YOLO_EXCLUDE_CLASSES.
+      · Detections whose mask covers more than YOLO_MAX_MASK_RATIO of the
+        frame are discarded — this prevents the table surface itself from
+        being locked as a target even when YOLO mislabels it.
+      · An optional whitelist (YOLO_ALLOWED_CLASSES) can restrict detection
+        to specific COCO classes.
+  - Valid depth range is 7 cm – 50 cm (arm's-reach objects only).
   - Once a target is chosen it is locked for TARGET_LOCK_SECONDS (60 s).
     The lock tracks the same object by bbox-centre proximity; it only breaks
     when the object drifts more than TARGET_LOCK_MAX_DRIFT pixels or
@@ -47,15 +54,15 @@ from ultralytics import YOLO
 
 # ─── Camera & stream configuration ───────────────────────────────────────────
 
-DEPTH_WIDTH   = 640
-DEPTH_HEIGHT  = 480
-COLOR_WIDTH   = 640
-COLOR_HEIGHT  = 480
-FPS           = 30
+DEPTH_WIDTH  = 640
+DEPTH_HEIGHT = 480
+COLOR_WIDTH  = 640
+COLOR_HEIGHT = 480
+FPS          = 30
 
 # Valid depth range in metres — discard points outside this window
-MIN_DEPTH_M   = 0.07   # 7 cm  — closest usable range for D405
-MAX_DEPTH_M   = 0.50   # 50 cm — only consider objects within arm's reach
+MIN_DEPTH_M  = 0.07   # 7 cm  — closest usable range for D405
+MAX_DEPTH_M  = 0.50   # 50 cm — only consider objects within arm's reach
 
 # ─── Model discovery ─────────────────────────────────────────────────────────
 
@@ -72,10 +79,10 @@ def _find_model(filename: str) -> str:
     return filename
 
 
-_PT_MODEL    = _find_model("yolo11n-seg.pt")
+_PT_MODEL     = _find_model("yolo11n-seg.pt")
 _ENGINE_MODEL = _find_model("yolo11n-seg.engine")
 # Prefer a compiled TensorRT engine when available (faster on Jetson)
-YOLO_MODEL   = _ENGINE_MODEL if os.path.exists(_ENGINE_MODEL) else _PT_MODEL
+YOLO_MODEL    = _ENGINE_MODEL if os.path.exists(_ENGINE_MODEL) else _PT_MODEL
 
 # ─── YOLO inference settings ─────────────────────────────────────────────────
 
@@ -85,22 +92,30 @@ YOLO_IMGSZ       = 320    # inference resolution (smaller = faster)
 YOLO_SKIP_FRAMES = 3      # run YOLO every N frames; reuse last mask in between
 
 # ─── Class filtering ─────────────────────────────────────────────────────────
-# COCO class 0 = person.  Add any other class IDs you want to ignore.
-# Full COCO list: https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml
+# COCO class reference:
+# https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml
+
 YOLO_EXCLUDE_CLASSES = {
-    0,          # person
+    0,                        # person
     1, 2, 3, 4, 5, 6, 7, 8,  # bicycle, car, motorcycle, airplane, bus, train, truck, boat
+    60,                       # dining table — stops the table surface being locked as target
 }
 
 # Optional whitelist — set to None to allow every non-excluded class.
 # Uncomment and populate to restrict detection to specific graspable objects.
 # YOLO_ALLOWED_CLASSES = {
-#     39, 41, 42, 43, 44, 45,               # bottle, cup, fork, knife, spoon, bowl
+#     39, 41, 42, 43, 44, 45,                  # bottle, cup, fork, knife, spoon, bowl
 #     46, 47, 48, 49, 50, 51, 52, 53, 54, 55,  # common food items
-#     63, 64, 65, 66, 67,                   # laptop, mouse, remote, keyboard, phone
-#     73, 74, 75, 76, 77,                   # book, clock, vase, scissors, teddy bear
+#     63, 64, 65, 66, 67,                      # laptop, mouse, remote, keyboard, phone
+#     73, 74, 75, 76, 77,                      # book, clock, vase, scissors, teddy bear
 # }
 YOLO_ALLOWED_CLASSES = None   # None = no whitelist restriction
+
+# Reject any detection whose mask covers more than this fraction of the image.
+# A graspable object should never fill 40 %+ of the frame; anything larger is
+# almost certainly the table surface or background, even if YOLO mislabels it
+# as something other than "dining table".
+YOLO_MAX_MASK_RATIO = 0.40
 
 # ─── Target locking ──────────────────────────────────────────────────────────
 
@@ -153,7 +168,7 @@ def _build_pipeline():
 
 def _detect_masks(model, bgr_image):
     """
-    Run YOLO segmentation on *bgr_image* and return a list of detections.
+    Run YOLO segmentation on *bgr_image* and return a list of valid detections.
 
     Each detection is a tuple:
         (mask_resized, box_xyxy, bbox_center)
@@ -162,8 +177,11 @@ def _detect_masks(model, bgr_image):
         box_xyxy     : int ndarray (4,)    — [x1, y1, x2, y2]
         bbox_center  : float ndarray (2,)  — [(x1+x2)/2, (y1+y2)/2]
 
-    Detections whose class ID appears in YOLO_EXCLUDE_CLASSES are dropped.
-    If YOLO_ALLOWED_CLASSES is not None, only those class IDs are kept.
+    A detection is dropped if any of the following are true:
+        · Its class ID is in YOLO_EXCLUDE_CLASSES  (person, table, vehicles…)
+        · YOLO_ALLOWED_CLASSES is set and the class ID is not in it
+        · Its mask covers more than YOLO_MAX_MASK_RATIO of the image area
+          (catches the table surface even when YOLO mislabels it)
 
     Parameters
     ----------
@@ -192,7 +210,7 @@ def _detect_masks(model, bgr_image):
 
             # ── Class filtering ────────────────────────────────────────────
             if cls_id in YOLO_EXCLUDE_CLASSES:
-                continue   # explicitly excluded (person, vehicles, …)
+                continue   # explicitly excluded (person, table, vehicles…)
             if YOLO_ALLOWED_CLASSES is not None and cls_id not in YOLO_ALLOWED_CLASSES:
                 continue   # not in the graspable-object whitelist
 
@@ -203,6 +221,14 @@ def _detect_masks(model, bgr_image):
                 (bgr_image.shape[1], bgr_image.shape[0]),
                 interpolation=cv2.INTER_NEAREST,
             ).astype(bool)
+
+            # ── Size filter — reject masks that cover too much of the frame ─
+            # A graspable object should never fill 40 %+ of the image.
+            # This catches the table surface even when YOLO mislabels it
+            # as something other than "dining table" (class 60).
+            mask_ratio = mask_resized.sum() / mask_resized.size
+            if mask_ratio > YOLO_MAX_MASK_RATIO:
+                continue
 
             x1, y1, x2, y2 = box.cpu().numpy().astype(int)
             bbox_center     = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
@@ -386,9 +412,9 @@ class ObjectIsolator:
         import time as _time
         print("[ObjectIsolator] camera + YOLO ready, streaming frames...")
 
-        frame_idx     = 0
-        last_mask     = None   # most recent segmentation mask (H, W) bool
-        last_box      = None   # most recent bbox [x1, y1, x2, y2]
+        frame_idx = 0
+        last_mask = None   # most recent segmentation mask (H, W) bool
+        last_box  = None   # most recent bbox [x1, y1, x2, y2]
 
         # ── Target-lock state ─────────────────────────────────────────────
         locked_center = None   # bbox centre of the locked target (ndarray or None)
@@ -429,7 +455,9 @@ class ObjectIsolator:
 
                     # Pass the locked centre only when the lock is still valid
                     lc = locked_center if lock_active else None
-                    new_mask, new_box, new_center = _select_central(detections, locked_center=lc)
+                    new_mask, new_box, new_center = _select_central(
+                        detections, locked_center=lc
+                    )
 
                     if new_mask is not None:
                         last_mask     = new_mask
@@ -445,8 +473,8 @@ class ObjectIsolator:
                                 f"lock duration {TARGET_LOCK_SECONDS:.0f} s"
                             )
                     else:
-                        # No valid detection — clear everything so we start fresh
-                        # on the next frame where YOLO runs
+                        # No valid detection — clear everything so we start
+                        # fresh on the next frame where YOLO runs
                         last_mask     = None
                         last_box      = None
                         locked_center = None
@@ -461,7 +489,7 @@ class ObjectIsolator:
                 points_rs = pc_util.calculate(depth_fr)
 
                 # Reshape the packed vertex / texcoord arrays into (N, 3) / (N, 2)
-                verts     = (
+                verts = (
                     np.asanyarray(points_rs.get_vertices())
                     .view(np.float32)
                     .reshape(-1, 3)[::SUBSAMPLE]
@@ -506,11 +534,10 @@ class ObjectIsolator:
                     x1, y1, x2, y2 = last_box
                     cv2.rectangle(preview_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                    # Show remaining lock time in the preview
+                    # Show remaining lock time in the label
                     if lock_start is not None:
-                        import time as _t
                         remaining = max(
-                            0.0, TARGET_LOCK_SECONDS - (_t.monotonic() - lock_start)
+                            0.0, TARGET_LOCK_SECONDS - (_time.monotonic() - lock_start)
                         )
                         label = f"target  lock {remaining:.0f}s"
                     else:

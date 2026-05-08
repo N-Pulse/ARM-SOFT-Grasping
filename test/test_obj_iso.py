@@ -86,7 +86,7 @@ def run():
     # Increase point size so individual points are easier to see
     render_opt = vis.get_render_option()
     render_opt.point_size = 3.0
-    render_opt.background_color = np.array([0.1, 0.1, 0.1])  # dark grey background
+    render_opt.background_color = np.array([1.0, 1.0, 1.0])
 
     pcd        = o3d.geometry.PointCloud()
     geom_added = False

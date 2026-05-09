@@ -118,6 +118,7 @@ class GraspProjection:
         approach_depth: float = 0.07,
         normal_halfwidth: float = 0.06,
         surface_band: float = 0.005,
+        finger_width: float = 0.018,
     ) -> None:
         self._R = np.asarray(rot,         dtype=float)
         self._t = np.asarray(trans,       dtype=float)
@@ -128,6 +129,7 @@ class GraspProjection:
         self._approach_depth   = approach_depth
         self._normal_halfwidth = normal_halfwidth
         self._surface_band     = surface_band
+        self._finger_width     = finger_width
 
         # Run the pipeline immediately so `hand_data` is always ready.
         self._hand_data: HandData = self._compute()
@@ -181,7 +183,9 @@ class GraspProjection:
             surf        = abs_closing >= (abs_closing.max() - self._surface_band)
             pts_w, pts_l = pts_w[surf], pts_l[surf]
 
-        thumb_mask  = pts_l[:, 1] >= 0  if len(pts_l) > 0 else np.array([], dtype=bool)
+        # Thumb  → right_tip side  (negative closing, rot[:,1] < 0)
+        # Fingers → left_tip side  (positive closing, rot[:,1] >= 0)
+        thumb_mask  = pts_l[:, 1] < 0   if len(pts_l) > 0 else np.array([], dtype=bool)
         finger_mask = ~thumb_mask
 
         thumb_pts  = pts_w[thumb_mask]
@@ -190,37 +194,46 @@ class GraspProjection:
 
         contacts: list[np.ndarray] = []
 
-        # ── thumb ─────────────────────────────────────────────────────────
-        # Thumb contacts on the +closing side, at the object surface.
+        # ── thumb (right_tip side, -closing) ──────────────────────────────
         contacts.append(
             thumb_pts.mean(axis=0) if len(thumb_pts) > 0
             else self._nearest(t + R[:, 0] * self._approach_depth / 2
-                                 + R[:, 1] * (w / 2))
+                                 - R[:, 1] * (w / 2))
         )
 
-        # ── four fingers (index → pinky) ──────────────────────────────────
-        # Fingers contact on the -closing side, spread along the binormal axis.
+        # ── four fingers (left_tip side, +closing, spread along binormal) ─
+        # Target z-positions in local binormal: 4 evenly spaced bins,
+        # centred on the point cloud's own binormal centroid when enough
+        # points exist, otherwise centred on 0 (= left_tip centre).
+        # Minimum gap between adjacent fingers is finger_width.
+        fw = self._finger_width
+
         if len(finger_pts) >= 4:
-            z_proj = fp_local[:, 2]                              # binormal spread
-            edges  = np.linspace(z_proj.max(), z_proj.min(), 5)
-            for i in range(4):
-                lo, hi = min(edges[i], edges[i + 1]), max(edges[i], edges[i + 1])
-                in_bin = (z_proj >= lo) & (z_proj <= hi)
-                if in_bin.sum() > 0:
-                    contacts.append(finger_pts[in_bin].mean(axis=0))
-                else:
-                    z_mid = (edges[i] + edges[i + 1]) / 2
-                    ideal = (t + R[:, 0] * self._approach_depth / 2
-                               - R[:, 1] * (w / 2)
-                               + R[:, 2] * z_mid)
-                    contacts.append(self._nearest(ideal))
+            z_proj   = fp_local[:, 2]
+            z_center = float(z_proj.mean())
+            span     = float(z_proj.max() - z_proj.min())
+
+            # If natural spread is wide enough, use the point cloud's own
+            # extent; otherwise enforce minimum spacing around centroid.
+            if span >= 3 * fw:
+                z_targets = np.linspace(z_proj.max() - fw / 2,
+                                        z_proj.min() + fw / 2, 4)
+            else:
+                z_targets = z_center + np.array([1.5, 0.5, -0.5, -1.5]) * fw
         else:
-            for i in range(4):
-                frac  = (i + 0.5) / 4
-                z_val = self._normal_halfwidth * (1 - 2 * frac)
+            # No usable points — place fingers at minimum spacing centred
+            # on left_tip (closing = +w/2, binormal = 0).
+            z_targets = np.array([1.5, 0.5, -0.5, -1.5]) * fw
+
+        for z_t in z_targets:
+            if len(finger_pts) >= 4:
+                # Nearest point in the finger patch to this binormal target
+                dists = np.abs(fp_local[:, 2] - z_t)
+                contacts.append(finger_pts[dists.argmin()])
+            else:
                 ideal = (t + R[:, 0] * self._approach_depth / 2
-                           - R[:, 1] * (w / 2)
-                           + R[:, 2] * z_val)
+                           + R[:, 1] * (w / 2)
+                           + R[:, 2] * z_t)
                 contacts.append(self._nearest(ideal))
 
         return np.array(contacts)   # (5, 3)
@@ -255,12 +268,14 @@ class GraspProjection:
         palm_closing  = T_wrist[:3, 1]   # rot[:, 1] — jaw separation (thumb side)
         palm_binormal = T_wrist[:3, 2]   # rot[:, 2] — lateral, four fingers spread here
 
-        # Thumb MCP: offset onto the +closing side, slightly forward
-        thumb_mcp = palm + palm_closing * 0.04 + palm_approach * 0.02
-        # Four-finger MCPs: evenly spaced along the binormal axis
-        mcp_binormal_offsets = [0.035, 0.015, -0.005, -0.025]
+        # Thumb MCP: on the -closing side (right_tip), slightly forward
+        thumb_mcp = palm - palm_closing * 0.04 + palm_approach * 0.02
+        # Four-finger MCPs: on the +closing side (left_tip), spread along binormal
+        # Offsets match the finger_width spacing used in contact sampling.
+        fw = self._finger_width
         mcp_positions = [thumb_mcp] + [
-            palm + palm_binormal * dz for dz in mcp_binormal_offsets
+            palm + palm_closing * 0.04 + palm_binormal * dz
+            for dz in [1.5 * fw, 0.5 * fw, -0.5 * fw, -1.5 * fw]
         ]
 
         edges: list[SkeletonEdge] = []

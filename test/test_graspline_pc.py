@@ -21,7 +21,7 @@ from grasp_pipeline_graspnet import load_model, infer, cluster_and_select
 
 FINGER_LENGTH = 0.04
 PALM_DEPTH    = 0.06
-GRIPPER_COLOR = [1.0, 0.3, 0.0]
+GRIPPER_COLOR = [1.0, 0.4, 0.0]
 
 
 def _gripper_lineset(rot, trans, width):
@@ -31,22 +31,23 @@ def _gripper_lineset(rot, trans, width):
     GraspNet convention (graspnetAPI):
       rot[:, 0]  approach direction (toward object)
       rot[:, 1]  closing direction (between fingers)
+      trans      palm center; finger tips extend FINGER_LENGTH toward object
     """
     approach = rot[:, 0]
     closing  = rot[:, 1]
     half_w   = width / 2.0
 
-    # trans = contact midpoint; palm is FINGER_LENGTH behind it
-    palm_center = trans       - approach * FINGER_LENGTH
-    palm_back   = palm_center - approach * PALM_DEPTH
-    left_root   = palm_center + closing * half_w
-    right_root  = palm_center - closing * half_w
-    left_tip    = trans       + closing * half_w
-    right_tip   = trans       - closing * half_w
+    # Palm at trans; tips extend forward along approach to reach the surface
+    tip_center = trans + approach * FINGER_LENGTH
+    palm_back  = trans - approach * PALM_DEPTH
+    left_root  = trans      + closing * half_w
+    right_root = trans      - closing * half_w
+    left_tip   = tip_center + closing * half_w
+    right_tip  = tip_center - closing * half_w
 
     pts = np.array([
         palm_back,    # 0
-        palm_center,  # 1
+        trans,        # 1  palm center
         left_root,    # 2
         right_root,   # 3
         left_tip,     # 4
@@ -55,8 +56,8 @@ def _gripper_lineset(rot, trans, width):
 
     lines = [
         [0, 1],  # approach stem (behind palm)
-        [1, 2],  # palm centre → left root
-        [1, 3],  # palm centre → right root
+        [1, 2],  # palm → left root
+        [1, 3],  # palm → right root
         [2, 4],  # left finger
         [3, 5],  # right finger
     ]
@@ -96,12 +97,16 @@ def run(ply_path, checkpoint, device="cuda"):
     else:
         print("No valid grasp found.")
 
-    o3d.visualization.draw_geometries(
-        geoms,
-        window_name="GraspNet — PLY grasp result",
-        width=1280,
-        height=720,
-    )
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="GraspNet — PLY grasp result  (Ctrl+C to quit)",
+                      width=1280, height=720)
+    for g in geoms:
+        vis.add_geometry(g)
+    try:
+        while vis.poll_events():
+            vis.update_renderer()
+    finally:
+        vis.destroy_window()
 
 
 if __name__ == "__main__":
@@ -110,4 +115,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", required=True,  help="GraspNet checkpoint (.tar).")
     parser.add_argument("--device",     default="cuda")
     args = parser.parse_args()
-    run(args.ply, args.checkpoint, device=args.device)
+    try:
+        run(args.ply, args.checkpoint, device=args.device)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")

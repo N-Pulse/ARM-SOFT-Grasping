@@ -17,12 +17,10 @@ import threading
 
 _HERE = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(_HERE, "..", "capture"))
-sys.path.insert(0, os.path.join(_HERE, "..", "helper"))
 
 import numpy as np
 import open3d as o3d
 from object_isolation import ObjectIsolator
-from o3d_visualizer import O3DVisualizer
 
 
 # ── Reconstruction settings ───────────────────────────────────────────────────
@@ -123,46 +121,58 @@ def run():
     print("YOLO ready — opening viewer.\n")
     print("Running — close the Open3D window or Ctrl+C to stop.\n")
 
-    recon   = _ReconThread()
-    display = o3d.geometry.PointCloud()
-    first   = True
+    recon      = _ReconThread()
+    display    = o3d.geometry.PointCloud()
+    geom_added = False
 
-    with O3DVisualizer(
-        title      = "Upsampled Object Reconstruction",
-        width      = 1280,
-        height     = 720,
-        point_size = 2.0,
-        bg_color   = (0.1, 0.1, 0.1),
-        voxel_size = None,   # skip vis-side smoothing; recon output is already clean
-        sor_k      = None,
-    ) as vis:
-        try:
-            while True:
-                frame = isolator.get_full_frame()
-                if frame is not None:
-                    _, iso_pcd, _ = frame
-                    if iso_pcd is not None:
-                        recon.submit(iso_pcd)
+    vis = o3d.visualization.Visualizer()
+    vis.create_window("Upsampled Object Reconstruction", width=1280, height=720)
+    opt = vis.get_render_option()
+    opt.point_size       = 2.0
+    opt.background_color = np.array([1.0, 1.0, 1.0])
 
-                upsampled = recon.get()
-                if upsampled is not None:
-                    display.points = upsampled.points
-                    display.colors = upsampled.colors
-                    vis.add_or_update(display)
+    try:
+        while True:
+            frame = isolator.get_full_frame()
+            if frame is not None:
+                _, iso_pcd, _ = frame
+                if iso_pcd is not None:
+                    # Show the raw isolated cloud immediately as a fallback
+                    display.points = iso_pcd.points
+                    display.colors = iso_pcd.colors
+                    recon.submit(iso_pcd)
 
-                    if first:
-                        vis.set_view(front=(0, 0, -1), up=(0, -1, 0), zoom=0.45)
-                        first = False
+                    if not geom_added:
+                        vis.add_geometry(display)
+                        ctr = vis.get_view_control()
+                        ctr.set_front([0, 0, -1])
+                        ctr.set_up([0, -1, 0])
+                        ctr.set_zoom(0.45)
+                        geom_added = True
+                    else:
+                        vis.update_geometry(display)
 
-                    vis.centre_on_pcd(display)
+            # Swap to the upsampled cloud once reconstruction is ready
+            upsampled = recon.get()
+            if upsampled is not None and geom_added:
+                display.points = upsampled.points
+                display.colors = upsampled.colors
+                vis.update_geometry(display)
 
-                if not vis.tick():
-                    break
+            if geom_added:
+                pts = np.asarray(display.points)
+                if len(pts):
+                    vis.get_view_control().set_lookat(pts.mean(axis=0).tolist())
 
-        except KeyboardInterrupt:
-            pass
-        finally:
-            isolator.stop()
+            if not vis.poll_events():
+                break
+            vis.update_renderer()
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        isolator.stop()
+        vis.destroy_window()
 
 
 if __name__ == "__main__":

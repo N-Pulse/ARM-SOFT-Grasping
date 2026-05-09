@@ -121,9 +121,9 @@ def run():
     print("YOLO ready — opening viewer.\n")
     print("Running — close the Open3D window or Ctrl+C to stop.\n")
 
-    recon       = _ReconThread()
-    display     = o3d.geometry.PointCloud()
-    geom_added  = False
+    recon      = _ReconThread()
+    display    = o3d.geometry.PointCloud()
+    geom_added = False
 
     vis = o3d.visualization.Visualizer()
     vis.create_window("Upsampled Object Reconstruction", width=1280, height=720)
@@ -137,23 +137,29 @@ def run():
             if frame is not None:
                 _, iso_pcd, _ = frame
                 if iso_pcd is not None:
+                    # Show the raw isolated cloud immediately as a fallback
+                    display.points = iso_pcd.points
+                    display.colors = iso_pcd.colors
                     recon.submit(iso_pcd)
 
+                    if not geom_added:
+                        vis.add_geometry(display)
+                        ctr = vis.get_view_control()
+                        ctr.set_front([0, 0, -1])
+                        ctr.set_up([0, -1, 0])
+                        ctr.set_zoom(0.45)
+                        geom_added = True
+                    else:
+                        vis.update_geometry(display)
+
+            # Swap to the upsampled cloud once reconstruction is ready
             upsampled = recon.get()
-            if upsampled is not None:
+            if upsampled is not None and geom_added:
                 display.points = upsampled.points
                 display.colors = upsampled.colors
+                vis.update_geometry(display)
 
-                if not geom_added:
-                    vis.add_geometry(display)
-                    ctr = vis.get_view_control()
-                    ctr.set_front([0, 0, -1])
-                    ctr.set_up([0, -1, 0])
-                    ctr.set_zoom(0.45)
-                    geom_added = True
-                else:
-                    vis.update_geometry(display)
-
+            if geom_added:
                 pts = np.asarray(display.points)
                 if len(pts):
                     vis.get_view_control().set_lookat(pts.mean(axis=0).tolist())

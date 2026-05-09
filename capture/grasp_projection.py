@@ -167,9 +167,10 @@ def make_gripper_lineset(R, t, w, depth=0.06):
         [-hw, -pad_y, pad_z1],
         [-hw,  pad_y, pad_z1],
     ])
+    bar_hw = hw * 0.5
     bar = np.array([
-        [ hw, 0, -0.03],
-        [-hw, 0, -0.03],
+        [ bar_hw, 0, -0.03],
+        [-bar_hw, 0, -0.03],
     ])
 
     def xf(p): return p @ R.T + t

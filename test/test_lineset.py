@@ -1,8 +1,8 @@
 """
-test_graspline_pc.py  —  run GraspNet on a .ply file and display the grasp fork.
+test_lineset.py  —  run GraspNet on a .ply file and display the grasp fork.
 
 Usage:
-    python test_graspline_pc.py --ply scene.ply --checkpoint /path/to/checkpoint.tar
+    python test_lineset.py --ply scene.ply --checkpoint /path/to/checkpoint.tar
 """
 
 import sys
@@ -19,7 +19,7 @@ from grasp_pipeline_graspnet import load_model, infer, cluster_and_select
 
 # ── Gripper geometry constants ────────────────────────────────────────────────
 
-FINGER_LENGTH = 0.04
+FINGER_LENGTH = 0.05
 PALM_DEPTH    = 0.06
 GRIPPER_COLOR = [1.0, 0.4, 0.0]
 

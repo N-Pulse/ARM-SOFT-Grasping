@@ -19,7 +19,7 @@ from grasp_pipeline_graspnet import load_model, infer, cluster_and_select
 
 # ── Gripper geometry constants ────────────────────────────────────────────────
 
-FINGER_LENGTH = 0.05
+FINGER_LENGTH = 0.085
 PALM_DEPTH    = 0.06
 GRIPPER_COLOR = [1.0, 0.4, 0.0]
 

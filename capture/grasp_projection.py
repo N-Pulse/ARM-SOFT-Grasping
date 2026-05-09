@@ -87,7 +87,10 @@ class GraspProjection:
     Parameters
     ----------
     rot : array-like, shape (3, 3)
-        Grasp rotation matrix (columns: binormal, normal, approach).
+        Grasp rotation matrix — GraspNet / graspnetAPI convention:
+          col 0  approach  (finger extension direction, toward object)
+          col 1  closing   (jaw separation axis; thumb on +, four fingers on -)
+          col 2  binormal  (lateral axis; four fingers spread along this)
     trans : array-like, shape (3,)
         Grasp centre in world space (metres).
     width : float
@@ -159,22 +162,26 @@ class GraspProjection:
 
         p_local = (pcd - t) @ R
 
+        # GraspNet axes in local frame:
+        #   [:, 0] approach  — must be in front of palm, within finger depth
+        #   [:, 1] closing   — must be within jaw half-width on either jaw side
+        #   [:, 2] binormal  — must be within the hand's lateral reach
         mask = (
-            (np.abs(p_local[:, 0]) <= w / 2 + 0.005) &
-            (np.abs(p_local[:, 1]) <= self._normal_halfwidth) &
-            (p_local[:, 2] >= 0.0) &
-            (p_local[:, 2] <= self._approach_depth)
+            (p_local[:, 0] >= 0.0) &
+            (p_local[:, 0] <= self._approach_depth) &
+            (np.abs(p_local[:, 1]) <= w / 2 + 0.005) &
+            (np.abs(p_local[:, 2]) <= self._normal_halfwidth)
         )
         pts_w = pcd[mask]
         pts_l = p_local[mask]
 
-        # Keep only the outermost surface layer on each jaw side.
+        # Keep only the outermost surface layer on each jaw side (closing axis).
         if len(pts_l) > 0:
-            abs_x = np.abs(pts_l[:, 0])
-            surf  = abs_x >= (abs_x.max() - self._surface_band)
+            abs_closing = np.abs(pts_l[:, 1])
+            surf        = abs_closing >= (abs_closing.max() - self._surface_band)
             pts_w, pts_l = pts_w[surf], pts_l[surf]
 
-        thumb_mask  = pts_l[:, 0] >= 0  if len(pts_l) > 0 else np.array([], dtype=bool)
+        thumb_mask  = pts_l[:, 1] >= 0  if len(pts_l) > 0 else np.array([], dtype=bool)
         finger_mask = ~thumb_mask
 
         thumb_pts  = pts_w[thumb_mask]
@@ -184,29 +191,36 @@ class GraspProjection:
         contacts: list[np.ndarray] = []
 
         # ── thumb ─────────────────────────────────────────────────────────
+        # Thumb contacts on the +closing side, at the object surface.
         contacts.append(
             thumb_pts.mean(axis=0) if len(thumb_pts) > 0
-            else self._nearest(t + (w / 2) * R[:, 0])
+            else self._nearest(t + R[:, 0] * self._approach_depth / 2
+                                 + R[:, 1] * (w / 2))
         )
 
         # ── four fingers (index → pinky) ──────────────────────────────────
+        # Fingers contact on the -closing side, spread along the binormal axis.
         if len(finger_pts) >= 4:
-            y_proj = fp_local[:, 1]
-            edges  = np.linspace(y_proj.max(), y_proj.min(), 5)
+            z_proj = fp_local[:, 2]                              # binormal spread
+            edges  = np.linspace(z_proj.max(), z_proj.min(), 5)
             for i in range(4):
                 lo, hi = min(edges[i], edges[i + 1]), max(edges[i], edges[i + 1])
-                in_bin = (y_proj >= lo) & (y_proj <= hi)
+                in_bin = (z_proj >= lo) & (z_proj <= hi)
                 if in_bin.sum() > 0:
                     contacts.append(finger_pts[in_bin].mean(axis=0))
                 else:
-                    y_mid = (edges[i] + edges[i + 1]) / 2
-                    ideal = t + R @ np.array([-w / 2, y_mid, self._approach_depth / 2])
+                    z_mid = (edges[i] + edges[i + 1]) / 2
+                    ideal = (t + R[:, 0] * self._approach_depth / 2
+                               - R[:, 1] * (w / 2)
+                               + R[:, 2] * z_mid)
                     contacts.append(self._nearest(ideal))
         else:
             for i in range(4):
                 frac  = (i + 0.5) / 4
-                y_val = self._normal_halfwidth * (1 - 2 * frac)
-                ideal = t + R @ np.array([-w / 2, y_val, self._approach_depth / 2])
+                z_val = self._normal_halfwidth * (1 - 2 * frac)
+                ideal = (t + R[:, 0] * self._approach_depth / 2
+                           - R[:, 1] * (w / 2)
+                           + R[:, 2] * z_val)
                 contacts.append(self._nearest(ideal))
 
         return np.array(contacts)   # (5, 3)
@@ -223,7 +237,7 @@ class GraspProjection:
         T_grasp[:3,  3] = self._t
 
         T_offset        = np.eye(4)
-        T_offset[2,  3] = -self._wrist_offset_m
+        T_offset[0,  3] = -self._wrist_offset_m   # retreat along approach axis
 
         return T_grasp @ np.linalg.inv(T_offset)
 
@@ -236,14 +250,17 @@ class GraspProjection:
     ) -> list[SkeletonEdge]:
         """Build palm→MCP and MCP→tip edges for all five fingers."""
         palm   = T_wrist[:3, 3]
-        palm_x = T_wrist[:3, 0]
-        palm_y = T_wrist[:3, 1]
-        palm_z = T_wrist[:3, 2]
 
-        mcp_y_offsets = [0.035, 0.015, -0.005, -0.025]
-        thumb_mcp = palm + palm_x * 0.04 + palm_z * 0.02
+        palm_approach = T_wrist[:3, 0]   # rot[:, 0] — toward object
+        palm_closing  = T_wrist[:3, 1]   # rot[:, 1] — jaw separation (thumb side)
+        palm_binormal = T_wrist[:3, 2]   # rot[:, 2] — lateral, four fingers spread here
+
+        # Thumb MCP: offset onto the +closing side, slightly forward
+        thumb_mcp = palm + palm_closing * 0.04 + palm_approach * 0.02
+        # Four-finger MCPs: evenly spaced along the binormal axis
+        mcp_binormal_offsets = [0.035, 0.015, -0.005, -0.025]
         mcp_positions = [thumb_mcp] + [
-            palm + palm_y * dy for dy in mcp_y_offsets
+            palm + palm_binormal * dz for dz in mcp_binormal_offsets
         ]
 
         edges: list[SkeletonEdge] = []

@@ -97,12 +97,16 @@ def run(ply_path, checkpoint, device="cuda"):
     else:
         print("No valid grasp found.")
 
-    o3d.visualization.draw_geometries(
-        geoms,
-        window_name="GraspNet — PLY grasp result",
-        width=1280,
-        height=720,
-    )
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="GraspNet — PLY grasp result  (Ctrl+C to quit)",
+                      width=1280, height=720)
+    for g in geoms:
+        vis.add_geometry(g)
+    try:
+        while vis.poll_events():
+            vis.update_renderer()
+    finally:
+        vis.destroy_window()
 
 
 if __name__ == "__main__":

@@ -2,10 +2,7 @@
 test_obj_iso.py
 
 Tests ObjectIsolator with a live Open3D visualiser + a cv2 preview window.
-Uses O3DVisualizer helper — behaviour is identical to the original.
-
-Controls:
-    Close the Open3D window  |  press 'q' in the cv2 window  |  Ctrl+C
+Uses O3DVisualizer wrapper (pass-through, identical Open3D call sequence).
 """
 
 import sys
@@ -20,7 +17,12 @@ import cv2
 import numpy as np
 import open3d as o3d
 from object_isolation import ObjectIsolator
-from o3d_visualizer import O3DVisualizer
+from o3d_visualizer import O3DVisualizer, smooth_pcd
+
+
+VOXEL_SIZE    = 0.004
+SOR_NEIGHBORS = 30
+SOR_STD_RATIO = 1.5
 
 
 def run():
@@ -31,69 +33,76 @@ def run():
     isolator.ready.wait()
     print("YOLO ready — opening windows.\n")
 
-    pcd         = o3d.geometry.PointCloud()
-    first_frame = True
-    CV2_WIN     = "YOLO Preview"
+    # ── Open3D point-cloud window ──────────────────────────────────────────
+    vis = O3DVisualizer(
+        title="Stage 1 — Isolated Object Point Cloud",
+        width=1280, height=720,
+    )
+    vis.set_render_options(point_size=3.0, bg_color=(1.0, 1.0, 1.0))
+
+    pcd        = o3d.geometry.PointCloud()
+    geom_added = False
+
+    CV2_WIN = "YOLO Preview"
 
     print("Running — close the Open3D window, press 'q' in the cv2 window,")
     print("or Ctrl+C to stop.\n")
 
-    with O3DVisualizer(
-        title      = "Stage 1 — Isolated Object Point Cloud",
-        width      = 1280,
-        height     = 720,
-        point_size = 3.0,
-        bg_color   = (1.0, 1.0, 1.0),
-        voxel_size = 0.004,
-        sor_k      = 30,
-        sor_std    = 1.5,
-        # plain Visualizer (default) — matches original exactly
-    ) as vis:
+    try:
+        while True:
+            # ── Pull the latest frame ──────────────────────────────────────
+            try:
+                verts, full_colors, obj_verts, obj_colors, preview_bgr = \
+                    isolator._frame_queue.get(timeout=0.1)
 
-        try:
-            while True:
-                try:
-                    verts, full_colors, obj_verts, obj_colors, preview_bgr = \
-                        isolator._frame_queue.get(timeout=0.1)
+                pts  = obj_verts  if len(obj_verts)  > 0 else verts
+                cols = obj_colors if len(obj_colors) > 0 else full_colors
 
-                    pts  = obj_verts  if len(obj_verts)  > 0 else verts
-                    cols = obj_colors if len(obj_colors) > 0 else full_colors
+                # Build raw pcd then smooth it
+                raw_pcd = o3d.geometry.PointCloud()
+                raw_pcd.points = o3d.utility.Vector3dVector(pts)
+                raw_pcd.colors = o3d.utility.Vector3dVector(cols)
 
-                    raw_pcd        = o3d.geometry.PointCloud()
-                    raw_pcd.points = o3d.utility.Vector3dVector(pts)
-                    raw_pcd.colors = o3d.utility.Vector3dVector(cols)
+                smoothed = smooth_pcd(
+                    raw_pcd,
+                    voxel_size = VOXEL_SIZE,
+                    sor_k      = SOR_NEIGHBORS,
+                    sor_std    = SOR_STD_RATIO,
+                )
 
-                    smoothed   = vis.smooth_pcd(raw_pcd)
-                    pcd.points = smoothed.points
-                    pcd.colors = smoothed.colors
+                pcd.points = smoothed.points
+                pcd.colors = smoothed.colors
 
-                    vis.add_or_update(pcd)
+                # ── Add or update geometry ─────────────────────────────────
+                if not geom_added:
+                    vis.add_or_update(pcd)         # first call → add_geometry
+                    geom_added = True
+                    vis.set_view(front=(0, 0, -1), up=(0, -1, 0), zoom=0.45)
+                else:
+                    vis.add_or_update(pcd)         # subsequent → update_geometry
 
-                    # set_view called once on first frame, after add — same as
-                    # the original's  if not geom_added: ... set_front/up/zoom
-                    if first_frame:
-                        vis.set_view(front=(0, 0, -1), up=(0, -1, 0), zoom=0.45)
-                        first_frame = False
+                # ── Auto-centre ────────────────────────────────────────────
+                vis.centre_on_pcd(pcd)
 
-                    # lookat updated every frame — same as original
-                    vis.centre_on_pcd(pcd)
+                cv2.imshow(CV2_WIN, preview_bgr)
 
-                    cv2.imshow(CV2_WIN, preview_bgr)
+            except queue.Empty:
+                pass
 
-                except queue.Empty:
-                    pass
+            # ── Pump Open3D events ─────────────────────────────────────────
+            if not vis.tick():
+                break
 
-                if not vis.tick():
-                    break
+            # ── Pump cv2 events; 'q' quits ─────────────────────────────────
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
 
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
-
-        except KeyboardInterrupt:
-            pass
-        finally:
-            isolator.stop()
-            cv2.destroyAllWindows()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        isolator.stop()
+        vis.close()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

@@ -25,11 +25,10 @@ from object_isolation import ObjectIsolator
 
 # ── Reconstruction settings ───────────────────────────────────────────────────
 
-POISSON_DEPTH     = 6       # octree depth — lower = faster/coarser
 UPSAMPLE_N        = 5000    # points sampled from the reconstructed mesh
 NORMAL_RADIUS     = 0.02    # m — hybrid normal-search radius
 NORMAL_MAX_NN     = 30      # max neighbours for normal estimation
-MIN_INPUT_POINTS  = 50     # skip reconstruction below this count
+MIN_INPUT_POINTS  = 50      # skip reconstruction below this count
 
 
 # ── Background reconstruction thread ─────────────────────────────────────────
@@ -73,7 +72,9 @@ class _ReconThread:
 
 def _reconstruct(pcd: o3d.geometry.PointCloud) -> "o3d.geometry.PointCloud | None":
     """
-    Estimate normals → Poisson surface reconstruction → uniform point sample.
+    Estimate normals → Ball Pivoting Algorithm → uniform point sample.
+    BPA works on partial/open surfaces (one-sided depth camera views),
+    unlike Poisson which requires a watertight surface.
     Returns a denser PointCloud coloured light-blue, or None on failure.
     """
     if len(pcd.points) < MIN_INPUT_POINTS:
@@ -87,20 +88,17 @@ def _reconstruct(pcd: o3d.geometry.PointCloud) -> "o3d.geometry.PointCloud | Non
     )
     pcd.orient_normals_towards_camera_location(np.array([0.0, 0.0, 0.0]))
 
+    # Set ball radii relative to average point spacing
+    distances = pcd.compute_nearest_neighbor_distance()
+    avg_dist  = np.mean(distances)
+    radii     = o3d.utility.DoubleVector([avg_dist, avg_dist * 2, avg_dist * 4])
+
     try:
-        mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd, depth=POISSON_DEPTH
+        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+            pcd, radii
         )
     except Exception:
         return None
-
-    if len(mesh.vertices) == 0:
-        return None
-
-    # Poisson hallucinates geometry outside the real object extent — crop it
-    pts      = np.asarray(pcd.points)
-    lo, hi   = pts.min(axis=0) - 0.01, pts.max(axis=0) + 0.01
-    mesh     = mesh.crop(o3d.geometry.AxisAlignedBoundingBox(lo, hi))
 
     if len(mesh.vertices) == 0:
         return None

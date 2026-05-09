@@ -244,15 +244,16 @@ class GraspProjection:
     # ── wrist pose ────────────────────────────────────────────────────────
 
     def _compute_wrist_pose(self) -> np.ndarray:
-        """Return 4×4 wrist transform (wrist sits behind the grasp centre)."""
-        T_grasp        = np.eye(4)
-        T_grasp[:3, :3] = self._R
-        T_grasp[:3,  3] = self._t
+        """Return 4×4 wrist transform.
 
-        T_offset        = np.eye(4)
-        T_offset[0,  3] = -self._wrist_offset_m   # retreat along approach axis
-
-        return T_grasp @ np.linalg.inv(T_offset)
+        Palm sits *behind* the grasp centre along the approach axis —
+        the same side as palm_back in the gripper lineset.
+          palm = trans - approach * wrist_offset_m
+        """
+        T = np.eye(4)
+        T[:3, :3] = self._R
+        T[:3,  3] = self._t - self._R[:, 0] * self._wrist_offset_m
+        return T
 
     # ── skeleton edges ────────────────────────────────────────────────────
 

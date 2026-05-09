@@ -25,7 +25,7 @@ from object_isolation import ObjectIsolator
 
 # ── Reconstruction settings ───────────────────────────────────────────────────
 
-UPSAMPLE_N        = 5000    # points sampled from the reconstructed mesh
+UPSAMPLE_N        = 50000   # points sampled from the reconstructed mesh
 NORMAL_RADIUS     = 0.02    # m — hybrid normal-search radius
 NORMAL_MAX_NN     = 30      # max neighbours for normal estimation
 MIN_INPUT_POINTS  = 50      # skip reconstruction below this count
@@ -103,7 +103,10 @@ def _reconstruct(pcd: o3d.geometry.PointCloud) -> "o3d.geometry.PointCloud | Non
     if len(mesh.vertices) == 0:
         return None
 
-    sampled = mesh.sample_points_uniformly(number_of_points=UPSAMPLE_N)
+    n_input = len(pcd.points)
+    n_sample = max(UPSAMPLE_N, n_input * 3)
+    sampled = mesh.sample_points_uniformly(number_of_points=n_sample)
+    print(f"[recon] input pts: {n_input}  mesh verts: {len(mesh.vertices)}  sampled: {n_sample}")
     sampled.paint_uniform_color([0.3, 0.7, 1.0])
     return sampled
 

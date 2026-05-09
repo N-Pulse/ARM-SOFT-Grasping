@@ -111,4 +111,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", required=True,  help="GraspNet checkpoint (.tar).")
     parser.add_argument("--device",     default="cuda")
     args = parser.parse_args()
-    run(args.ply, args.checkpoint, device=args.device)
+    try:
+        run(args.ply, args.checkpoint, device=args.device)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")

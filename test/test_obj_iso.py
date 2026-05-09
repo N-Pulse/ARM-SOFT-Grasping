@@ -1,20 +1,20 @@
 """
 test_obj_iso.py
----------------
-Tests ObjectIsolator with a live Open3D point-cloud window + cv2 preview.
-Uses O3DVisualizer for all rendering boilerplate.
 
-Controls
---------
-  Close the Open3D window  |  press 'q' in the cv2 window  |  Ctrl+C  → stop
+Tests ObjectIsolator with a live Open3D visualiser + a cv2 preview window.
+Uses O3DVisualizer helper — behaviour is identical to the original.
+
+Controls:
+    Close the Open3D window  |  press 'q' in the cv2 window  |  Ctrl+C
 """
 
 import sys
 import os
 import queue
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "capture"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "helper"))
+_HERE = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(_HERE, "..", "capture"))
+sys.path.insert(0, os.path.join(_HERE, "..", "helper"))
 
 import cv2
 import numpy as np
@@ -31,9 +31,9 @@ def run():
     isolator.ready.wait()
     print("YOLO ready — opening windows.\n")
 
-    pcd        = o3d.geometry.PointCloud()
+    pcd         = o3d.geometry.PointCloud()
     first_frame = True
-    CV2_WIN    = "YOLO Preview"
+    CV2_WIN     = "YOLO Preview"
 
     print("Running — close the Open3D window, press 'q' in the cv2 window,")
     print("or Ctrl+C to stop.\n")
@@ -43,49 +43,46 @@ def run():
         width      = 1280,
         height     = 720,
         point_size = 3.0,
-        bg_color   = (1.0, 1.0, 1.0),   # white background
+        bg_color   = (1.0, 1.0, 1.0),
         voxel_size = 0.004,
         sor_k      = 30,
         sor_std    = 1.5,
+        # plain Visualizer (default) — matches original exactly
     ) as vis:
 
         try:
             while True:
-                # ── Pull the latest frame ──────────────────────────────────
                 try:
                     verts, full_colors, obj_verts, obj_colors, preview_bgr = \
                         isolator._frame_queue.get(timeout=0.1)
 
-                    # Prefer isolated object; fall back to full scene
                     pts  = obj_verts  if len(obj_verts)  > 0 else verts
                     cols = obj_colors if len(obj_colors) > 0 else full_colors
 
-                    # Build raw pcd, smooth it, copy back into persistent object
-                    raw_pcd = o3d.geometry.PointCloud()
+                    raw_pcd        = o3d.geometry.PointCloud()
                     raw_pcd.points = o3d.utility.Vector3dVector(pts)
                     raw_pcd.colors = o3d.utility.Vector3dVector(cols)
 
-                    smoothed       = vis.smooth_pcd(raw_pcd)
-                    pcd.points     = smoothed.points
-                    pcd.colors     = smoothed.colors
+                    smoothed   = vis.smooth_pcd(raw_pcd)
+                    pcd.points = smoothed.points
+                    pcd.colors = smoothed.colors
 
-                    # Add on first frame, update thereafter
                     vis.add_or_update(pcd)
 
+                    # set_view called once on first frame, after add — same as
+                    # the original's  if not geom_added: ... set_front/up/zoom
                     if first_frame:
                         vis.set_view(front=(0, 0, -1), up=(0, -1, 0), zoom=0.45)
                         first_frame = False
 
-                    # Keep object centred in the window
+                    # lookat updated every frame — same as original
                     vis.centre_on_pcd(pcd)
 
-                    # cv2 preview
                     cv2.imshow(CV2_WIN, preview_bgr)
 
                 except queue.Empty:
                     pass
 
-                # ── Render tick ────────────────────────────────────────────
                 if not vis.tick():
                     break
 

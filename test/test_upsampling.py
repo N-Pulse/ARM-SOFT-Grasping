@@ -129,7 +129,7 @@ def run():
     vis.create_window("Upsampled Object Reconstruction", width=1280, height=720)
     opt = vis.get_render_option()
     opt.point_size       = 2.0
-    opt.background_color = np.array([0.1, 0.1, 0.1])
+    opt.background_color = np.array([1.0, 1.0, 1.0])
 
     try:
         while True:

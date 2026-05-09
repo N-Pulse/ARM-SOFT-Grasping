@@ -14,6 +14,7 @@ import os
 import queue
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "capture"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "helper"))
 
 import cv2
 import numpy as np

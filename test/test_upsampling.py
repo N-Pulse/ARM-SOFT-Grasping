@@ -126,6 +126,7 @@ def run():
     geom_added   = False
     frame_count  = 0
     any_frame    = 0
+    loop_count   = 0
 
     vis = o3d.visualization.Visualizer()
     vis.create_window("Upsampled Object Reconstruction", width=1280, height=720)
@@ -135,6 +136,10 @@ def run():
 
     try:
         while True:
+            loop_count += 1
+            if loop_count % 500 == 0:
+                print(f"[upsampling] loop {loop_count}  isolator thread alive: {isolator._thread.is_alive()}  frames received: {any_frame}")
+
             frame = isolator.get_full_frame()
             if frame is not None:
                 any_frame += 1

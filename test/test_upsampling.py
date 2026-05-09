@@ -29,7 +29,7 @@ POISSON_DEPTH     = 6       # octree depth — lower = faster/coarser
 UPSAMPLE_N        = 5000    # points sampled from the reconstructed mesh
 NORMAL_RADIUS     = 0.02    # m — hybrid normal-search radius
 NORMAL_MAX_NN     = 30      # max neighbours for normal estimation
-MIN_INPUT_POINTS  = 100     # skip reconstruction below this count
+MIN_INPUT_POINTS  = 50     # skip reconstruction below this count
 
 
 # ── Background reconstruction thread ─────────────────────────────────────────
@@ -121,12 +121,10 @@ def run():
     print("YOLO ready — opening viewer.\n")
     print("Running — close the Open3D window or Ctrl+C to stop.\n")
 
-    recon        = _ReconThread()
-    display      = o3d.geometry.PointCloud()
-    geom_added   = False
-    frame_count  = 0
-    any_frame    = 0
-    loop_count   = 0
+    recon       = _ReconThread()
+    display     = o3d.geometry.PointCloud()
+    geom_added  = False
+    frame_count = 0
 
     vis = o3d.visualization.Visualizer()
     vis.create_window("Upsampled Object Reconstruction", width=1280, height=720)
@@ -136,45 +134,50 @@ def run():
 
     try:
         while True:
-            loop_count += 1
-            if loop_count % 500 == 0:
-                print(f"[upsampling] loop {loop_count}  isolator thread alive: {isolator._thread.is_alive()}  frames received: {any_frame}")
+            try:
+                full_verts, full_colors, obj_verts, obj_colors, _ = \
+                    isolator._frame_queue.get(timeout=0.05)
+            except queue.Empty:
+                if not vis.poll_events():
+                    break
+                vis.update_renderer()
+                continue
 
-            frame = isolator.get_full_frame()
-            if frame is not None:
-                any_frame += 1
-                _, iso_pcd, _ = frame
-                if iso_pcd is not None:
-                    frame_count += 1
-                    print(f"[upsampling] frames with object: {frame_count}  (total frames: {any_frame})")
-                else:
-                    print(f"[upsampling] frame received but no object detected  (total frames: {any_frame})")
-                    # Show the raw isolated cloud immediately as a fallback
-                    display.points = iso_pcd.points
-                    display.colors = iso_pcd.colors
-                    recon.submit(iso_pcd)
+            frame_count += 1
+            print(f"[upsampling] frames: {frame_count}  obj pts: {len(obj_verts)}")
 
-                    if not geom_added:
-                        vis.add_geometry(display)
-                        ctr = vis.get_view_control()
-                        ctr.set_front([0, 0, -1])
-                        ctr.set_up([0, -1, 0])
-                        ctr.set_zoom(0.45)
-                        geom_added = True
-                    else:
-                        vis.update_geometry(display)
+            pts  = obj_verts  if len(obj_verts)  > 0 else full_verts
+            cols = obj_colors if len(obj_colors) > 0 else full_colors
 
-            # Swap to the upsampled cloud once reconstruction is ready
+            raw_pcd        = o3d.geometry.PointCloud()
+            raw_pcd.points = o3d.utility.Vector3dVector(pts)
+            raw_pcd.colors = o3d.utility.Vector3dVector(cols)
+
+            display.points = raw_pcd.points
+            display.colors = raw_pcd.colors
+
+            if len(obj_verts) > 0:
+                recon.submit(raw_pcd)
+
+            if not geom_added:
+                vis.add_geometry(display)
+                ctr = vis.get_view_control()
+                ctr.set_front([0, 0, -1])
+                ctr.set_up([0, -1, 0])
+                ctr.set_zoom(0.45)
+                geom_added = True
+            else:
+                vis.update_geometry(display)
+
             upsampled = recon.get()
-            if upsampled is not None and geom_added:
+            if upsampled is not None:
                 display.points = upsampled.points
                 display.colors = upsampled.colors
                 vis.update_geometry(display)
 
-            if geom_added:
-                pts = np.asarray(display.points)
-                if len(pts):
-                    vis.get_view_control().set_lookat(pts.mean(axis=0).tolist())
+            pts_arr = np.asarray(display.points)
+            if len(pts_arr):
+                vis.get_view_control().set_lookat(pts_arr.mean(axis=0).tolist())
 
             if not vis.poll_events():
                 break

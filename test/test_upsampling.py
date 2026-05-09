@@ -103,11 +103,20 @@ def _reconstruct(pcd: o3d.geometry.PointCloud) -> "o3d.geometry.PointCloud | Non
     if len(mesh.vertices) == 0:
         return None
 
-    n_input = len(pcd.points)
+    n_input  = len(pcd.points)
     n_sample = max(UPSAMPLE_N, n_input * 3)
-    sampled = mesh.sample_points_uniformly(number_of_points=n_sample)
+    sampled  = mesh.sample_points_uniformly(number_of_points=n_sample)
     print(f"[recon] input pts: {n_input}  mesh verts: {len(mesh.vertices)}  sampled: {n_sample}")
-    sampled.paint_uniform_color([0.3, 0.7, 1.0])
+
+    # Transfer colours from nearest neighbour in the original cloud
+    kdtree  = o3d.geometry.KDTreeFlann(pcd)
+    src_col = np.asarray(pcd.colors)
+    new_col = np.empty((len(sampled.points), 3))
+    for i, pt in enumerate(np.asarray(sampled.points)):
+        _, idx, _ = kdtree.search_knn_vector_3d(pt, 1)
+        new_col[i] = src_col[idx[0]]
+    sampled.colors = o3d.utility.Vector3dVector(new_col)
+
     return sampled
 
 

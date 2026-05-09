@@ -121,9 +121,11 @@ def run():
     print("YOLO ready — opening viewer.\n")
     print("Running — close the Open3D window or Ctrl+C to stop.\n")
 
-    recon      = _ReconThread()
-    display    = o3d.geometry.PointCloud()
-    geom_added = False
+    recon        = _ReconThread()
+    display      = o3d.geometry.PointCloud()
+    geom_added   = False
+    frame_count  = 0
+    any_frame    = 0
 
     vis = o3d.visualization.Visualizer()
     vis.create_window("Upsampled Object Reconstruction", width=1280, height=720)
@@ -135,8 +137,13 @@ def run():
         while True:
             frame = isolator.get_full_frame()
             if frame is not None:
+                any_frame += 1
                 _, iso_pcd, _ = frame
                 if iso_pcd is not None:
+                    frame_count += 1
+                    print(f"[upsampling] frames with object: {frame_count}  (total frames: {any_frame})")
+                else:
+                    print(f"[upsampling] frame received but no object detected  (total frames: {any_frame})")
                     # Show the raw isolated cloud immediately as a fallback
                     display.points = iso_pcd.points
                     display.colors = iso_pcd.colors

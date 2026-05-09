@@ -97,7 +97,7 @@ def run(checkpoint, device="cuda"):
     opt = vis.get_render_option()
     opt.point_size       = 2.0
     opt.line_width       = 3.0
-    opt.background_color = np.array([0.1, 0.1, 0.1])
+    opt.background_color = np.array([1.0, 1.0, 1.0])
 
     try:
         while True:

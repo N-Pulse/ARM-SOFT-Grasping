@@ -25,11 +25,10 @@ from object_isolation import ObjectIsolator
 
 # ── Reconstruction settings ───────────────────────────────────────────────────
 
-POISSON_DEPTH     = 6       # octree depth — lower = faster/coarser
-UPSAMPLE_N        = 5000    # points sampled from the reconstructed mesh
+UPSAMPLE_N        = 50000   # points sampled from the reconstructed mesh
 NORMAL_RADIUS     = 0.02    # m — hybrid normal-search radius
 NORMAL_MAX_NN     = 30      # max neighbours for normal estimation
-MIN_INPUT_POINTS  = 100     # skip reconstruction below this count
+MIN_INPUT_POINTS  = 50      # skip reconstruction below this count
 
 
 # ── Background reconstruction thread ─────────────────────────────────────────
@@ -73,7 +72,9 @@ class _ReconThread:
 
 def _reconstruct(pcd: o3d.geometry.PointCloud) -> "o3d.geometry.PointCloud | None":
     """
-    Estimate normals → Poisson surface reconstruction → uniform point sample.
+    Estimate normals → Ball Pivoting Algorithm → uniform point sample.
+    BPA works on partial/open surfaces (one-sided depth camera views),
+    unlike Poisson which requires a watertight surface.
     Returns a denser PointCloud coloured light-blue, or None on failure.
     """
     if len(pcd.points) < MIN_INPUT_POINTS:
@@ -87,9 +88,14 @@ def _reconstruct(pcd: o3d.geometry.PointCloud) -> "o3d.geometry.PointCloud | Non
     )
     pcd.orient_normals_towards_camera_location(np.array([0.0, 0.0, 0.0]))
 
+    # Set ball radii relative to average point spacing
+    distances = pcd.compute_nearest_neighbor_distance()
+    avg_dist  = np.mean(distances)
+    radii     = o3d.utility.DoubleVector([avg_dist, avg_dist * 2, avg_dist * 4])
+
     try:
-        mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd, depth=POISSON_DEPTH
+        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+            pcd, radii
         )
     except Exception:
         return None
@@ -97,16 +103,20 @@ def _reconstruct(pcd: o3d.geometry.PointCloud) -> "o3d.geometry.PointCloud | Non
     if len(mesh.vertices) == 0:
         return None
 
-    # Poisson hallucinates geometry outside the real object extent — crop it
-    pts      = np.asarray(pcd.points)
-    lo, hi   = pts.min(axis=0) - 0.01, pts.max(axis=0) + 0.01
-    mesh     = mesh.crop(o3d.geometry.AxisAlignedBoundingBox(lo, hi))
+    n_input  = len(pcd.points)
+    n_sample = max(UPSAMPLE_N, n_input * 3)
+    sampled  = mesh.sample_points_uniformly(number_of_points=n_sample)
+    print(f"[recon] input pts: {n_input}  mesh verts: {len(mesh.vertices)}  sampled: {n_sample}")
 
-    if len(mesh.vertices) == 0:
-        return None
+    # Transfer colours from nearest neighbour in the original cloud
+    kdtree  = o3d.geometry.KDTreeFlann(pcd)
+    src_col = np.asarray(pcd.colors)
+    new_col = np.empty((len(sampled.points), 3))
+    for i, pt in enumerate(np.asarray(sampled.points)):
+        _, idx, _ = kdtree.search_knn_vector_3d(pt, 1)
+        new_col[i] = src_col[idx[0]]
+    sampled.colors = o3d.utility.Vector3dVector(new_col)
 
-    sampled = mesh.sample_points_uniformly(number_of_points=UPSAMPLE_N)
-    sampled.paint_uniform_color([0.3, 0.7, 1.0])
     return sampled
 
 
@@ -121,12 +131,10 @@ def run():
     print("YOLO ready — opening viewer.\n")
     print("Running — close the Open3D window or Ctrl+C to stop.\n")
 
-    recon        = _ReconThread()
-    display      = o3d.geometry.PointCloud()
-    geom_added   = False
-    frame_count  = 0
-    any_frame    = 0
-    loop_count   = 0
+    recon       = _ReconThread()
+    display     = o3d.geometry.PointCloud()
+    geom_added  = False
+    frame_count = 0
 
     vis = o3d.visualization.Visualizer()
     vis.create_window("Upsampled Object Reconstruction", width=1280, height=720)
@@ -136,45 +144,50 @@ def run():
 
     try:
         while True:
-            loop_count += 1
-            if loop_count % 500 == 0:
-                print(f"[upsampling] loop {loop_count}  isolator thread alive: {isolator._thread.is_alive()}  frames received: {any_frame}")
+            try:
+                full_verts, full_colors, obj_verts, obj_colors, _ = \
+                    isolator._frame_queue.get(timeout=0.05)
+            except queue.Empty:
+                if not vis.poll_events():
+                    break
+                vis.update_renderer()
+                continue
 
-            frame = isolator.get_full_frame()
-            if frame is not None:
-                any_frame += 1
-                _, iso_pcd, _ = frame
-                if iso_pcd is not None:
-                    frame_count += 1
-                    print(f"[upsampling] frames with object: {frame_count}  (total frames: {any_frame})")
-                else:
-                    print(f"[upsampling] frame received but no object detected  (total frames: {any_frame})")
-                    # Show the raw isolated cloud immediately as a fallback
-                    display.points = iso_pcd.points
-                    display.colors = iso_pcd.colors
-                    recon.submit(iso_pcd)
+            frame_count += 1
+            print(f"[upsampling] frames: {frame_count}  obj pts: {len(obj_verts)}")
 
-                    if not geom_added:
-                        vis.add_geometry(display)
-                        ctr = vis.get_view_control()
-                        ctr.set_front([0, 0, -1])
-                        ctr.set_up([0, -1, 0])
-                        ctr.set_zoom(0.45)
-                        geom_added = True
-                    else:
-                        vis.update_geometry(display)
+            pts  = obj_verts  if len(obj_verts)  > 0 else full_verts
+            cols = obj_colors if len(obj_colors) > 0 else full_colors
 
-            # Swap to the upsampled cloud once reconstruction is ready
+            raw_pcd        = o3d.geometry.PointCloud()
+            raw_pcd.points = o3d.utility.Vector3dVector(pts)
+            raw_pcd.colors = o3d.utility.Vector3dVector(cols)
+
+            display.points = raw_pcd.points
+            display.colors = raw_pcd.colors
+
+            if len(obj_verts) > 0:
+                recon.submit(raw_pcd)
+
+            if not geom_added:
+                vis.add_geometry(display)
+                ctr = vis.get_view_control()
+                ctr.set_front([0, 0, -1])
+                ctr.set_up([0, -1, 0])
+                ctr.set_zoom(0.45)
+                geom_added = True
+            else:
+                vis.update_geometry(display)
+
             upsampled = recon.get()
-            if upsampled is not None and geom_added:
+            if upsampled is not None:
                 display.points = upsampled.points
                 display.colors = upsampled.colors
                 vis.update_geometry(display)
 
-            if geom_added:
-                pts = np.asarray(display.points)
-                if len(pts):
-                    vis.get_view_control().set_lookat(pts.mean(axis=0).tolist())
+            pts_arr = np.asarray(display.points)
+            if len(pts_arr):
+                vis.get_view_control().set_lookat(pts_arr.mean(axis=0).tolist())
 
             if not vis.poll_events():
                 break

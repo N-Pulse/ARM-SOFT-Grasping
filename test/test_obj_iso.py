@@ -40,7 +40,7 @@ from object_isolation import ObjectIsolator
 
 # Voxel size in metres.  Larger = fewer, chunkier points; smaller = more detail.
 # 0.004 m (4 mm) is a good starting point for hand-sized objects at 10–40 cm.
-VOXEL_SIZE = 0.004
+VOXEL_SIZE = 0.002
 
 # Statistical outlier removal.
 # nb_neighbors : how many neighbours to consider for the mean-distance check

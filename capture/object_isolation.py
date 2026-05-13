@@ -124,7 +124,7 @@ TARGET_LOCK_MAX_DRIFT = 150    # pixels — max bbox-centre shift before lock br
 
 # ─── Point cloud settings ────────────────────────────────────────────────────
 
-SUBSAMPLE  = 2    # keep every Nth point (reduces compute & memory)
+SUBSAMPLE  = 1    # keep every Nth point (reduces compute & memory)
 
 # Pixel coordinates of the image centre — used for initial target selection
 IMG_CENTER = np.array([COLOR_WIDTH / 2, COLOR_HEIGHT / 2])
@@ -158,6 +158,7 @@ def _build_pipeline():
     spatial  = rs.spatial_filter()
     temporal = rs.temporal_filter()
     holes    = rs.hole_filling_filter()
+    holes.set_option(rs.option.holes_fill, 2)
     spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
     spatial.set_option(rs.option.filter_smooth_delta, 20)
     temporal.set_option(rs.option.filter_smooth_alpha, 0.4)

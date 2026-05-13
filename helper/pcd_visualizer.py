@@ -16,11 +16,11 @@ isolator.stop()
 
 from __future__ import annotations
 
+import math
 import queue
 from typing import TYPE_CHECKING
 
 import cv2
-import numpy as np
 import open3d as o3d
 
 if TYPE_CHECKING:
@@ -31,96 +31,42 @@ if TYPE_CHECKING:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _fit_camera_80pct(vis: o3d.visualization.Visualizer,
-                      pcd: o3d.geometry.PointCloud,
-                      width: int,
-                      height: int) -> None:
-    """Reposition the camera so the cloud's vertical span fills 80 % of the
-    window height while keeping the cloud centred and fully visible.
+def _auto_zoom(vis: o3d.visualization.Visualizer,
+               pcd: o3d.geometry.PointCloud) -> None:
+    """Centre the cloud then zoom in so it fills most of the window.
 
-    Strategy
-    --------
-    1. Call ``reset_view_point`` to centre the cloud and obtain a well-oriented
-       camera (lookat = bbox centre, reasonable front/up).
-    2. Read back the resulting PinholeCameraParameters — this gives us the
-       exact rotation matrix R and intrinsic focal length fy.
-    3. Project all 8 bounding-box corners onto the camera's vertical axis to
-       get the true screen-space vertical span of the cloud (axis-aligned bbox
-       projected extent, not the bounding sphere).
-    4. Compute the depth ``d`` such that:
-           (fy * vertical_span) / (d * height) = 0.80
-       i.e. the span covers 80 % of the image height.
-    5. Move the camera to ``bbox_centre + d * (-forward)``, keeping orientation.
+    Uses ``reset_view_point`` for centering, then derives a single zoom value
+    from the bounding box and applies it via ``set_zoom`` — no camera-matrix
+    manipulation required.
+
+    How the zoom is computed
+    ------------------------
+    After ``reset_view_point`` Open3D positions the camera at:
+        distance = max_extent * 0.5 / tan(30°)  ≈  max_extent * 0.866
+
+    ``set_zoom(z)`` narrows the field of view to ``90 * z`` degrees without
+    moving the camera, so the visible height becomes:
+        visible_h = 2 * distance * tan(45 * z °)
+
+    Solving for z such that the Y-axis extent of the bounding box fills 80 %
+    of visible_h:
+        z = atan( vert_extent / (0.8 * 2 * distance) ) * (180/π) / 45
     """
-    # 1. Let Open3D centre the cloud and set a sensible orientation.
     vis.reset_view_point(True)
-    vis.poll_events()
-    vis.update_renderer()
 
-    ctr = vis.get_view_control()
-    try:
-        params = ctr.convert_to_pinhole_camera_parameters()
-    except Exception:
-        # Fallback: reset_view_point already did something reasonable.
-        return
+    bbox     = pcd.get_axis_aligned_bounding_box()
+    extents  = bbox.get_extent()           # (dx, dy, dz)
+    max_ext  = max(extents)
+    vert_ext = extents[1]                  # Y extent = vertical in default view
 
-    # Camera rotation and translation (world → camera).
-    R = params.extrinsic[:3, :3]          # (3,3)
-    t = params.extrinsic[:3, 3]           # (3,)
+    # Camera distance set by reset_view_point (Open3D internal formula).
+    distance = max_ext * 0.866
 
-    # Camera position in world coords.
-    cam_pos = -R.T @ t                    # (3,)
+    # Zoom for ~80 % vertical fill, clamped to a sensible range.
+    zoom = math.degrees(math.atan(vert_ext / (1.6 * distance))) / 45.0
+    zoom = max(0.05, min(zoom, 1.5))
 
-    # Camera forward axis in world coords (column 2 of R^T).
-    forward = R.T[:, 2]                   # unit vector
-
-    # Bbox centre.
-    bbox   = pcd.get_axis_aligned_bounding_box()
-    center = np.asarray(bbox.get_center())
-
-    # 2. Project 8 bbox corners onto camera Y axis to get vertical screen span.
-    #    Camera Y axis in world = column 1 of R^T.
-    cam_y = R.T[:, 1]                     # unit vector (screen-down direction)
-    corners = np.asarray(bbox.get_box_points())   # (8, 3)
-    proj_y  = corners @ cam_y
-    vert_span = float(proj_y.max() - proj_y.min())
-
-    # Also project onto camera X axis (horizontal) so we can ensure the full
-    # cloud fits both ways (use whichever constraint is tighter).
-    cam_x     = R.T[:, 0]
-    proj_x    = corners @ cam_x
-    horiz_span = float(proj_x.max() - proj_x.min())
-
-    # 3. Focal lengths from intrinsics.
-    K  = params.intrinsic.intrinsic_matrix   # (3,3)
-    fy = float(K[1, 1])
-    fx = float(K[0, 0])
-
-    TARGET = 0.80  # fill fraction
-
-    # Required depth so vert_span fills TARGET of image height:
-    #   fy * vert_span / d = TARGET * height   →   d = fy * vert_span / (TARGET * height)
-    d_vert  = fy * vert_span  / (TARGET * height)
-    # Same for horizontal:
-    d_horiz = fx * horiz_span / (TARGET * width)
-
-    # Use the larger distance so BOTH extents are within the window.
-    d = max(d_vert, d_horiz)
-
-    # 4. Reposition camera along the forward axis.
-    new_cam_pos  = center - d * forward
-
-    # 5. Rebuild extrinsic with new camera position, same rotation.
-    new_t = -R @ new_cam_pos
-    new_extrinsic        = params.extrinsic.copy()
-    new_extrinsic[:3, 3] = new_t
-    params.extrinsic     = new_extrinsic
-
-    try:
-        ctr.convert_from_pinhole_camera_parameters(params, allow_arbitrary=True)
-    except TypeError:
-        # Older Open3D builds don't accept allow_arbitrary.
-        ctr.convert_from_pinhole_camera_parameters(params)
+    vis.get_view_control().set_zoom(zoom)
 
 
 # ---------------------------------------------------------------------------
@@ -137,10 +83,9 @@ def show_isolated_pcd(
 ) -> None:
     """Spin up an Open3D window and stream frames from *isolator*.
 
-    On the first frame the camera is positioned so the cloud is centred and
-    its vertical extent fills 80 % of the window height (while keeping the
-    whole cloud visible).  After that the user can freely orbit, pan, and zoom;
-    the camera is not reset on subsequent frames.
+    On the first frame the cloud is centred and auto-zoomed so the object
+    fills most of the window.  After that the user can freely orbit, pan,
+    and zoom; the camera is not reset on subsequent frames.
 
     The function blocks until the window is closed or a KeyboardInterrupt is
     received.  The isolator is **not** stopped here — the caller decides when
@@ -184,7 +129,7 @@ def show_isolated_pcd(
 
                 if not geom_added:
                     vis.add_geometry(pcd)
-                    _fit_camera_80pct(vis, pcd, width, height)
+                    _auto_zoom(vis, pcd)
                     geom_added = True
                 else:
                     vis.update_geometry(pcd)

@@ -85,7 +85,9 @@ DEPTH_KERNEL_SIZE   = 5     # square neighbourhood used for min/max depth check
 # Pixels where max(B,G,R) > WHITE_BRIGHTNESS_MIN  AND
 #           max(B,G,R) - min(B,G,R) < WHITE_SAT_MAX
 # are considered "white / near-white" and blanked out.
-WHITE_BRIGHTNESS_MIN = 200
+# 230 ≈ 90 % of 255 — only catches truly white surfaces; gray (~200 or below)
+# is left untouched.  Raise toward 245 to be even more conservative.
+WHITE_BRIGHTNESS_MIN = 190
 WHITE_SAT_MAX        = 30
 
 # ─── Object-lock parameters ───────────────────────────────────────────────────

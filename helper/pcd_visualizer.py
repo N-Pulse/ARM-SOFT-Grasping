@@ -33,40 +33,44 @@ if TYPE_CHECKING:
 
 def _auto_zoom(vis: o3d.visualization.Visualizer,
                pcd: o3d.geometry.PointCloud) -> None:
-    """Centre the cloud then zoom in so it fills most of the window.
+    """Point the camera at the true centroid of the isolated cloud and zoom
+    so its bounding box fills ~80 % of the window height.
 
-    Uses ``reset_view_point`` for centering, then derives a single zoom value
-    from the bounding box and applies it via ``set_zoom`` — no camera-matrix
-    manipulation required.
-
-    How the zoom is computed
-    ------------------------
-    After ``reset_view_point`` Open3D positions the camera at:
-        distance = max_extent * 0.5 / tan(30°)  ≈  max_extent * 0.866
-
-    ``set_zoom(z)`` narrows the field of view to ``90 * z`` degrees without
-    moving the camera, so the visible height becomes:
-        visible_h = 2 * distance * tan(45 * z °)
-
-    Solving for z such that the Y-axis extent of the bounding box fills 80 %
-    of visible_h:
-        z = atan( vert_extent / (0.8 * 2 * distance) ) * (180/π) / 45
+    Steps
+    -----
+    1. ``reset_view_point(True)`` — establishes a sensible camera orientation
+       and sets the internal distance:
+           distance = max_extent * 0.5 / tan(30°)  ≈  max_extent * 0.866
+    2. ``set_lookat(centroid)`` — re-targets the lookat to the mean of all
+       points (not the geometric bbox centre), so the object is truly centred.
+    3. ``set_zoom(z)`` — narrows the FOV to ``90 * z`` degrees without moving
+       the camera.  The visible height then equals:
+           visible_h = 2 * distance * tan(45 * z °)
+       Solving for 80 % fill gives:
+           z = atan( vert_extent / (1.6 * distance) ) * (180/π) / 45
     """
     vis.reset_view_point(True)
 
-    bbox     = pcd.get_axis_aligned_bounding_box()
-    extents  = bbox.get_extent()           # (dx, dy, dz)
-    max_ext  = max(extents)
-    vert_ext = extents[1]                  # Y extent = vertical in default view
+    # True centroid = mean of all isolated points (not the bbox centre).
+    centroid = pcd.get_center()                # [x, y, z]
 
-    # Camera distance set by reset_view_point (Open3D internal formula).
+    bbox    = pcd.get_axis_aligned_bounding_box()
+    extents = bbox.get_extent()                # [dx, dy, dz]
+    max_ext = max(extents[0], extents[1], extents[2])
+    # Use the larger of the two screen-facing axes (X and Y) so the whole
+    # cloud fits inside 80 % regardless of whether it is wider or taller.
+    screen_ext = max(extents[0], extents[1])
+
+    # Distance formula matching Open3D's reset_view_point internals.
     distance = max_ext * 0.866
 
-    # Zoom for ~80 % vertical fill, clamped to a sensible range.
-    zoom = math.degrees(math.atan(vert_ext / (1.6 * distance))) / 45.0
+    # Zoom for 80 % fill, clamped to a usable range.
+    zoom = math.degrees(math.atan(screen_ext / (1.6 * distance))) / 45.0
     zoom = max(0.05, min(zoom, 1.5))
 
-    vis.get_view_control().set_zoom(zoom)
+    ctr = vis.get_view_control()
+    ctr.set_lookat(centroid)   # centre on the point-cloud mean
+    ctr.set_zoom(zoom)         # fill 80 % of the window
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +112,9 @@ def show_isolated_pcd(
     vis.create_window(title, width=width, height=height)
     cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
 
-    pcd        = o3d.geometry.PointCloud()
-    geom_added = False
+    pcd         = o3d.geometry.PointCloud()
+    geom_added  = False
+    zoom_fitted = False   # set only after the first real isolated cloud
 
     print("[pcd_visualizer] Window open — close the Open3D window or press Ctrl+C to stop.")
 
@@ -129,10 +134,20 @@ def show_isolated_pcd(
 
                 if not geom_added:
                     vis.add_geometry(pcd)
-                    _auto_zoom(vis, pcd)
                     geom_added = True
                 else:
                     vis.update_geometry(pcd)
+
+                # Auto-zoom once we have a confirmed isolated object cloud.
+                # Build a throw-away PointCloud from obj_verts only so
+                # get_center() and get_axis_aligned_bounding_box() are
+                # guaranteed to operate on the isolated object — never on
+                # the full scene fallback.
+                if not zoom_fitted and len(obj_verts) > 0:
+                    iso_pcd = o3d.geometry.PointCloud()
+                    iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
+                    _auto_zoom(vis, iso_pcd)
+                    zoom_fitted = True
 
                 # ── cv2 YOLO preview ────────────────────────────────────────
                 if preview_bgr is not None:

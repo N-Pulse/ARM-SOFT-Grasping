@@ -6,6 +6,11 @@ ObjectIsolator locks on one object; GraspInferenceThread runs GraspNet
 in the background; the best grasp is drawn as a lineset fork over the
 live Open3D point cloud viewer.
 
+Point-cloud processing and display (frame reading, pts/cols selection,
+geom_added / zoom_fitted flags, cv2 YOLO preview) is identical to
+show_isolated_pcd() in helper/pcd_visualizer.py.  The only additions are
+the lineset geometry and the grasp-inference thread.
+
 Usage:
     python test_lineset_live.py --checkpoint /path/to/checkpoint.tar
     python test_lineset_live.py --checkpoint /path/to/checkpoint.tar --device cpu
@@ -29,7 +34,7 @@ import numpy as np
 import open3d as o3d
 import torch
 
-from object_isolation import ObjectIsolator
+from capture.object_isolation import ObjectIsolator
 from grasp_pipeline_graspnet import load_model, GraspInferenceThread
 from helper.pcd_visualizer import auto_zoom
 
@@ -92,13 +97,9 @@ def run(checkpoint, device="cuda"):
 
     grasp_thread = GraspInferenceThread(model, device=device, interval=0.5)
 
+    # ── Window setup (same as show_isolated_pcd) ──────────────────────────────
     CV2_WIN = "YOLO Detection"
     cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
-
-    pcd        = o3d.geometry.PointCloud()
-    lineset    = _empty_lineset()
-    geom_added = False
-    zoom_fitted = False
 
     vis = o3d.visualization.Visualizer()
     vis.create_window("GraspNet — Live Grasp", width=1280, height=720)
@@ -107,47 +108,55 @@ def run(checkpoint, device="cuda"):
     opt.line_width       = 3.0
     opt.background_color = np.array([1.0, 1.0, 1.0])
 
+    pcd         = o3d.geometry.PointCloud()
+    lineset     = _empty_lineset()
+    geom_added  = False
+    zoom_fitted = False   # set only after the first real isolated cloud
+
     try:
         while True:
+            # ── Pull latest frame (identical to show_isolated_pcd) ────────────
             try:
-                full_verts, full_colors, obj_verts, obj_colors, preview_bgr = \
-                    isolator._frame_queue.get(timeout=0.05)
+                verts, full_colors, obj_verts, obj_colors, preview_bgr = \
+                    isolator._frame_queue.get(timeout=0.1)
+
+                # Point-cloud selection — same logic as show_isolated_pcd
+                pts  = obj_verts  if len(obj_verts)  > 0 else verts
+                cols = obj_colors if len(obj_colors) > 0 else full_colors
+
+                pcd.points = o3d.utility.Vector3dVector(pts)
+                pcd.colors = o3d.utility.Vector3dVector(cols)
+
+                if not geom_added:
+                    vis.add_geometry(pcd)
+                    vis.add_geometry(lineset)   # ← grasp overlay added once
+                    geom_added = True
+                else:
+                    vis.update_geometry(pcd)
+
+                # Auto-zoom once on the first confirmed isolated cloud —
+                # identical to show_isolated_pcd; camera is free afterwards
+                if not zoom_fitted and len(obj_verts) > 0:
+                    iso_pcd = o3d.geometry.PointCloud()
+                    iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
+                    auto_zoom(vis, iso_pcd)
+                    zoom_fitted = True
+
+                # cv2 YOLO preview — identical to show_isolated_pcd
+                if preview_bgr is not None:
+                    cv2.imshow(CV2_WIN, preview_bgr)
+
+                # ── GraspNet: feed isolated cloud, read latest result ─────────
+                if len(obj_verts) > 0:
+                    iso = o3d.geometry.PointCloud()
+                    iso.points = o3d.utility.Vector3dVector(obj_verts)
+                    iso.colors = o3d.utility.Vector3dVector(obj_colors)
+                    grasp_thread.update_pcd(iso)
+
             except queue.Empty:
-                if not vis.poll_events():
-                    break
-                vis.update_renderer()
-                cv2.waitKey(1)
-                continue
+                pass
 
-            pts  = obj_verts  if len(obj_verts)  > 0 else full_verts
-            cols = obj_colors if len(obj_colors) > 0 else full_colors
-
-            pcd.points = o3d.utility.Vector3dVector(pts)
-            pcd.colors = o3d.utility.Vector3dVector(cols)
-
-            # Feed isolated cloud to GraspNet
-            if len(obj_verts) > 0:
-                iso = o3d.geometry.PointCloud()
-                iso.points = o3d.utility.Vector3dVector(obj_verts)
-                iso.colors = o3d.utility.Vector3dVector(obj_colors)
-                grasp_thread.update_pcd(iso)
-
-            # Add geometries once, then update
-            if not geom_added:
-                vis.add_geometry(pcd)
-                vis.add_geometry(lineset)
-                geom_added = True
-            else:
-                vis.update_geometry(pcd)
-
-            # Auto-zoom once we have the first confirmed isolated cloud
-            if not zoom_fitted and len(obj_verts) > 0:
-                iso_pcd = o3d.geometry.PointCloud()
-                iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
-                auto_zoom(vis, iso_pcd)
-                zoom_fitted = True
-
-            # Update grasp lineset
+            # Update grasp lineset whenever a new result is ready
             grasp = grasp_thread.get_grasp()
             if grasp is not None:
                 rot, trans, width = grasp
@@ -157,22 +166,13 @@ def run(checkpoint, device="cuda"):
                 lineset.colors = new_ls.colors
                 vis.update_geometry(lineset)
 
-            # Keep lookat centred on the isolated object
-            if len(obj_verts) > 0:
-                vis.get_view_control().set_lookat(
-                    obj_verts.mean(axis=0).tolist()
-                )
-
-            # YOLO preview
-            if preview_bgr is not None:
-                cv2.imshow(CV2_WIN, preview_bgr)
-
+            # ── Service both GUI event loops (identical to show_isolated_pcd) ──
             if not vis.poll_events():
                 break
             vis.update_renderer()
 
             key = cv2.waitKey(1) & 0xFF
-            if key in (27, ord("q")):
+            if key in (27, ord("q")):   # ESC or q
                 break
 
     except KeyboardInterrupt:

@@ -68,6 +68,11 @@ YOLO_IMGSZ       = 320
 YOLO_SKIP_FRAMES = 3
 SUBSAMPLE        = 2
 
+# Detections whose segmentation mask covers more than this fraction of the
+# image are discarded — they are almost certainly background surfaces such as
+# a table or floor rather than a graspable object.
+MAX_MASK_FILL    = 0.80
+
 IMG_CENTER       = np.array([COLOR_WIDTH / 2, COLOR_HEIGHT / 2])
 
 # ─── Graspable-object whitelist ───────────────────────────────────────────────
@@ -148,6 +153,12 @@ def _detect_masks(model, bgr_image):
                 (bgr_image.shape[1], bgr_image.shape[0]),
                 interpolation=cv2.INTER_NEAREST,
             ).astype(bool)
+
+            # Discard detections that flood most of the image (table, floor…)
+            fill = mask_resized.sum() / mask_resized.size
+            if fill > MAX_MASK_FILL:
+                continue                         # ← size filter
+
             x1, y1, x2, y2 = box.cpu().numpy().astype(int)
             detections.append((mask_resized, np.array([x1, y1, x2, y2]), class_name))
     return detections

@@ -73,6 +73,21 @@ SUBSAMPLE        = 2
 # a table or floor rather than a graspable object.
 MAX_MASK_FILL    = 0.80
 
+# ─── Pre-YOLO foreground filtering ───────────────────────────────────────────
+# Step 1 — depth-discontinuity removal
+# Pixels whose neighbourhood contains a depth jump larger than this value
+# (in raw D405 depth units; default scale = 1 mm/unit, so 30 ≈ 3 cm) are
+# treated as surface-edge noise and blanked out before YOLO sees the image.
+DEPTH_GAP_UNITS     = 30
+DEPTH_KERNEL_SIZE   = 5     # square neighbourhood used for min/max depth check
+
+# Step 2 — white-background removal
+# Pixels where max(B,G,R) > WHITE_BRIGHTNESS_MIN  AND
+#           max(B,G,R) - min(B,G,R) < WHITE_SAT_MAX
+# are considered "white / near-white" and blanked out.
+WHITE_BRIGHTNESS_MIN = 200
+WHITE_SAT_MAX        = 30
+
 # ─── Object-lock parameters ───────────────────────────────────────────────────
 # Once an object is selected, the lock is held for this many seconds as long as
 # the camera is not moving.  Any motion above FRAME_MOTION_MAD breaks the lock
@@ -128,6 +143,61 @@ def _build_pipeline():
     temporal.set_option(rs.option.filter_smooth_delta, 20)
 
     return pipeline, align, spatial, temporal, holes, rs.pointcloud()
+
+
+def _build_foreground_mask(bgr: np.ndarray, depth_frame) -> np.ndarray:
+    """Return a bool mask (H, W) that is True where a pixel is likely foreground.
+
+    Two stages — applied before YOLO so the model never sees background clutter:
+
+    1. **Depth-discontinuity removal** — for each pixel, the raw depth range
+       across a small neighbourhood is computed via morphological min/max.
+       Pixels whose neighbourhood depth span exceeds ``DEPTH_GAP_UNITS`` sit on
+       a surface boundary (e.g. the silhouette edge of an object against the
+       table) and are masked out, along with any pixel that has no depth reading.
+
+    2. **White / near-white background removal** — pixels with high brightness
+       and low colour saturation (typical of a white or light-grey table) are
+       masked out independently of depth.
+
+    The resulting mask is applied to the BGR image before it is passed to YOLO,
+    and separately used to tint the cv2 preview so you can see what was removed.
+    """
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT, (DEPTH_KERNEL_SIZE, DEPTH_KERNEL_SIZE)
+    )
+
+    # ── 1. Depth discontinuity ────────────────────────────────────────────
+    depth = np.asanyarray(depth_frame.get_data()).astype(np.float32)
+    invalid = depth == 0
+
+    # Dilation gives the max depth in the neighbourhood.
+    depth_max = cv2.dilate(depth, kernel)
+
+    # For erosion we need the min of *valid* pixels, so temporarily promote
+    # invalid pixels to the maximum possible value so they cannot "win".
+    depth_erode_in = depth.copy()
+    depth_erode_in[invalid] = 65535.0
+    depth_min = cv2.erode(depth_erode_in, kernel)
+    depth_min[depth_min >= 65535.0] = 0.0          # restore zeros for invalid
+
+    depth_gap_mask = (depth_max - depth_min > DEPTH_GAP_UNITS) | invalid
+
+    # ── 2. White / near-white background ─────────────────────────────────
+    brightness = bgr.max(axis=2).astype(np.float32)               # max(B,G,R)
+    saturation = (bgr.max(axis=2) - bgr.min(axis=2)).astype(np.float32)
+    white_mask = (brightness > WHITE_BRIGHTNESS_MIN) & (saturation < WHITE_SAT_MAX)
+
+    # Foreground = neither a depth-edge pixel nor a white-background pixel
+    return ~(depth_gap_mask | white_mask)
+
+
+def _apply_foreground_mask(bgr: np.ndarray,
+                           fg_mask: np.ndarray) -> np.ndarray:
+    """Black out pixels outside *fg_mask* so YOLO ignores them."""
+    out = bgr.copy()
+    out[~fg_mask] = 0
+    return out
 
 
 def _detect_masks(model, bgr_image):
@@ -321,10 +391,18 @@ class ObjectIsolator:
 
                 bgr = np.asanyarray(color_fr.get_data())
 
-                # ── 2. Motion check + lock / re-detect logic ───────────────
+                # ── 2. Pre-YOLO foreground filtering ──────────────────────
+                # Build a pixel-level foreground mask (depth gaps + white BG)
+                # and blank those regions before YOLO sees the image.
+                fg_mask   = _build_foreground_mask(bgr, depth_fr)
+                yolo_bgr  = _apply_foreground_mask(bgr, fg_mask)
+
+                # ── 3. Motion check + lock / re-detect logic ───────────────
                 now = _time.monotonic()
 
                 # Cheap per-frame motion estimate on a tiny greyscale image.
+                # Use the *original* bgr so masking artefacts don't pollute
+                # the motion signal.
                 gray_small = cv2.resize(
                     cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY),
                     FRAME_MOTION_SIZE,
@@ -360,7 +438,7 @@ class ObjectIsolator:
                 )
 
                 if run_yolo:
-                    detections = _detect_masks(model, bgr)
+                    detections = _detect_masks(model, yolo_bgr)
                     new_mask, new_box, new_label = _select_central(detections)
                     if new_mask is not None:
                         if last_label != new_label:
@@ -376,7 +454,7 @@ class ObjectIsolator:
                 if last_mask is None:
                     continue
 
-                # ── 3. Build subsampled point cloud ───────────────────────
+                # ── 4. Build subsampled point cloud ───────────────────────
                 pc_util.map_to(color_fr)
                 points_rs = pc_util.calculate(depth_fr)
                 verts     = np.asanyarray(points_rs.get_vertices()) \
@@ -394,15 +472,18 @@ class ObjectIsolator:
                 v = np.clip((texcoords[:, 1] * h).astype(int), 0, h - 1)
                 colors = bgr[v, u, ::-1] / 255.0
 
-                # ── 4. Mask along segmentation contour ────────────────────
+                # ── 5. Mask along segmentation contour ────────────────────
                 inside         = last_mask[v, u]
                 full_colors    = np.full_like(colors, 0.35)
                 full_colors[inside] = colors[inside]
                 obj_verts_raw  = verts[inside]
                 obj_colors_raw = colors[inside]
 
-                # ── 5. cv2 preview with YOLO overlay ──────────────────────
+                # ── 7. cv2 preview with YOLO overlay ──────────────────────
+                # Tint foreground-masked regions dark red so it is clear what
+                # the pre-processing removed before YOLO ran.
                 preview_bgr = bgr.copy()
+                preview_bgr[~fg_mask] = (preview_bgr[~fg_mask] * 0.25).astype(np.uint8)
                 if last_box is not None:
                     overlay = np.zeros_like(preview_bgr)
                     overlay[last_mask] = (0, 255, 0)

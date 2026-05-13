@@ -22,6 +22,8 @@ Controls:
 import sys
 import os
 import queue
+import signal
+import threading
 import argparse
 
 _HERE = os.path.dirname(__file__)
@@ -97,6 +99,10 @@ def run(checkpoint, device="cuda"):
 
     grasp_thread = GraspInferenceThread(model, device=device, interval=0.5)
 
+    # ── Clean-exit flag — set by Ctrl+C or window close ──────────────────────
+    _stop = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: _stop.set())
+
     # ── Window setup (same as show_isolated_pcd) ──────────────────────────────
     CV2_WIN = "YOLO Detection"
     cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
@@ -113,74 +119,76 @@ def run(checkpoint, device="cuda"):
     geom_added  = False
     zoom_fitted = False   # set only after the first real isolated cloud
 
-    try:
-        while True:
-            # ── Pull latest frame (identical to show_isolated_pcd) ────────────
-            try:
-                verts, full_colors, obj_verts, obj_colors, preview_bgr = \
-                    isolator._frame_queue.get(timeout=0.1)
+    while not _stop.is_set():
+        # ── Pull latest frame (identical to show_isolated_pcd) ────────────────
+        try:
+            verts, full_colors, obj_verts, obj_colors, preview_bgr = \
+                isolator._frame_queue.get(timeout=0.1)
 
-                # Point-cloud selection — same logic as show_isolated_pcd
-                pts  = obj_verts  if len(obj_verts)  > 0 else verts
-                cols = obj_colors if len(obj_colors) > 0 else full_colors
+            # Point-cloud selection — same logic as show_isolated_pcd
+            pts  = obj_verts  if len(obj_verts)  > 0 else verts
+            cols = obj_colors if len(obj_colors) > 0 else full_colors
 
-                pcd.points = o3d.utility.Vector3dVector(pts)
-                pcd.colors = o3d.utility.Vector3dVector(cols)
+            pcd.points = o3d.utility.Vector3dVector(pts)
+            pcd.colors = o3d.utility.Vector3dVector(cols)
 
-                if not geom_added:
-                    vis.add_geometry(pcd)
-                    vis.add_geometry(lineset)   # ← grasp overlay added once
-                    geom_added = True
-                else:
-                    vis.update_geometry(pcd)
+            if not geom_added:
+                vis.add_geometry(pcd)
+                vis.add_geometry(lineset)   # ← grasp overlay added once
+                geom_added = True
+            else:
+                vis.update_geometry(pcd)
 
-                # Auto-zoom once on the first confirmed isolated cloud —
-                # identical to show_isolated_pcd; camera is free afterwards
-                if not zoom_fitted and len(obj_verts) > 0:
-                    iso_pcd = o3d.geometry.PointCloud()
-                    iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
-                    auto_zoom(vis, iso_pcd)
-                    zoom_fitted = True
+            # Auto-zoom once on the first confirmed isolated cloud —
+            # identical to show_isolated_pcd; camera is free afterwards
+            if not zoom_fitted and len(obj_verts) > 0:
+                iso_pcd = o3d.geometry.PointCloud()
+                iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
+                auto_zoom(vis, iso_pcd)
+                zoom_fitted = True
 
-                # cv2 YOLO preview — identical to show_isolated_pcd
-                if preview_bgr is not None:
-                    cv2.imshow(CV2_WIN, preview_bgr)
+            # cv2 YOLO preview — identical to show_isolated_pcd
+            if preview_bgr is not None:
+                cv2.imshow(CV2_WIN, preview_bgr)
 
-                # ── GraspNet: feed isolated cloud, read latest result ─────────
-                if len(obj_verts) > 0:
-                    iso = o3d.geometry.PointCloud()
-                    iso.points = o3d.utility.Vector3dVector(obj_verts)
-                    iso.colors = o3d.utility.Vector3dVector(obj_colors)
-                    grasp_thread.update_pcd(iso)
+            # ── GraspNet: feed isolated cloud ─────────────────────────────────
+            if len(obj_verts) > 0:
+                iso = o3d.geometry.PointCloud()
+                iso.points = o3d.utility.Vector3dVector(obj_verts)
+                iso.colors = o3d.utility.Vector3dVector(obj_colors)
+                grasp_thread.update_pcd(iso)
 
-            except queue.Empty:
-                pass
+        except queue.Empty:
+            pass
 
-            # Update grasp lineset whenever a new result is ready
-            grasp = grasp_thread.get_grasp()
-            if grasp is not None:
-                rot, trans, width = grasp
-                new_ls = _gripper_lineset(rot, trans, width)
-                lineset.points = new_ls.points
-                lineset.lines  = new_ls.lines
-                lineset.colors = new_ls.colors
-                vis.update_geometry(lineset)
+        # Update grasp lineset whenever a new result is ready
+        grasp = grasp_thread.get_grasp()
+        if grasp is not None:
+            rot, trans, width = grasp
+            new_ls = _gripper_lineset(rot, trans, width)
+            lineset.points = new_ls.points
+            lineset.lines  = new_ls.lines
+            lineset.colors = new_ls.colors
+            vis.update_geometry(lineset)
 
-            # ── Service both GUI event loops (identical to show_isolated_pcd) ──
-            if not vis.poll_events():
-                break
-            vis.update_renderer()
+        # ── Service both GUI event loops (identical to show_isolated_pcd) ──────
+        if not vis.poll_events():
+            _stop.set()
+            break
+        vis.update_renderer()
 
-            key = cv2.waitKey(1) & 0xFF
-            if key in (27, ord("q")):   # ESC or q
-                break
+        key = cv2.waitKey(1) & 0xFF
+        if key in (27, ord("q")):   # ESC or q
+            _stop.set()
+            break
 
-    except KeyboardInterrupt:
-        pass
-    finally:
-        isolator.stop()
-        cv2.destroyAllWindows()
-        vis.destroy_window()
+    # ── Ordered teardown ──────────────────────────────────────────────────────
+    print("\n[test_lineset_live] shutting down...")
+    grasp_thread.stop()
+    isolator.stop()
+    cv2.destroyAllWindows()
+    vis.destroy_window()
+    print("[test_lineset_live] done.")
 
 
 if __name__ == "__main__":

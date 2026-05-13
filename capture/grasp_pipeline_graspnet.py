@@ -132,13 +132,14 @@ class GraspInferenceThread:
     """
 
     def __init__(self, model, device="cuda", interval=0.5):
-        self._model    = model
-        self._device   = device
-        self._interval = interval          # seconds between inference runs
-        self._lock     = threading.Lock()
-        self._pcd      = None              # latest input
-        self._result   = None              # (rot, trans, width) or None
-        self._thread   = threading.Thread(target=self._loop, daemon=True)
+        self._model      = model
+        self._device     = device
+        self._interval   = interval          # seconds between inference runs
+        self._lock       = threading.Lock()
+        self._pcd        = None              # latest input
+        self._result     = None              # (rot, trans, width) or None
+        self._stop_event = threading.Event()
+        self._thread     = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def update_pcd(self, pcd):
@@ -150,8 +151,13 @@ class GraspInferenceThread:
         with self._lock:
             return self._result
 
+    def stop(self):
+        """Signal the inference loop to exit and wait for the thread."""
+        self._stop_event.set()
+        self._thread.join(timeout=5.0)
+
     def _loop(self):
-        while True:
+        while not self._stop_event.is_set():
             with self._lock:
                 pcd = self._pcd
 
@@ -176,7 +182,8 @@ class GraspInferenceThread:
                 except Exception as exc:
                     print(f"[grasp] inference error: {exc}")
 
-            time.sleep(self._interval)
+            # Sleep in small increments so stop_event is checked promptly
+            self._stop_event.wait(timeout=self._interval)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

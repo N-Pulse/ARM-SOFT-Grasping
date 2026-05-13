@@ -70,6 +70,29 @@ SUBSAMPLE        = 2
 
 IMG_CENTER       = np.array([COLOR_WIDTH / 2, COLOR_HEIGHT / 2])
 
+# ─── Graspable-object whitelist ───────────────────────────────────────────────
+# Only detections whose COCO class name appears in this set are forwarded.
+# Everything large, living, or fixed in place (people, furniture, vehicles,
+# animals, appliances) is intentionally absent.
+# Add or remove entries here to tune what the robot will attempt to grasp.
+GRASPABLE_CLASSES: set[str] = {
+    # ── Tabletop / kitchen ────────────────────────────────────────────────
+    "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl",
+    # ── Food ──────────────────────────────────────────────────────────────
+    "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
+    "hot dog", "pizza", "donut", "cake",
+    # ── Small electronics ─────────────────────────────────────────────────
+    "mouse", "remote", "cell phone",
+    # ── Office / desk ─────────────────────────────────────────────────────
+    "book", "scissors", "clock", "vase", "toothbrush", "hair drier",
+    # ── Toys / sport ──────────────────────────────────────────────────────
+    "teddy bear", "sports ball", "frisbee", "baseball glove", "tennis racket",
+    # ── Accessories ───────────────────────────────────────────────────────
+    "handbag", "tie", "umbrella",
+    # ── Miscellaneous graspable ───────────────────────────────────────────
+    "potted plant", "keyboard", "laptop",
+}
+
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 
 def _build_pipeline():
@@ -95,6 +118,12 @@ def _build_pipeline():
 
 
 def _detect_masks(model, bgr_image):
+    """Run YOLO and return detections that pass the graspable-class whitelist.
+
+    Each entry is ``(mask_bool, box_xyxy_int, class_name)``.
+    Detections whose class name is not in ``GRASPABLE_CLASSES`` are silently
+    dropped so that people, tables, chairs, etc. are never targeted.
+    """
     results = model.predict(
         source=bgr_image,
         imgsz=YOLO_IMGSZ,
@@ -106,7 +135,13 @@ def _detect_masks(model, bgr_image):
     for result in results:
         if result.masks is None:
             continue
-        for mask_tensor, box in zip(result.masks.data, result.boxes.xyxy):
+        for mask_tensor, box, cls_id in zip(
+            result.masks.data, result.boxes.xyxy, result.boxes.cls
+        ):
+            class_name = result.names[int(cls_id.item())]
+            if class_name not in GRASPABLE_CLASSES:
+                continue                         # ← whitelist filter
+
             mask_np = mask_tensor.cpu().numpy()
             mask_resized = cv2.resize(
                 mask_np,
@@ -114,22 +149,23 @@ def _detect_masks(model, bgr_image):
                 interpolation=cv2.INTER_NEAREST,
             ).astype(bool)
             x1, y1, x2, y2 = box.cpu().numpy().astype(int)
-            detections.append((mask_resized, np.array([x1, y1, x2, y2])))
+            detections.append((mask_resized, np.array([x1, y1, x2, y2]), class_name))
     return detections
 
 
 def _select_central(detections):
+    """Return the (mask, box, class_name) of the detection closest to centre."""
     if not detections:
-        return None, None
-    best_mask, best_box, best_dist = None, None, float("inf")
-    for mask, box in detections:
+        return None, None, None
+    best_mask, best_box, best_name, best_dist = None, None, None, float("inf")
+    for mask, box, class_name in detections:
         x1, y1, x2, y2 = box
         dist = np.linalg.norm(
             np.array([(x1 + x2) / 2, (y1 + y2) / 2]) - IMG_CENTER
         )
         if dist < best_dist:
-            best_mask, best_box, best_dist = mask, box, dist
-    return best_mask, best_box
+            best_mask, best_box, best_name, best_dist = mask, box, class_name, dist
+    return best_mask, best_box, best_name
 
 
 # ─── Public class ─────────────────────────────────────────────────────────────
@@ -240,10 +276,11 @@ class ObjectIsolator:
         import time as _time
         print("[ObjectIsolator] camera + YOLO ready, streaming frames...")
 
-        frame_idx = 0
-        last_mask = None
-        last_box  = None
-        _last_log = 0.0
+        frame_idx  = 0
+        last_mask  = None
+        last_box   = None
+        last_label = None
+        _last_log  = 0.0
 
         try:
             while not self._stop_event.is_set():
@@ -266,7 +303,7 @@ class ObjectIsolator:
                 frame_idx += 1
                 if frame_idx % YOLO_SKIP_FRAMES == 0:
                     detections = _detect_masks(model, bgr)
-                    last_mask, last_box = _select_central(detections)
+                    last_mask, last_box, last_label = _select_central(detections)
 
                 if last_mask is None:
                     continue
@@ -304,7 +341,8 @@ class ObjectIsolator:
                     preview_bgr = cv2.addWeighted(preview_bgr, 0.7, overlay, 0.3, 0)
                     x1, y1, x2, y2 = last_box
                     cv2.rectangle(preview_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(preview_bgr, "target", (x1, y1 - 6),
+                    label = last_label if last_label else "target"
+                    cv2.putText(preview_bgr, label, (x1, y1 - 6),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
                 if obj_verts_raw.shape[0] >= self._min_points:
@@ -317,7 +355,7 @@ class ObjectIsolator:
                 if now - _last_log >= 1.0:
                     print(f"[ObjectIsolator] scene pts: {len(verts)}  "
                           f"obj pts: {len(obj_verts)}  "
-                          f"target: {'yes' if last_mask is not None else 'no'}")
+                          f"target: {last_label if last_label else 'none'}")
                     _last_log = now
 
                 # ── 6. Push to queue (drop stale frame) ───────────────────

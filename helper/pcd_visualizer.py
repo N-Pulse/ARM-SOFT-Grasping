@@ -19,7 +19,6 @@ from __future__ import annotations
 import queue
 from typing import TYPE_CHECKING
 
-import numpy as np
 import open3d as o3d
 
 if TYPE_CHECKING:
@@ -36,13 +35,13 @@ def show_isolated_pcd(
     title: str = "Stage 1 — Isolated Object Point Cloud",
     width: int = 1280,
     height: int = 720,
-    lookat: list[float] | None = None,
-    front: list[float] | None = None,
-    up: list[float] | None = None,
-    zoom: float = 0.25,
     frame_timeout: float = 0.1,
 ) -> None:
     """Spin up an Open3D window and stream frames from *isolator*.
+
+    The view is auto-fitted on the first frame so the entire point cloud is
+    visible and centred in the window.  After that the user can freely orbit,
+    pan, and zoom; the view is not reset on subsequent frames.
 
     The function blocks until the window is closed or a KeyboardInterrupt
     is received.  The isolator is **not** stopped here — the caller decides
@@ -56,25 +55,16 @@ def show_isolated_pcd(
         Window title.
     width / height:
         Initial window size in pixels.
-    lookat / front / up:
-        View-control parameters forwarded to Open3D.  Sensible defaults are
-        provided for a wrist-mounted RealSense pointing at a table.
-    zoom:
-        Initial zoom level (Open3D ``set_zoom``).
     frame_timeout:
         Seconds to wait on the frame queue before polling the window again.
     """
-    lookat = lookat if lookat is not None else [0.0, 0.0, 0.3]
-    front  = front  if front  is not None else [0.0, 0.0, -1.0]
-    up     = up     if up     is not None else [0.0, -1.0, 0.0]
-
     vis = o3d.visualization.Visualizer()
     vis.create_window(title, width=width, height=height)
 
     pcd        = o3d.geometry.PointCloud()
     geom_added = False
 
-    print(f"[pcd_visualizer] Window open — close it or press Ctrl+C to stop.")
+    print("[pcd_visualizer] Window open — close it or press Ctrl+C to stop.")
 
     try:
         while True:
@@ -91,11 +81,12 @@ def show_isolated_pcd(
 
                 if not geom_added:
                     vis.add_geometry(pcd)
-                    ctr = vis.get_view_control()
-                    ctr.set_lookat(lookat)
-                    ctr.set_front(front)
-                    ctr.set_up(up)
-                    ctr.set_zoom(zoom)
+                    # Auto-fit: centre the cloud and zoom so every point is
+                    # inside the frustum.  reset_view_point computes the
+                    # bounding-box centre as lookat and picks a zoom level
+                    # that keeps the whole cloud visible — no manual tuning
+                    # needed regardless of the cloud's actual position/scale.
+                    vis.reset_view_point(True)
                     geom_added = True
                 else:
                     vis.update_geometry(pcd)

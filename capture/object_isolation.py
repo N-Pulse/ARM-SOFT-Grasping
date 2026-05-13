@@ -341,9 +341,20 @@ class ObjectIsolator:
                     preview_bgr = cv2.addWeighted(preview_bgr, 0.7, overlay, 0.3, 0)
                     x1, y1, x2, y2 = last_box
                     cv2.rectangle(preview_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    label = last_label if last_label else "target"
-                    cv2.putText(preview_bgr, label, (x1, y1 - 6),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+                    # Class label with a filled background for readability
+                    label      = last_label if last_label else "target"
+                    font       = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.65
+                    thickness  = 2
+                    (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+                    lx, ly = x1, max(y1 - 4, th + baseline)  # keep label inside frame
+                    cv2.rectangle(preview_bgr,
+                                  (lx, ly - th - baseline),
+                                  (lx + tw, ly + baseline),
+                                  (0, 255, 0), cv2.FILLED)
+                    cv2.putText(preview_bgr, label, (lx, ly),
+                                font, font_scale, (0, 0, 0), thickness, cv2.LINE_AA)
 
                 if obj_verts_raw.shape[0] >= self._min_points:
                     obj_verts, obj_colors = obj_verts_raw, obj_colors_raw

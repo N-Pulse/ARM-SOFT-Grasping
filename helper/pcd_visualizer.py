@@ -19,6 +19,7 @@ from __future__ import annotations
 import queue
 from typing import TYPE_CHECKING
 
+import cv2
 import numpy as np
 import open3d as o3d
 
@@ -156,21 +157,25 @@ def show_isolated_pcd(
     frame_timeout:
         Seconds to wait on the frame queue before polling the window again.
     """
+    CV2_WIN = "YOLO Detection"
+
     vis = o3d.visualization.Visualizer()
     vis.create_window(title, width=width, height=height)
+    cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
 
     pcd        = o3d.geometry.PointCloud()
     geom_added = False
 
-    print("[pcd_visualizer] Window open — close it or press Ctrl+C to stop.")
+    print("[pcd_visualizer] Window open — close the Open3D window or press Ctrl+C to stop.")
 
     try:
         while True:
             # --- pull the latest frame -----------------------------------------
             try:
-                verts, full_colors, obj_verts, obj_colors, _ = \
+                verts, full_colors, obj_verts, obj_colors, preview_bgr = \
                     isolator._frame_queue.get(timeout=frame_timeout)
 
+                # ── Open3D point cloud ──────────────────────────────────────
                 pts  = obj_verts  if len(obj_verts)  > 0 else verts
                 cols = obj_colors if len(obj_colors) > 0 else full_colors
 
@@ -179,23 +184,31 @@ def show_isolated_pcd(
 
                 if not geom_added:
                     vis.add_geometry(pcd)
-                    # Centre the cloud and zoom so its vertical span fills 80 %
-                    # of the window height.
                     _fit_camera_80pct(vis, pcd, width, height)
                     geom_added = True
                 else:
                     vis.update_geometry(pcd)
 
+                # ── cv2 YOLO preview ────────────────────────────────────────
+                if preview_bgr is not None:
+                    cv2.imshow(CV2_WIN, preview_bgr)
+
             except queue.Empty:
                 pass
 
-            # --- service the GUI event loop ------------------------------------
+            # --- service both GUI event loops ----------------------------------
             if not vis.poll_events():
                 break
             vis.update_renderer()
 
+            # cv2 needs a brief pump; ESC or 'q' also closes everything
+            key = cv2.waitKey(1) & 0xFF
+            if key in (27, ord("q")):   # ESC or q
+                break
+
     except KeyboardInterrupt:
         pass
     finally:
+        cv2.destroyAllWindows()
         vis.destroy_window()
-        print("[pcd_visualizer] Window closed.")
+        print("[pcd_visualizer] Windows closed.")

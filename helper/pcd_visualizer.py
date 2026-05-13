@@ -31,8 +31,8 @@ if TYPE_CHECKING:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _auto_zoom(vis: o3d.visualization.Visualizer,
-               pcd: o3d.geometry.PointCloud) -> None:
+def auto_zoom(vis: o3d.visualization.Visualizer,
+              pcd: o3d.geometry.PointCloud) -> None:
     """Point the camera at the true centroid of the isolated cloud and zoom
     so its bounding box fills ~80 % of the window height.
 
@@ -146,7 +146,7 @@ def show_isolated_pcd(
                 if not zoom_fitted and len(obj_verts) > 0:
                     iso_pcd = o3d.geometry.PointCloud()
                     iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
-                    _auto_zoom(vis, iso_pcd)
+                    auto_zoom(vis, iso_pcd)
                     zoom_fitted = True
 
                 # ── cv2 YOLO preview ────────────────────────────────────────

@@ -11,7 +11,7 @@ Usage:
     python test_lineset_live.py --checkpoint /path/to/checkpoint.tar --device cpu
 
 Controls:
-    Close the Open3D window  |  Ctrl+C
+    Close the Open3D window  |  Ctrl+C  |  ESC / q in the YOLO preview
 """
 
 import sys
@@ -20,14 +20,18 @@ import queue
 import argparse
 
 _HERE = os.path.dirname(__file__)
-sys.path.insert(0, os.path.join(_HERE, "..", "capture"))
+_ROOT = os.path.abspath(os.path.join(_HERE, ".."))
+sys.path.insert(0, os.path.join(_ROOT, "capture"))
+sys.path.insert(0, _ROOT)   # exposes the helper package
 
+import cv2
 import numpy as np
 import open3d as o3d
 import torch
 
 from object_isolation import ObjectIsolator
 from grasp_pipeline_graspnet import load_model, GraspInferenceThread
+from helper.pcd_visualizer import auto_zoom
 
 
 # ── Gripper geometry ──────────────────────────────────────────────────────────
@@ -88,9 +92,13 @@ def run(checkpoint, device="cuda"):
 
     grasp_thread = GraspInferenceThread(model, device=device, interval=0.5)
 
-    pcd       = o3d.geometry.PointCloud()
-    lineset   = _empty_lineset()
+    CV2_WIN = "YOLO Detection"
+    cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
+
+    pcd        = o3d.geometry.PointCloud()
+    lineset    = _empty_lineset()
     geom_added = False
+    zoom_fitted = False
 
     vis = o3d.visualization.Visualizer()
     vis.create_window("GraspNet — Live Grasp", width=1280, height=720)
@@ -102,12 +110,13 @@ def run(checkpoint, device="cuda"):
     try:
         while True:
             try:
-                full_verts, full_colors, obj_verts, obj_colors, _ = \
+                full_verts, full_colors, obj_verts, obj_colors, preview_bgr = \
                     isolator._frame_queue.get(timeout=0.05)
             except queue.Empty:
                 if not vis.poll_events():
                     break
                 vis.update_renderer()
+                cv2.waitKey(1)
                 continue
 
             pts  = obj_verts  if len(obj_verts)  > 0 else full_verts
@@ -116,23 +125,29 @@ def run(checkpoint, device="cuda"):
             pcd.points = o3d.utility.Vector3dVector(pts)
             pcd.colors = o3d.utility.Vector3dVector(cols)
 
+            # Feed isolated cloud to GraspNet
             if len(obj_verts) > 0:
                 iso = o3d.geometry.PointCloud()
                 iso.points = o3d.utility.Vector3dVector(obj_verts)
                 iso.colors = o3d.utility.Vector3dVector(obj_colors)
                 grasp_thread.update_pcd(iso)
 
+            # Add geometries once, then update
             if not geom_added:
                 vis.add_geometry(pcd)
                 vis.add_geometry(lineset)
-                ctr = vis.get_view_control()
-                ctr.set_front([0, 0, -1])
-                ctr.set_up([0, -1, 0])
-                ctr.set_zoom(0.45)
                 geom_added = True
             else:
                 vis.update_geometry(pcd)
 
+            # Auto-zoom once we have the first confirmed isolated cloud
+            if not zoom_fitted and len(obj_verts) > 0:
+                iso_pcd = o3d.geometry.PointCloud()
+                iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
+                auto_zoom(vis, iso_pcd)
+                zoom_fitted = True
+
+            # Update grasp lineset
             grasp = grasp_thread.get_grasp()
             if grasp is not None:
                 rot, trans, width = grasp
@@ -142,18 +157,29 @@ def run(checkpoint, device="cuda"):
                 lineset.colors = new_ls.colors
                 vis.update_geometry(lineset)
 
-            pts_arr = np.asarray(pcd.points)
-            if len(pts_arr):
-                vis.get_view_control().set_lookat(pts_arr.mean(axis=0).tolist())
+            # Keep lookat centred on the isolated object
+            if len(obj_verts) > 0:
+                vis.get_view_control().set_lookat(
+                    obj_verts.mean(axis=0).tolist()
+                )
+
+            # YOLO preview
+            if preview_bgr is not None:
+                cv2.imshow(CV2_WIN, preview_bgr)
 
             if not vis.poll_events():
                 break
             vis.update_renderer()
 
+            key = cv2.waitKey(1) & 0xFF
+            if key in (27, ord("q")):
+                break
+
     except KeyboardInterrupt:
         pass
     finally:
         isolator.stop()
+        cv2.destroyAllWindows()
         vis.destroy_window()
 
 

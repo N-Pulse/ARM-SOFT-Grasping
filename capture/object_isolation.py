@@ -73,6 +73,14 @@ SUBSAMPLE        = 2
 # a table or floor rather than a graspable object.
 MAX_MASK_FILL    = 0.80
 
+# ─── Object-lock parameters ───────────────────────────────────────────────────
+# Once an object is selected, the lock is held for this many seconds as long as
+# the camera is not moving.  Any motion above FRAME_MOTION_MAD breaks the lock
+# immediately so a new target can be selected.
+LOCK_DURATION_S  = 60.0   # seconds to keep a locked target
+FRAME_MOTION_MAD = 8.0    # mean-abs-diff threshold (0-255) to declare camera moved
+FRAME_MOTION_SIZE = (80, 60)  # downscale resolution for cheap motion check
+
 IMG_CENTER       = np.array([COLOR_WIDTH / 2, COLOR_HEIGHT / 2])
 
 # ─── Graspable-object whitelist ───────────────────────────────────────────────
@@ -287,11 +295,14 @@ class ObjectIsolator:
         import time as _time
         print("[ObjectIsolator] camera + YOLO ready, streaming frames...")
 
-        frame_idx  = 0
-        last_mask  = None
-        last_box   = None
-        last_label = None
-        _last_log  = 0.0
+        frame_idx       = 0
+        last_mask       = None
+        last_box        = None
+        last_label      = None
+        lock_end_time   = 0.0     # monotonic timestamp when current lock expires
+        need_redetect   = True    # force YOLO on the very next eligible frame
+        prev_gray_small = None    # previous small greyscale for motion check
+        _last_log       = 0.0
 
         try:
             while not self._stop_event.is_set():
@@ -310,11 +321,57 @@ class ObjectIsolator:
 
                 bgr = np.asanyarray(color_fr.get_data())
 
-                # ── 2. YOLO every YOLO_SKIP_FRAMES frames ─────────────────
+                # ── 2. Motion check + lock / re-detect logic ───────────────
+                now = _time.monotonic()
+
+                # Cheap per-frame motion estimate on a tiny greyscale image.
+                gray_small = cv2.resize(
+                    cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY),
+                    FRAME_MOTION_SIZE,
+                )
+                if prev_gray_small is not None:
+                    mad = float(np.mean(
+                        np.abs(gray_small.astype(np.float32) -
+                               prev_gray_small.astype(np.float32))
+                    ))
+                    camera_moved = mad >= FRAME_MOTION_MAD
+                else:
+                    camera_moved = False
+                prev_gray_small = gray_small
+
+                # Break lock on motion or expiry.
+                if camera_moved:
+                    if last_mask is not None:
+                        print("[ObjectIsolator] camera moved — re-selecting target")
+                    need_redetect = True
+                    lock_end_time = 0.0
+                elif now >= lock_end_time and last_mask is not None:
+                    print("[ObjectIsolator] lock expired — re-selecting target")
+                    need_redetect = True
+                    lock_end_time = 0.0
+
+                # Determine whether to run YOLO this frame.
+                # - Always run when a re-detect is needed.
+                # - Skip when locked (camera stable + within 60 s).
                 frame_idx += 1
-                if frame_idx % YOLO_SKIP_FRAMES == 0:
+                locked = (last_mask is not None) and (now < lock_end_time)
+                run_yolo = need_redetect or (
+                    not locked and frame_idx % YOLO_SKIP_FRAMES == 0
+                )
+
+                if run_yolo:
                     detections = _detect_masks(model, bgr)
-                    last_mask, last_box, last_label = _select_central(detections)
+                    new_mask, new_box, new_label = _select_central(detections)
+                    if new_mask is not None:
+                        if last_label != new_label:
+                            print(f"[ObjectIsolator] locked onto '{new_label}' "
+                                  f"for {LOCK_DURATION_S:.0f} s")
+                        last_mask, last_box, last_label = new_mask, new_box, new_label
+                        lock_end_time = now + LOCK_DURATION_S
+                        need_redetect = False
+                    elif need_redetect:
+                        # No graspable object in view; clear previous result.
+                        last_mask = last_box = last_label = None
 
                 if last_mask is None:
                     continue
@@ -373,11 +430,28 @@ class ObjectIsolator:
                     obj_verts  = np.zeros((0, 3), np.float32)
                     obj_colors = np.zeros((0, 3), np.float32)
 
-                now = _time.monotonic()
+                # ── Lock-status banner at the top of the preview ──────────
+                locked_now = (last_mask is not None) and (now < lock_end_time)
+                if locked_now:
+                    secs_left  = max(0.0, lock_end_time - now)
+                    status_txt = f"LOCKED  {secs_left:4.0f}s"
+                    banner_col = (0, 200, 0)    # green
+                else:
+                    status_txt = "SEARCHING..."
+                    banner_col = (0, 140, 255)  # orange
+
+                font_s = cv2.FONT_HERSHEY_SIMPLEX
+                (bw, bh), bl = cv2.getTextSize(status_txt, font_s, 0.6, 2)
+                cv2.rectangle(preview_bgr, (0, 0), (bw + 10, bh + bl + 8),
+                              banner_col, cv2.FILLED)
+                cv2.putText(preview_bgr, status_txt, (5, bh + 4),
+                            font_s, 0.6, (0, 0, 0), 2, cv2.LINE_AA)
+
                 if now - _last_log >= 1.0:
                     print(f"[ObjectIsolator] scene pts: {len(verts)}  "
                           f"obj pts: {len(obj_verts)}  "
-                          f"target: {last_label if last_label else 'none'}")
+                          f"target: {last_label if last_label else 'none'}  "
+                          f"{'LOCKED' if locked_now else 'searching'}")
                     _last_log = now
 
                 # ── 6. Push to queue (drop stale frame) ───────────────────

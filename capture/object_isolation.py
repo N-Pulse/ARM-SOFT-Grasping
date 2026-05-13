@@ -21,11 +21,12 @@ Key behaviours
     when the object drifts more than TARGET_LOCK_MAX_DRIFT pixels or
     disappears entirely.
 
-Performance optimisations
---------------------------
+Jetson Orin Nano optimisations
+--------------------------------
   - YOLO runs at imgsz=320
   - Inference skipped every YOLO_SKIP_FRAMES frames (last mask reused)
-  - Point cloud subsampled by SUBSAMPLE factor
+  - SUBSAMPLE=1 kept to maintain point density (point_size in viewer handles visuals)
+  - Mask eroded before use to remove edge-bleed noise
   - TensorRT engine auto-used if .engine file exists alongside .pt
 
 Usage
@@ -61,7 +62,7 @@ COLOR_HEIGHT = 480
 FPS          = 30
 
 # Valid depth range in metres — discard points outside this window
-MIN_DEPTH_M  = 0.07   # 7 cm  — closest usable range for D405
+MIN_DEPTH_M  = 0.10   # 10 cm — slightly more conservative than 7 cm
 MAX_DEPTH_M  = 0.50   # 50 cm — only consider objects within arm's reach
 
 # ─── Model discovery ─────────────────────────────────────────────────────────
@@ -81,41 +82,36 @@ def _find_model(filename: str) -> str:
 
 _PT_MODEL     = _find_model("yolo11n-seg.pt")
 _ENGINE_MODEL = _find_model("yolo11n-seg.engine")
-# Prefer a compiled TensorRT engine when available (faster on Jetson)
+# Prefer a compiled TensorRT engine when available (much faster on Jetson)
 YOLO_MODEL    = _ENGINE_MODEL if os.path.exists(_ENGINE_MODEL) else _PT_MODEL
 
 # ─── YOLO inference settings ─────────────────────────────────────────────────
 
 YOLO_CONF        = 0.35   # minimum detection confidence
 YOLO_IOU         = 0.45   # NMS IoU threshold
-YOLO_IMGSZ       = 320    # inference resolution (smaller = faster)
-YOLO_SKIP_FRAMES = 3      # run YOLO every N frames; reuse last mask in between
+YOLO_IMGSZ       = 320    # inference resolution — keep small for Jetson
+YOLO_SKIP_FRAMES = 4      # run YOLO every N frames; reuse last mask in between
+                           # (increased from 3 → 4 to reduce Jetson load)
 
 # ─── Class filtering ─────────────────────────────────────────────────────────
-# COCO class reference:
-# https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml
 
 YOLO_EXCLUDE_CLASSES = {
     0,                        # person
     1, 2, 3, 4, 5, 6, 7, 8,  # bicycle, car, motorcycle, airplane, bus, train, truck, boat
-    60,                       # dining table — stops the table surface being locked as target
+    60,                       # dining table
 }
 
-# Optional whitelist — set to None to allow every non-excluded class.
-# Uncomment and populate to restrict detection to specific graspable objects.
-# YOLO_ALLOWED_CLASSES = {
-#     39, 41, 42, 43, 44, 45,                  # bottle, cup, fork, knife, spoon, bowl
-#     46, 47, 48, 49, 50, 51, 52, 53, 54, 55,  # common food items
-#     63, 64, 65, 66, 67,                      # laptop, mouse, remote, keyboard, phone
-#     73, 74, 75, 76, 77,                      # book, clock, vase, scissors, teddy bear
-# }
 YOLO_ALLOWED_CLASSES = None   # None = no whitelist restriction
 
 # Reject any detection whose mask covers more than this fraction of the image.
-# A graspable object should never fill 40 %+ of the frame; anything larger is
-# almost certainly the table surface or background, even if YOLO mislabels it
-# as something other than "dining table".
 YOLO_MAX_MASK_RATIO = 0.40
+
+# ─── Mask erosion ────────────────────────────────────────────────────────────
+# Erode the segmentation mask before applying it to remove edge-bleed pixels
+# (boundary pixels where depth belongs to background but colour belongs to object).
+# Increase MASK_ERODE_ITERS if you still see edge scatter.
+MASK_ERODE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+MASK_ERODE_ITERS  = 2
 
 # ─── Target locking ──────────────────────────────────────────────────────────
 
@@ -124,7 +120,10 @@ TARGET_LOCK_MAX_DRIFT = 150    # pixels — max bbox-centre shift before lock br
 
 # ─── Point cloud settings ────────────────────────────────────────────────────
 
-SUBSAMPLE  = 1    # keep every Nth point (reduces compute & memory)
+# Keep all points (SUBSAMPLE=1) so point density is sufficient.
+# Visual gap compensation is done via point_size in the viewer, not by
+# discarding points here.
+SUBSAMPLE = 1
 
 # Pixel coordinates of the image centre — used for initial target selection
 IMG_CENTER = np.array([COLOR_WIDTH / 2, COLOR_HEIGHT / 2])
@@ -158,11 +157,11 @@ def _build_pipeline():
     spatial  = rs.spatial_filter()
     temporal = rs.temporal_filter()
     holes    = rs.hole_filling_filter()
-    holes.set_option(rs.option.holes_fill, 2)
     spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
     spatial.set_option(rs.option.filter_smooth_delta, 20)
     temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
     temporal.set_option(rs.option.filter_smooth_delta, 20)
+    holes.set_option(rs.option.holes_fill, 2)   # fill larger holes too
 
     return pipeline, align, spatial, temporal, holes, rs.pointcloud()
 
@@ -172,22 +171,12 @@ def _detect_masks(model, bgr_image):
     Run YOLO segmentation on *bgr_image* and return a list of valid detections.
 
     Each detection is a tuple:
-        (mask_resized, box_xyxy, bbox_center)
+        (mask_resized, box_xyxy, bbox_center, cls_id)
 
         mask_resized : bool ndarray (H, W) — True inside the segmented object
         box_xyxy     : int ndarray (4,)    — [x1, y1, x2, y2]
         bbox_center  : float ndarray (2,)  — [(x1+x2)/2, (y1+y2)/2]
-
-    A detection is dropped if any of the following are true:
-        · Its class ID is in YOLO_EXCLUDE_CLASSES  (person, table, vehicles…)
-        · YOLO_ALLOWED_CLASSES is set and the class ID is not in it
-        · Its mask covers more than YOLO_MAX_MASK_RATIO of the image area
-          (catches the table surface even when YOLO mislabels it)
-
-    Parameters
-    ----------
-    model      : loaded Ultralytics YOLO model
-    bgr_image  : uint8 ndarray (H, W, 3) in BGR order
+        cls_id       : int                 — COCO class index
     """
     results = model.predict(
         source=bgr_image,
@@ -209,13 +198,11 @@ def _detect_masks(model, bgr_image):
         ):
             cls_id = int(cls_tensor.item())
 
-            # ── Class filtering ────────────────────────────────────────────
             if cls_id in YOLO_EXCLUDE_CLASSES:
-                continue   # explicitly excluded (person, table, vehicles…)
+                continue
             if YOLO_ALLOWED_CLASSES is not None and cls_id not in YOLO_ALLOWED_CLASSES:
-                continue   # not in the graspable-object whitelist
+                continue
 
-            # Resize segmentation mask to full image resolution
             mask_np = mask_tensor.cpu().numpy()
             mask_resized = cv2.resize(
                 mask_np,
@@ -223,10 +210,6 @@ def _detect_masks(model, bgr_image):
                 interpolation=cv2.INTER_NEAREST,
             ).astype(bool)
 
-            # ── Size filter — reject masks that cover too much of the frame ─
-            # A graspable object should never fill 40 %+ of the image.
-            # This catches the table surface even when YOLO mislabels it
-            # as something other than "dining table" (class 60).
             mask_ratio = mask_resized.sum() / mask_resized.size
             if mask_ratio > YOLO_MAX_MASK_RATIO:
                 continue
@@ -243,36 +226,17 @@ def _select_central(detections, locked_center=None):
     """
     Choose the best detection from *detections*.
 
-    Strategy
-    --------
-    1. If *locked_center* is provided (active lock), find the detection whose
-       bbox centre is closest to it.  If that distance is within
-       TARGET_LOCK_MAX_DRIFT, return it — this keeps tracking the same object.
-    2. If no valid locked detection is found (or no lock is active), fall back
-       to the detection whose bbox centre is closest to the image centre.
-
-    Parameters
-    ----------
-    detections    : list of (mask, box, center) tuples from _detect_masks
-    locked_center : float ndarray (2,) or None
-
-    Returns
-    -------
-    (mask, box, center) of the chosen detection, or (None, None, None).
+    If *locked_center* is provided, track the closest detection within
+    TARGET_LOCK_MAX_DRIFT. Otherwise pick the detection closest to frame centre.
     """
     if not detections:
         return None, None, None, None
 
     if locked_center is not None:
-        # Try to re-acquire the locked target by proximity
         best = min(detections, key=lambda d: np.linalg.norm(d[2] - locked_center))
         if np.linalg.norm(best[2] - locked_center) <= TARGET_LOCK_MAX_DRIFT:
-            return best   # (mask, box, center, cls_id) — lock holds
+            return best
 
-        # Locked target has drifted too far or vanished; fall through
-        # to the image-centre strategy below
-
-    # No active lock (or lock broken): pick the detection closest to frame centre
     best = min(detections, key=lambda d: np.linalg.norm(d[2] - IMG_CENTER))
     return best
 
@@ -287,12 +251,8 @@ class ObjectIsolator:
     Target locking
     --------------
     The first graspable object found (closest to the image centre) is locked
-    as the target.  For the next TARGET_LOCK_SECONDS (60 s) the isolator
-    continues tracking *that same object* even if another object enters the
-    scene and is closer to the centre.  The lock is released only when:
-      - the object's bbox centre moves more than TARGET_LOCK_MAX_DRIFT pixels
-        from where it was last seen, or
-      - the object is no longer detected at all.
+    as the target for TARGET_LOCK_SECONDS. Lock breaks if the object drifts
+    more than TARGET_LOCK_MAX_DRIFT pixels or disappears entirely.
 
     Parameters
     ----------
@@ -301,7 +261,7 @@ class ObjectIsolator:
     """
 
     def __init__(self, min_points: int = 50):
-        self.ready        = threading.Event()   # set once YOLO warm-up completes
+        self.ready        = threading.Event()
         self._min_points  = min_points
         self._frame_queue = queue.Queue(maxsize=1)
         self._stop_event  = threading.Event()
@@ -335,17 +295,14 @@ class ObjectIsolator:
 
     def get_full_frame(self):
         """
-        Non-blocking.  Returns the latest processed frame as a 3-tuple:
+        Non-blocking. Returns the latest processed frame as a 3-tuple:
 
             (full_pcd, iso_pcd, preview_bgr)
 
-            full_pcd    : o3d.PointCloud of the entire scene.
-                          Target region is rendered in its real colour;
-                          background is greyed out.
-            iso_pcd     : o3d.PointCloud of the isolated object only,
-                          or None if no target is currently locked.
-            preview_bgr : annotated BGR image with YOLO mask overlay and
-                          bounding box.
+            full_pcd    : o3d.PointCloud of the entire scene (target in colour,
+                          background greyed out).
+            iso_pcd     : o3d.PointCloud of the isolated object only, or None.
+            preview_bgr : annotated BGR image with YOLO mask overlay and bbox.
 
         Returns None if no frame is available yet.
         """
@@ -368,10 +325,7 @@ class ObjectIsolator:
         return full_pcd, iso_pcd, preview_bgr
 
     def get_pcd(self) -> "o3d.geometry.PointCloud | None":
-        """
-        Non-blocking convenience method.
-        Returns the latest isolated object point cloud, or None.
-        """
+        """Non-blocking convenience method. Returns the isolated object pcd or None."""
         result = self.get_full_frame()
         if result is None:
             return None
@@ -395,9 +349,8 @@ class ObjectIsolator:
             print(f"[ObjectIsolator] loading '{YOLO_MODEL}' ...")
             model = YOLO(YOLO_MODEL)
             if not YOLO_MODEL.endswith(".engine"):
-                model.fuse()   # fuse Conv+BN layers for faster CPU/GPU inference
+                model.fuse()
             print("[ObjectIsolator] YOLO loaded ✓ — warming up...")
-            # One dummy inference to initialise CUDA kernels before real-time use
             model.predict(
                 source=np.zeros((320, 320, 3), dtype=np.uint8),
                 imgsz=YOLO_IMGSZ,
@@ -413,15 +366,14 @@ class ObjectIsolator:
         import time as _time
         print("[ObjectIsolator] camera + YOLO ready, streaming frames...")
 
-        frame_idx = 0
-        last_mask    = None   # most recent segmentation mask (H, W) bool
-        last_box     = None   # most recent bbox [x1, y1, x2, y2]
-        last_cls_id  = None   # COCO class ID of the locked target
+        frame_idx    = 0
+        last_mask    = None
+        last_box     = None
+        last_cls_id  = None
 
-        # ── Target-lock state ─────────────────────────────────────────────
-        locked_center = None   # bbox centre of the locked target (ndarray or None)
-        lock_start    = None   # monotonic timestamp when the lock was acquired
-        _last_log     = 0.0    # rate-limit console prints to ~1 Hz
+        locked_center = None
+        lock_start    = None
+        _last_log     = 0.0
 
         try:
             while not self._stop_event.is_set():
@@ -434,7 +386,6 @@ class ObjectIsolator:
                 if not depth_fr or not color_fr:
                     continue
 
-                # Apply depth post-processing filters
                 depth_fr = spatial.process(depth_fr)
                 depth_fr = temporal.process(depth_fr)
                 depth_fr = holes.process(depth_fr)
@@ -442,20 +393,16 @@ class ObjectIsolator:
                 bgr = np.asanyarray(color_fr.get_data())
 
                 # ── 2. Run YOLO every YOLO_SKIP_FRAMES frames ─────────────
-                #       Between inference frames the previous mask is reused,
-                #       which keeps CPU/GPU load manageable.
                 frame_idx += 1
                 if frame_idx % YOLO_SKIP_FRAMES == 0:
                     detections = _detect_masks(model, bgr)
                     now_t      = _time.monotonic()
 
-                    # Determine whether the current lock is still within its time window
                     lock_active = (
                         lock_start is not None
                         and (now_t - lock_start) < TARGET_LOCK_SECONDS
                     )
 
-                    # Pass the locked centre only when the lock is still valid
                     lc = locked_center if lock_active else None
                     new_mask, new_box, new_center, new_cls_id = _select_central(
                         detections, locked_center=lc
@@ -467,7 +414,6 @@ class ObjectIsolator:
                         locked_center = new_center
                         last_cls_id   = new_cls_id
 
-                        # Start a fresh lock if there is none or the previous one expired
                         if not lock_active:
                             lock_start = now_t
                             print(
@@ -476,23 +422,26 @@ class ObjectIsolator:
                                 f"lock duration {TARGET_LOCK_SECONDS:.0f} s"
                             )
                     else:
-                        # No valid detection — clear everything so we start
-                        # fresh on the next frame where YOLO runs
                         last_mask     = None
                         last_box      = None
                         locked_center = None
                         lock_start    = None
                         last_cls_id   = None
 
-                # No target yet — nothing to publish
                 if last_mask is None:
                     continue
 
-                # ── 3. Build a subsampled point cloud from the depth frame ─
+                # ── 3. Erode mask to remove edge-bleed noise ──────────────
+                eroded_mask = cv2.erode(
+                    last_mask.astype(np.uint8),
+                    MASK_ERODE_KERNEL,
+                    iterations=MASK_ERODE_ITERS,
+                ).astype(bool)
+
+                # ── 4. Build point cloud from the depth frame ─────────────
                 pc_util.map_to(color_fr)
                 points_rs = pc_util.calculate(depth_fr)
 
-                # Reshape the packed vertex / texcoord arrays into (N, 3) / (N, 2)
                 verts = (
                     np.asanyarray(points_rs.get_vertices())
                     .view(np.float32)
@@ -510,35 +459,29 @@ class ObjectIsolator:
                 verts      = verts[valid]
                 texcoords  = texcoords[valid]
 
-                # Look up the RGB colour for every 3-D point via its texture coordinate
                 h, w = bgr.shape[:2]
                 u = np.clip((texcoords[:, 0] * w).astype(int), 0, w - 1)
                 v = np.clip((texcoords[:, 1] * h).astype(int), 0, h - 1)
-                colors = bgr[v, u, ::-1] / 255.0   # BGR → RGB, normalise to [0, 1]
+                colors = bgr[v, u, ::-1] / 255.0
 
-                # ── 4. Separate target points from background ──────────────
-                #       Points whose pixel falls inside the segmentation mask
-                #       keep their real colour; everything else is greyed out.
-                inside      = last_mask[v, u]
-                full_colors = np.full_like(colors, 0.35)   # uniform grey background
+                # ── 5. Separate target points from background ──────────────
+                inside      = eroded_mask[v, u]
+                full_colors = np.full_like(colors, 0.35)
                 full_colors[inside] = colors[inside]
 
                 obj_verts_raw  = verts[inside]
                 obj_colors_raw = colors[inside]
 
-                # ── 5. Build annotated preview image ──────────────────────
+                # ── 6. Build annotated preview image ──────────────────────
                 preview_bgr = bgr.copy()
                 if last_box is not None:
-                    # Semi-transparent green overlay on the segmented region
                     overlay = np.zeros_like(preview_bgr)
                     overlay[last_mask] = (0, 255, 0)
                     preview_bgr = cv2.addWeighted(preview_bgr, 0.7, overlay, 0.3, 0)
 
-                    # Bounding box and label
                     x1, y1, x2, y2 = last_box
                     cv2.rectangle(preview_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                    # Show class name + remaining lock time in the label
                     cls_name = model.names[last_cls_id] if last_cls_id is not None else "?"
                     if lock_start is not None:
                         remaining = max(
@@ -552,14 +495,14 @@ class ObjectIsolator:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1,
                     )
 
-                # ── 6. Discard frames with too few object points ───────────
+                # ── 7. Discard frames with too few object points ───────────
                 if obj_verts_raw.shape[0] >= self._min_points:
                     obj_verts, obj_colors = obj_verts_raw, obj_colors_raw
                 else:
                     obj_verts  = np.zeros((0, 3), np.float32)
                     obj_colors = np.zeros((0, 3), np.float32)
 
-                # ── 7. Rate-limited console log (~1 Hz) ───────────────────
+                # ── 8. Rate-limited console log (~1 Hz) ───────────────────
                 now = _time.monotonic()
                 if now - _last_log >= 1.0:
                     lock_remaining = (
@@ -574,9 +517,9 @@ class ObjectIsolator:
                     )
                     _last_log = now
 
-                # ── 8. Push to queue (drop stale frame if consumer is slow) ─
+                # ── 9. Push to queue (drop stale frame if consumer is slow) ─
                 try:
-                    self._frame_queue.get_nowait()   # evict the old frame
+                    self._frame_queue.get_nowait()
                 except queue.Empty:
                     pass
                 self._frame_queue.put(

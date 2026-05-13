@@ -3,20 +3,20 @@ test_obj_iso.py
 
 Tests ObjectIsolator with a live Open3D visualiser + a cv2 preview window.
 
-Improvements over the base version
-------------------------------------
-  Auto-centring  : the camera lookat is updated every frame to follow the
-                   centroid of the current point cloud, so the object is
-                   always in the middle of the window regardless of where
-                   it sits in 3-D space.
+Changes from base version
+--------------------------
+  Point rendering  : point_size raised to 5.0 so points overlap visually
+                     and gaps disappear without needing more geometry.
 
-  Smoothing      : two Open3D post-processing steps are applied before
-                   rendering each frame:
-                     1. Voxel down-sampling  — merges nearby points into one
-                        representative point, removing jagged duplicate
-                        clusters and giving uniform density.
-                     2. Statistical outlier removal — drops isolated noisy
-                        points that sit far from their neighbours.
+  Smoothing        : voxel down-sampling (VOXEL_SIZE=0.002) + statistical
+                     outlier removal + radius outlier removal.
+                     Voxel size is kept small (2 mm) to preserve density.
+
+  View stability   : per-frame set_lookat removed — the camera view you
+                     set manually is preserved across frames. View is
+                     initialised once on startup only.
+
+  Jetson load      : no normal estimation, no mesh reconstruction per frame.
 
 Usage:
     python test_obj_iso.py
@@ -36,38 +36,46 @@ import numpy as np
 import open3d as o3d
 from object_isolation import ObjectIsolator
 
-# ─── Smoothing parameters (tune these to taste) ───────────────────────────────
+# ─── Noise removal parameters ────────────────────────────────────────────────
+# Voxel downsampling is intentionally NOT used here — it reduces point density
+# and creates visible gaps. Instead, only outlier removal is applied so the
+# full depth-image resolution is preserved.
 
-# Voxel size in metres.  Larger = fewer, chunkier points; smaller = more detail.
-# 0.004 m (4 mm) is a good starting point for hand-sized objects at 10–40 cm.
-VOXEL_SIZE = 0.002
+# Statistical outlier removal
+SOR_NEIGHBORS = 20     # kept light for Jetson speed
+SOR_STD_RATIO = 1.2
 
-# Statistical outlier removal.
-# nb_neighbors : how many neighbours to consider for the mean-distance check
-# std_ratio    : points further than (mean + std_ratio * std) are removed;
-#                lower = more aggressive pruning
-SOR_NEIGHBORS = 30
-SOR_STD_RATIO = 1.5
+# Radius outlier removal — removes isolated floating points
+ROR_NB_POINTS = 6
+ROR_RADIUS    = 0.012  # 1.2 cm
+
+# ─── Rendering parameters ────────────────────────────────────────────────────
+# With full point density preserved, point_size=2.0 gives a natural solid look
+# without artificially inflating each point.
+POINT_SIZE = 2.0
 
 
 def smooth_pcd(pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
     """
-    Apply voxel down-sampling then statistical outlier removal.
+    Apply statistical outlier removal + radius outlier removal.
+    Voxel downsampling is deliberately skipped to preserve point density.
     Returns a new PointCloud; the input is not modified.
-    Returns the input unchanged if it has fewer than SOR_NEIGHBORS+1 points
-    (outlier removal needs at least that many).
     """
     if len(pcd.points) < SOR_NEIGHBORS + 1:
         return pcd
 
-    # Step 1 — merge nearby points into a single point per voxel cell
-    down = pcd.voxel_down_sample(voxel_size=VOXEL_SIZE)
-
-    # Step 2 — drop points that are statistical outliers among their neighbours
-    filtered, _ = down.remove_statistical_outlier(
+    # Step 1 — drop statistical outliers
+    filtered, _ = pcd.remove_statistical_outlier(
         nb_neighbors=SOR_NEIGHBORS,
         std_ratio=SOR_STD_RATIO,
     )
+
+    # Step 2 — drop isolated floating points
+    filtered, _ = filtered.remove_radius_outlier(
+        nb_points=ROR_NB_POINTS,
+        radius=ROR_RADIUS,
+    )
+
     return filtered
 
 
@@ -83,13 +91,13 @@ def run():
     vis = o3d.visualization.Visualizer()
     vis.create_window("Stage 1 — Isolated Object Point Cloud", width=1280, height=720)
 
-    # Increase point size so individual points are easier to see
     render_opt = vis.get_render_option()
-    render_opt.point_size = 3.0
-    render_opt.background_color = np.array([1.0, 1.0, 1.0])
+    render_opt.point_size        = POINT_SIZE
+    render_opt.background_color  = np.array([1.0, 1.0, 1.0])
 
     pcd        = o3d.geometry.PointCloud()
     geom_added = False
+    view_set   = False   # ensure view is initialised only once
 
     CV2_WIN = "YOLO Preview"
 
@@ -114,8 +122,7 @@ def run():
 
                 smoothed = smooth_pcd(raw_pcd)
 
-                # Copy smoothed data back into the persistent pcd object so
-                # Open3D's update_geometry works on the same reference
+                # Copy smoothed data into the persistent pcd object
                 pcd.points = smoothed.points
                 pcd.colors = smoothed.colors
 
@@ -123,24 +130,18 @@ def run():
                 if not geom_added:
                     vis.add_geometry(pcd)
                     geom_added = True
+                else:
+                    vis.update_geometry(pcd)
 
-                    # Set a fixed viewing angle once on startup;
-                    # lookat is updated every frame below
+                # ── Set view once on first valid frame ─────────────────────
+                # After this, the user can freely rotate/zoom without the
+                # view being reset every frame.
+                if not view_set and len(np.asarray(pcd.points)) > 0:
                     ctr = vis.get_view_control()
                     ctr.set_front([0, 0, -1])
                     ctr.set_up([0, -1, 0])
                     ctr.set_zoom(0.45)
-                else:
-                    vis.update_geometry(pcd)
-
-                # ── Auto-centre: move lookat to the point-cloud centroid ───
-                # This keeps the object in the middle of the window even when
-                # the hand or robot moves it around in 3-D space.
-                pts_np = np.asarray(pcd.points)
-                if len(pts_np) > 0:
-                    centroid = pts_np.mean(axis=0)
-                    ctr = vis.get_view_control()
-                    ctr.set_lookat(centroid.tolist())
+                    view_set = True
 
                 # ── cv2 preview ────────────────────────────────────────────
                 cv2.imshow(CV2_WIN, preview_bgr)

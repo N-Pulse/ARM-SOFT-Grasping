@@ -90,8 +90,23 @@ def infer(model, pcd, device="cuda", collision_thresh=0.01):
 # Cluster + select best grasp
 # ──────────────────────────────────────────────────────────────────────────────
 
+MIN_APPROACH_Y = 0.0   # reject grasps whose approach vector Y-component is below this
+                       # value; Y is down in camera space, so 0.0 means "must approach
+                       # from above or horizontal — never from below the table".
+                       # Raise toward 0.3 to enforce a more top-down approach.
+
+
 def cluster_and_select(trans, rot, scores, widths,
                        eps=0.02, min_samples=3):
+    if len(trans) == 0:
+        return None, None, None
+
+    # Drop any grasp whose approach vector points upward (Y < MIN_APPROACH_Y).
+    # rot[:, :, 0] is the approach axis per candidate; rot[:, 1, 0] is its Y
+    # component.  A negative Y means the gripper comes from below the object,
+    # which would require passing through the table.
+    valid = rot[:, 1, 0] >= MIN_APPROACH_Y
+    trans, rot, scores, widths = trans[valid], rot[valid], scores[valid], widths[valid]
     if len(trans) == 0:
         return None, None, None
 

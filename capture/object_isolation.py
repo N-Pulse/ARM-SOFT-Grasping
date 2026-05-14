@@ -453,9 +453,6 @@ class ObjectIsolator:
                         # No graspable object in view; clear previous result.
                         last_mask = last_box = last_label = None
 
-                if last_mask is None:
-                    continue
-
                 # ── 4. Build subsampled point cloud ───────────────────────
                 pc_util.map_to(color_fr)
                 points_rs = pc_util.calculate(depth_fr)
@@ -475,11 +472,16 @@ class ObjectIsolator:
                 colors = bgr[v, u, ::-1] / 255.0
 
                 # ── 5. Mask along segmentation contour ────────────────────
-                inside         = last_mask[v, u]
-                full_colors    = np.full_like(colors, 0.35)
-                full_colors[inside] = colors[inside]
-                obj_verts_raw  = verts[inside]
-                obj_colors_raw = colors[inside]
+                if last_mask is not None:
+                    inside         = last_mask[v, u]
+                    full_colors    = np.full_like(colors, 0.35)
+                    full_colors[inside] = colors[inside]
+                    obj_verts_raw  = verts[inside]
+                    obj_colors_raw = colors[inside]
+                else:
+                    full_colors    = colors
+                    obj_verts_raw  = np.zeros((0, 3), np.float32)
+                    obj_colors_raw = np.zeros((0, 3), np.float32)
 
                 # ── 7. cv2 preview with YOLO overlay ──────────────────────
                 # Tint foreground-masked regions dark red so it is clear what

@@ -117,6 +117,10 @@ def run(checkpoint, device="cuda"):
 
     pcd         = o3d.geometry.PointCloud()
     lineset     = _empty_lineset()
+    # Coordinate frame: X=red, Y=green, Z=blue (camera space, origin at camera)
+    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+        size=0.05, origin=[0.0, 0.0, 0.0]
+    )
     geom_added  = False
     zoom_fitted = False   # set only after the first real isolated cloud
 
@@ -140,6 +144,7 @@ def run(checkpoint, device="cuda"):
             if not geom_added:
                 vis.add_geometry(pcd)
                 vis.add_geometry(lineset)   # ← grasp overlay added once
+                vis.add_geometry(coord_frame)
                 geom_added = True
             else:
                 vis.update_geometry(pcd)

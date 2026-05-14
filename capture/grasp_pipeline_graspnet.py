@@ -90,25 +90,26 @@ def infer(model, pcd, device="cuda", collision_thresh=0.01):
 # Cluster + select best grasp
 # ──────────────────────────────────────────────────────────────────────────────
 
-MIN_APPROACH_Z = 0.0   # reject grasps whose approach vector Z-component is below this
-                       # value; Z is down in camera space, so 0.0 means "must approach
-                       # from above or horizontal — never from below the table".
-                       # Raise toward 0.3 to enforce a more top-down approach.
+GRASP_BOTTOM_MARGIN = 0.02  # reject grasps within this distance (m) of the object's
+                            # farthest depth value — those points sit at the table
+                            # contact surface and should never be grasped.
 
 
 def cluster_and_select(trans, rot, scores, widths,
-                       eps=0.02, min_samples=3):
+                       eps=0.02, min_samples=3, pcd=None):
     if len(trans) == 0:
         return None, None, None
 
-    # Drop any grasp whose approach vector points upward (Z < MIN_APPROACH_Z).
-    # rot[:, :, 0] is the approach axis per candidate; rot[:, 2, 0] is its Z
-    # component.  A negative Z means the gripper comes from below the object,
-    # which would require passing through the table.
-    valid = rot[:, 2, 0] >= MIN_APPROACH_Z
-    trans, rot, scores, widths = trans[valid], rot[valid], scores[valid], widths[valid]
-    if len(trans) == 0:
-        return None, None, None
+    # Reject grasps near the table-contact surface.
+    # In camera space Z increases away from the camera, so the farthest Z of the
+    # object point cloud is where the object rests on the table.  Any grasp whose
+    # translation is within GRASP_BOTTOM_MARGIN of that Z is at the contact zone.
+    if pcd is not None and len(pcd.points) > 0:
+        z_contact = np.asarray(pcd.points)[:, 2].max()
+        valid = trans[:, 2] < z_contact - GRASP_BOTTOM_MARGIN
+        trans, rot, scores, widths = trans[valid], rot[valid], scores[valid], widths[valid]
+        if len(trans) == 0:
+            return None, None, None
 
     tip_pos = trans[scores.argmax()]   # use highest-score grasp as proximity anchor
     labels  = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(trans)
@@ -181,7 +182,7 @@ class GraspInferenceThread:
                     t0 = time.monotonic()
                     trans, rot, scores, widths = infer(self._model, pcd, self._device)
                     best_rot, best_trans, best_width = cluster_and_select(
-                        trans, rot, scores, widths
+                        trans, rot, scores, widths, pcd=pcd
                     )
                     elapsed = time.monotonic() - t0
                     if best_rot is not None:

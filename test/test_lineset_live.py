@@ -126,6 +126,9 @@ def run(checkpoint, device="cuda"):
     last_grasp      = None    # track last grasp to avoid redundant updates
     lineset_ready   = False   # True once the real gripper lineset has been added
 
+    RENDER_INTERVAL = 1.0 / 30.0   # cap renderer at 30 fps
+    _last_render    = 0.0
+
     frame_ready = False
 
     while not _stop.is_set():
@@ -194,11 +197,14 @@ def run(checkpoint, device="cuda"):
                 lineset.colors = new_ls.colors
                 vis.update_geometry(lineset)
 
-        # ── Service both GUI event loops (identical to show_isolated_pcd) ──────
-        if not vis.poll_events():
-            _stop.set()
-            break
-        vis.update_renderer()
+        # ── Service both GUI event loops — capped at 30 fps ─────────────────
+        now = time.monotonic()
+        if now - _last_render >= RENDER_INTERVAL:
+            if not vis.poll_events():
+                _stop.set()
+                break
+            vis.update_renderer()
+            _last_render = now
 
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):   # ESC or q

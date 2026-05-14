@@ -84,6 +84,7 @@ def show_isolated_pcd(
     width: int = 1280,
     height: int = 720,
     frame_timeout: float = 0.1,
+    on_new_frame=None,
 ) -> None:
     """Spin up an Open3D window and stream frames from *isolator*.
 
@@ -105,6 +106,11 @@ def show_isolated_pcd(
         Initial window size in pixels.
     frame_timeout:
         Seconds to wait on the frame queue before polling the window again.
+    on_new_frame : callable(obj_verts, vis) | None
+        Optional callback invoked every frame when isolated object points are
+        available.  Receives the raw numpy vertex array and the Open3D
+        Visualizer so the callback can add or update extra geometry (e.g. a
+        shape wireframe overlay).  Called after the point cloud is updated.
     """
     CV2_WIN = "YOLO Detection"
 
@@ -148,6 +154,10 @@ def show_isolated_pcd(
                     iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
                     auto_zoom(vis, iso_pcd)
                     zoom_fitted = True
+
+                # Optional per-frame callback (e.g. shape overlay)
+                if on_new_frame is not None and len(obj_verts) > 0:
+                    on_new_frame(obj_verts, vis)
 
                 # ── cv2 YOLO preview ────────────────────────────────────────
                 if preview_bgr is not None:

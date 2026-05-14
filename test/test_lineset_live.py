@@ -24,6 +24,7 @@ import os
 import queue
 import signal
 import threading
+import time
 import argparse
 
 _HERE = os.path.dirname(__file__)
@@ -119,11 +120,15 @@ def run(checkpoint, device="cuda"):
     geom_added  = False
     zoom_fitted = False   # set only after the first real isolated cloud
 
+    frame_ready = False
+
     while not _stop.is_set():
         # ── Pull latest frame (identical to show_isolated_pcd) ────────────────
+        frame_ready = False
         try:
             verts, full_colors, obj_verts, obj_colors, preview_bgr = \
-                isolator._frame_queue.get(timeout=0.1)
+                isolator._frame_queue.get_nowait()
+            frame_ready = True
 
             # Point-cloud selection — same logic as show_isolated_pcd
             pts  = obj_verts  if len(obj_verts)  > 0 else verts
@@ -181,6 +186,10 @@ def run(checkpoint, device="cuda"):
         if key in (27, ord("q")):   # ESC or q
             _stop.set()
             break
+
+        # Yield when no new frame arrived to avoid spinning 100 % CPU
+        if not frame_ready:
+            time.sleep(0.005)
 
     # ── Ordered teardown ──────────────────────────────────────────────────────
     print("\n[test_lineset_live] shutting down...")

@@ -137,23 +137,25 @@ def _build_pipeline():
     return pipeline, align, spatial, temporal, holes, rs.pointcloud()
 
 
-def _build_foreground_mask(bgr: np.ndarray, depth_frame) -> np.ndarray:
+def _build_foreground_mask(bgr: np.ndarray, depth_frame,
+                           exclude_box=None) -> np.ndarray:
     """Return a bool mask (H, W) that is True where a pixel is likely foreground.
 
-    Two stages — applied before YOLO so the model never sees background clutter:
+    Two stages — applied before red detection so noisy background is removed:
 
-    1. **Depth-discontinuity removal** — for each pixel, the raw depth range
-       across a small neighbourhood is computed via morphological min/max.
-       Pixels whose neighbourhood depth span exceeds ``DEPTH_GAP_UNITS`` sit on
-       a surface boundary (e.g. the silhouette edge of an object against the
-       table) and are masked out, along with any pixel that has no depth reading.
+    1. **Depth-discontinuity removal** — pixels whose neighbourhood depth span
+       exceeds ``DEPTH_GAP_UNITS`` sit on a surface boundary and are masked out,
+       along with any pixel that has no depth reading.
 
     2. **White / near-white background removal** — pixels with high brightness
-       and low colour saturation (typical of a white or light-grey table) are
-       masked out independently of depth.
+       and low colour saturation are masked out.  This step is skipped inside
+       ``exclude_box`` (the last known object bounding box) so that white parts
+       of the object itself are never erased.
 
-    The resulting mask is applied to the BGR image before it is passed to YOLO,
-    and separately used to tint the cv2 preview so you can see what was removed.
+    Parameters
+    ----------
+    exclude_box : array-like [x1, y1, x2, y2] | None
+        If provided, white-mask removal is suppressed inside this rectangle.
     """
     kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT, (DEPTH_KERNEL_SIZE, DEPTH_KERNEL_SIZE)
@@ -163,22 +165,25 @@ def _build_foreground_mask(bgr: np.ndarray, depth_frame) -> np.ndarray:
     depth = np.asanyarray(depth_frame.get_data()).astype(np.float32)
     invalid = depth == 0
 
-    # Dilation gives the max depth in the neighbourhood.
     depth_max = cv2.dilate(depth, kernel)
 
-    # For erosion we need the min of *valid* pixels, so temporarily promote
-    # invalid pixels to the maximum possible value so they cannot "win".
     depth_erode_in = depth.copy()
     depth_erode_in[invalid] = 65535.0
     depth_min = cv2.erode(depth_erode_in, kernel)
-    depth_min[depth_min >= 65535.0] = 0.0          # restore zeros for invalid
+    depth_min[depth_min >= 65535.0] = 0.0
 
     depth_gap_mask = (depth_max - depth_min > DEPTH_GAP_UNITS) | invalid
 
     # ── 2. White / near-white background ─────────────────────────────────
-    brightness = bgr.max(axis=2).astype(np.float32)               # max(B,G,R)
+    brightness = bgr.max(axis=2).astype(np.float32)
     saturation = (bgr.max(axis=2) - bgr.min(axis=2)).astype(np.float32)
     white_mask = (brightness > WHITE_BRIGHTNESS_MIN) & (saturation < WHITE_SAT_MAX)
+
+    # Don't remove white pixels inside the previously detected object box —
+    # the object itself may have white markings or surfaces.
+    if exclude_box is not None:
+        x1, y1, x2, y2 = exclude_box
+        white_mask[y1:y2, x1:x2] = False
 
     # Foreground = neither a depth-edge pixel nor a white-background pixel
     return ~(depth_gap_mask | white_mask)
@@ -373,7 +378,7 @@ class ObjectIsolator:
                 # ── 2. Pre-YOLO foreground filtering ──────────────────────
                 # Build a pixel-level foreground mask (depth gaps + white BG)
                 # and blank those regions before YOLO sees the image.
-                fg_mask   = _build_foreground_mask(bgr, depth_fr)
+                fg_mask   = _build_foreground_mask(bgr, depth_fr, exclude_box=last_box)
                 yolo_bgr  = _apply_foreground_mask(bgr, fg_mask)
 
                 # ── 3. Motion check + lock / re-detect logic ───────────────

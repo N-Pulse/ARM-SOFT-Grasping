@@ -100,19 +100,18 @@ FRAME_MOTION_SIZE = (80, 60)  # downscale resolution for cheap motion check
 
 IMG_CENTER       = np.array([COLOR_WIDTH / 2, COLOR_HEIGHT / 2])
 
-# ─── Graspable-object whitelist ───────────────────────────────────────────────
-# Only detections whose COCO class name appears in this set are forwarded.
-# Everything large, living, or fixed in place (people, furniture, vehicles,
-# animals, appliances) is intentionally absent.
-# Add or remove entries here to tune what the robot will attempt to grasp.
-GRASPABLE_CLASSES: set[str] = {
-    # ── Sphere / ball ─────────────────────────────────────────────────────
-    "sports ball",
-    # ── Cylinder-like ─────────────────────────────────────────────────────
-    "bottle", "cup", "wine glass", "vase",
-    # ── Box / cube-like ───────────────────────────────────────────────────
-    "book", "laptop", "cell phone", "remote", "keyboard",
-}
+# ─── Red-object colour segmentation ──────────────────────────────────────────
+# YOLO is bypassed entirely.  Instead the pipeline finds the red blob closest
+# to the image centre and uses its contour mask for point-cloud isolation.
+#
+# Red occupies two hue bands in HSV because the hue channel wraps at 180°:
+#   low  band : 0 – RED_HUE_HIGH1   (orange-red)
+#   high band : RED_HUE_LOW2 – 179  (magenta-red)
+RED_HUE_HIGH1 =  10   # upper hue of the low  red band  (0–10)
+RED_HUE_LOW2  = 160   # lower hue of the high red band  (160–179)
+RED_SAT_MIN   =  80   # minimum HSV saturation (reject washed-out colours)
+RED_VAL_MIN   =  50   # minimum HSV value      (reject near-black pixels)
+RED_MIN_AREA  = 500   # minimum contour area in pixels  (reject noise specks)
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -193,61 +192,59 @@ def _apply_foreground_mask(bgr: np.ndarray,
     return out
 
 
-def _detect_masks(model, bgr_image):
-    """Run YOLO and return detections that pass the graspable-class whitelist.
+def _detect_red_mask(bgr: np.ndarray):
+    """Find the red blob closest to the image centre.
 
-    Each entry is ``(mask_bool, box_xyxy_int, class_name)``.
-    Detections whose class name is not in ``GRASPABLE_CLASSES`` are silently
-    dropped so that people, tables, chairs, etc. are never targeted.
+    Uses HSV colour thresholding (two hue bands because red wraps at 180°),
+    followed by morphological open+close to remove noise and fill small holes.
+    The contour closest to the image centre (by bounding-box centroid) is
+    returned as a boolean mask and its axis-aligned bounding box.
+
+    Returns ``(mask_bool, box_xyxy_int)`` or ``(None, None)`` when no
+    sufficiently large red region is found.
     """
-    results = model.predict(
-        source=bgr_image,
-        imgsz=YOLO_IMGSZ,
-        conf=YOLO_CONF,
-        iou=YOLO_IOU,
-        verbose=False,
-    )
-    detections = []
-    for result in results:
-        if result.masks is None:
+    h, w = bgr.shape[:2]
+    hsv  = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+
+    # Two inRange calls cover the wrap-around red hue bands.
+    mask_lo = cv2.inRange(hsv,
+                          (0,             RED_SAT_MIN, RED_VAL_MIN),
+                          (RED_HUE_HIGH1, 255,         255))
+    mask_hi = cv2.inRange(hsv,
+                          (RED_HUE_LOW2, RED_SAT_MIN, RED_VAL_MIN),
+                          (179,          255,         255))
+    red_raw = cv2.bitwise_or(mask_lo, mask_hi)
+
+    # Morphological cleanup: open removes speckle, close fills interior holes.
+    kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    red_raw = cv2.morphologyEx(red_raw, cv2.MORPH_OPEN,  kernel, iterations=2)
+    red_raw = cv2.morphologyEx(red_raw, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(red_raw, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None, None
+
+    best_mask, best_box, best_dist = None, None, float("inf")
+    for cnt in contours:
+        if cv2.contourArea(cnt) < RED_MIN_AREA:
             continue
-        for mask_tensor, box, cls_id in zip(
-            result.masks.data, result.boxes.xyxy, result.boxes.cls
-        ):
-            class_name = result.names[int(cls_id.item())]
-            if class_name not in GRASPABLE_CLASSES:
-                continue                         # ← whitelist filter
+        x, y, cw, ch = cv2.boundingRect(cnt)
 
-            mask_np = mask_tensor.cpu().numpy()
-            mask_resized = cv2.resize(
-                mask_np,
-                (bgr_image.shape[1], bgr_image.shape[0]),
-                interpolation=cv2.INTER_NEAREST,
-            ).astype(bool)
+        # Skip blobs that flood most of the frame (likely background).
+        if (cw * ch) / (w * h) > MAX_MASK_FILL:
+            continue
 
-            # Discard detections that flood most of the image (table, floor…)
-            fill = mask_resized.sum() / mask_resized.size
-            if fill > MAX_MASK_FILL:
-                continue                         # ← size filter
-
-            x1, y1, x2, y2 = box.cpu().numpy().astype(int)
-            detections.append((mask_resized, np.array([x1, y1, x2, y2]), class_name))
-    return detections
-
-
-def _select_central(detections):
-    """Return the (mask, box, class_name) of the detection closest to centre."""
-    if not detections:
-        return None, None, None
-    best_mask, best_box, best_name, best_dist = None, None, None, float("inf")
-    for mask, box, class_name in detections:
-        x1, y1, x2, y2 = box
-        dist = np.linalg.norm(
-            np.array([(x1 + x2) / 2, (y1 + y2) / 2]) - IMG_CENTER
-        )
+        cx, cy = x + cw / 2.0, y + ch / 2.0
+        dist    = np.linalg.norm(np.array([cx, cy]) - IMG_CENTER)
         if dist < best_dist:
-            best_mask, best_box, best_name, best_dist = mask, box, class_name, dist
-    return best_mask, best_box, best_name
+            m = np.zeros((h, w), dtype=np.uint8)
+            cv2.drawContours(m, [cnt], -1, 255, cv2.FILLED)
+            best_mask = m.astype(bool)
+            best_box  = np.array([x, y, x + cw, y + ch])
+            best_dist = dist
+
+    return best_mask, best_box
 
 
 # ─── Public class ─────────────────────────────────────────────────────────────
@@ -303,7 +300,7 @@ class ObjectIsolator:
         preview_bgr : annotated BGR image with YOLO mask overlay.
         """
         try:
-            full_verts, full_colors, obj_verts, obj_colors, preview_bgr = \
+            full_verts, _raw_colors, full_colors, obj_verts, obj_colors, preview_bgr = \
                 self._frame_queue.get_nowait()
         except queue.Empty:
             return None
@@ -340,20 +337,9 @@ class ObjectIsolator:
             print(f"[ObjectIsolator] FATAL: could not start RealSense pipeline: {exc}")
             return
 
-        try:
-            print(f"[ObjectIsolator] loading '{YOLO_MODEL}' ...")
-            model = YOLO(YOLO_MODEL)
-            if not YOLO_MODEL.endswith(".engine"):
-                model.fuse()
-            print("[ObjectIsolator] YOLO loaded ✓ — warming up...")
-            model.predict(source=np.zeros((320, 320, 3), dtype=np.uint8),
-                          imgsz=YOLO_IMGSZ, verbose=False)
-            print("[ObjectIsolator] warm-up done ✓")
-            self.ready.set()
-        except Exception as exc:
-            print(f"[ObjectIsolator] FATAL: could not load YOLO model: {exc}")
-            pipeline.stop()
-            return
+        # Colour-based detection — no model to load; signal ready immediately.
+        print("[ObjectIsolator] colour-based (red) detection — ready.")
+        self.ready.set()
 
         import time as _time
         print("[ObjectIsolator] camera + YOLO ready, streaming frames...")
@@ -431,17 +417,17 @@ class ObjectIsolator:
                 )
 
                 if run_yolo:
-                    detections = _detect_masks(model, yolo_bgr)
-                    new_mask, new_box, new_label = _select_central(detections)
+                    new_mask, new_box = _detect_red_mask(bgr)
+                    new_label = "red" if new_mask is not None else None
                     if new_mask is not None:
                         if last_label != new_label:
-                            print(f"[ObjectIsolator] locked onto '{new_label}' "
+                            print(f"[ObjectIsolator] locked onto red object "
                                   f"for {LOCK_DURATION_S:.0f} s")
                         last_mask, last_box, last_label = new_mask, new_box, new_label
                         lock_end_time = now + LOCK_DURATION_S
                         need_redetect = False
                     elif need_redetect:
-                        # No graspable object in view; clear previous result.
+                        # No red object in view; clear previous result.
                         last_mask = last_box = last_label = None
 
                 # ── 4. Build subsampled point cloud ───────────────────────
@@ -536,7 +522,7 @@ class ObjectIsolator:
                 except queue.Empty:
                     pass
                 self._frame_queue.put(
-                    (verts, full_colors, obj_verts, obj_colors, preview_bgr)
+                    (verts, colors, full_colors, obj_verts, obj_colors, preview_bgr)
                 )
 
         except Exception as exc:

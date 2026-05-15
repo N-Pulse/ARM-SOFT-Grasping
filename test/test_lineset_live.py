@@ -135,7 +135,7 @@ def run(checkpoint, device="cuda"):
         # ── Pull latest frame (identical to show_isolated_pcd) ────────────────
         frame_ready = False
         try:
-            verts, full_colors, obj_verts, obj_colors, preview_bgr = \
+            verts, _raw_colors, full_colors, obj_verts, obj_colors, preview_bgr = \
                 isolator._frame_queue.get_nowait()
             frame_ready = True
 

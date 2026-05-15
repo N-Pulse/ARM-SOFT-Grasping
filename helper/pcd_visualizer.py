@@ -85,6 +85,7 @@ def show_isolated_pcd(
     height: int = 720,
     frame_timeout: float = 0.1,
     on_new_frame=None,
+    debug: bool = False,
 ) -> None:
     """Spin up an Open3D window and stream frames from *isolator*.
 
@@ -108,58 +109,63 @@ def show_isolated_pcd(
         Seconds to wait on the frame queue before polling the window again.
     on_new_frame : callable(obj_verts, vis) | None
         Optional callback invoked every frame when isolated object points are
-        available.  Receives the raw numpy vertex array and the Open3D
-        Visualizer so the callback can add or update extra geometry (e.g. a
-        shape wireframe overlay).  Called after the point cloud is updated.
+        available.  Ignored when ``debug=True``.
+    debug : bool
+        When True, always display the full scene point cloud (object in real
+        colour, background grayed out) and auto-zoom on the first frame
+        regardless of whether an object has been isolated.  The
+        ``on_new_frame`` callback is skipped.  Useful for verifying camera
+        coverage and depth filtering without needing a detected object.
     """
-    CV2_WIN = "YOLO Detection"
+    CV2_WIN = "Camera Preview"
 
-    vis = o3d.visualization.Visualizer()
+    vis = o3d.visualization.VisualizerWithKeyCallback()
     vis.create_window(title, width=width, height=height)
     cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
 
-    pcd         = o3d.geometry.PointCloud()
-    geom_added  = False
-    zoom_fitted = False   # set only after the first real isolated cloud
+    pcd        = o3d.geometry.PointCloud()
+    geom_added = False   # True after add_geometry; camera is set on that same frame
 
     print("[pcd_visualizer] Window open — close the Open3D window or press Ctrl+C to stop.")
+    if debug:
+        print("[pcd_visualizer] DEBUG MODE — showing full point cloud.")
 
     try:
         while True:
             # --- pull the latest frame -----------------------------------------
             try:
-                verts, full_colors, obj_verts, obj_colors, preview_bgr = \
+                verts, raw_colors, full_colors, obj_verts, obj_colors, preview_bgr = \
                     isolator._frame_queue.get(timeout=frame_timeout)
 
-                # ── Open3D point cloud ──────────────────────────────────────
-                pts  = obj_verts  if len(obj_verts)  > 0 else verts
-                cols = obj_colors if len(obj_colors) > 0 else full_colors
+                # ── Choose which points/colours to display ──────────────────
+                if debug:
+                    # Full scene with original, unmodified colours.
+                    pts  = verts
+                    cols = raw_colors
+                else:
+                    pts  = obj_verts  if len(obj_verts)  > 0 else verts
+                    cols = obj_colors if len(obj_colors) > 0 else full_colors
 
                 pcd.points = o3d.utility.Vector3dVector(pts)
                 pcd.colors = o3d.utility.Vector3dVector(cols)
 
                 if not geom_added:
                     vis.add_geometry(pcd)
+                    # ── Camera setup identical to test_pointcloud_open3d.py ──
+                    ctr = vis.get_view_control()
+                    ctr.set_lookat([0, 0, 0.4])
+                    ctr.set_front([0, 0, -1])
+                    ctr.set_up([0, -1, 0])
+                    ctr.set_zoom(0.2)
                     geom_added = True
                 else:
                     vis.update_geometry(pcd)
 
-                # Auto-zoom once we have a confirmed isolated object cloud.
-                # Build a throw-away PointCloud from obj_verts only so
-                # get_center() and get_axis_aligned_bounding_box() are
-                # guaranteed to operate on the isolated object — never on
-                # the full scene fallback.
-                if not zoom_fitted and len(obj_verts) > 0:
-                    iso_pcd = o3d.geometry.PointCloud()
-                    iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
-                    auto_zoom(vis, iso_pcd)
-                    zoom_fitted = True
-
-                # Optional per-frame callback (e.g. shape overlay)
-                if on_new_frame is not None and len(obj_verts) > 0:
+                # Optional per-frame callback (skipped in debug mode)
+                if not debug and on_new_frame is not None and len(obj_verts) > 0:
                     on_new_frame(obj_verts, vis)
 
-                # ── cv2 YOLO preview ────────────────────────────────────────
+                # ── cv2 preview ─────────────────────────────────────────────
                 if preview_bgr is not None:
                     cv2.imshow(CV2_WIN, preview_bgr)
 

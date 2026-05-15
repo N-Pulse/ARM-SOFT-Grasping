@@ -35,6 +35,7 @@ Controls:
 
 import sys
 import os
+import argparse
 import numpy as np
 import open3d as o3d
 
@@ -200,19 +201,30 @@ def _make_shape_overlay():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def run():
+def run(debug: bool = False):
     isolator = ObjectIsolator(min_points=50)
     isolator.start()
 
-    print("Waiting for YOLO to load...")
+    print("Waiting for camera to be ready...")
     isolator.ready.wait()
-    print("YOLO ready — opening window.\n")
+    print("Ready — opening window.\n")
 
     try:
-        show_isolated_pcd(isolator, on_new_frame=_make_shape_overlay())
+        show_isolated_pcd(
+            isolator,
+            on_new_frame=_make_shape_overlay(),
+            debug=debug,
+        )
     finally:
         isolator.stop()
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show the full point cloud instead of the isolated object.",
+    )
+    args = parser.parse_args()
+    run(debug=args.debug)

@@ -106,21 +106,12 @@ IMG_CENTER       = np.array([COLOR_WIDTH / 2, COLOR_HEIGHT / 2])
 # animals, appliances) is intentionally absent.
 # Add or remove entries here to tune what the robot will attempt to grasp.
 GRASPABLE_CLASSES: set[str] = {
-    # ── Tabletop / kitchen ────────────────────────────────────────────────
-    "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl",
-    # ── Food ──────────────────────────────────────────────────────────────
-    "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
-    "hot dog", "pizza", "donut", "cake",
-    # ── Small electronics ─────────────────────────────────────────────────
-    "mouse", "remote", "cell phone",
-    # ── Office / desk ─────────────────────────────────────────────────────
-    "book", "scissors", "clock", "vase", "toothbrush", "hair drier",
-    # ── Toys / sport ──────────────────────────────────────────────────────
-    "teddy bear", "sports ball", "frisbee", "baseball glove", "tennis racket",
-    # ── Accessories ───────────────────────────────────────────────────────
-    "handbag", "tie", "umbrella",
-    # ── Miscellaneous graspable ───────────────────────────────────────────
-    "potted plant", "keyboard", "laptop",
+    # ── Sphere / ball ─────────────────────────────────────────────────────
+    "sports ball",
+    # ── Cylinder-like ─────────────────────────────────────────────────────
+    "bottle", "cup", "wine glass", "vase",
+    # ── Box / cube-like ───────────────────────────────────────────────────
+    "book", "laptop", "cell phone", "remote", "keyboard",
 }
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────

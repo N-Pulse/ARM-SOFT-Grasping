@@ -15,6 +15,7 @@ RUN pip3 install --ignore-installed \
     pyrealsense2 \
     open3d \
     numpy \
-    scipy 
+    scipy \
+    torch
 
 WORKDIR /workspace

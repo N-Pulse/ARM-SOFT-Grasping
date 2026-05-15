@@ -119,13 +119,12 @@ def show_isolated_pcd(
     """
     CV2_WIN = "Camera Preview"
 
-    vis = o3d.visualization.Visualizer()
+    vis = o3d.visualization.VisualizerWithKeyCallback()
     vis.create_window(title, width=width, height=height)
     cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
 
-    pcd         = o3d.geometry.PointCloud()
-    geom_added  = False
-    zoom_fitted = False   # set only after the first real isolated cloud
+    pcd        = o3d.geometry.PointCloud()
+    geom_added = False   # True after add_geometry; camera is set on that same frame
 
     print("[pcd_visualizer] Window open — close the Open3D window or press Ctrl+C to stop.")
     if debug:
@@ -138,7 +137,7 @@ def show_isolated_pcd(
                 verts, raw_colors, full_colors, obj_verts, obj_colors, preview_bgr = \
                     isolator._frame_queue.get(timeout=frame_timeout)
 
-                # ── Open3D point cloud ──────────────────────────────────────
+                # ── Choose which points/colours to display ──────────────────
                 if debug:
                     # Full scene with original, unmodified colours.
                     pts  = verts
@@ -152,20 +151,15 @@ def show_isolated_pcd(
 
                 if not geom_added:
                     vis.add_geometry(pcd)
+                    # ── Camera setup identical to test_pointcloud_open3d.py ──
+                    ctr = vis.get_view_control()
+                    ctr.set_lookat([0, 0, 0.4])
+                    ctr.set_front([0, 0, -1])
+                    ctr.set_up([0, -1, 0])
+                    ctr.set_zoom(0.2)
                     geom_added = True
                 else:
                     vis.update_geometry(pcd)
-
-                # Auto-zoom:
-                #   normal mode — once we have an isolated object cloud.
-                #   debug  mode — on the very first frame (full scene).
-                if not zoom_fitted:
-                    zoom_src = verts if debug else obj_verts
-                    if len(zoom_src) > 0:
-                        zoom_pcd = o3d.geometry.PointCloud()
-                        zoom_pcd.points = o3d.utility.Vector3dVector(zoom_src)
-                        auto_zoom(vis, zoom_pcd)
-                        zoom_fitted = True
 
                 # Optional per-frame callback (skipped in debug mode)
                 if not debug and on_new_frame is not None and len(obj_verts) > 0:

@@ -300,7 +300,7 @@ class ObjectIsolator:
         preview_bgr : annotated BGR image with YOLO mask overlay.
         """
         try:
-            full_verts, full_colors, obj_verts, obj_colors, preview_bgr = \
+            full_verts, _raw_colors, full_colors, obj_verts, obj_colors, preview_bgr = \
                 self._frame_queue.get_nowait()
         except queue.Empty:
             return None
@@ -522,7 +522,7 @@ class ObjectIsolator:
                 except queue.Empty:
                     pass
                 self._frame_queue.put(
-                    (verts, full_colors, obj_verts, obj_colors, preview_bgr)
+                    (verts, colors, full_colors, obj_verts, obj_colors, preview_bgr)
                 )
 
         except Exception as exc:

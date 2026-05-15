@@ -135,14 +135,14 @@ def show_isolated_pcd(
         while True:
             # --- pull the latest frame -----------------------------------------
             try:
-                verts, full_colors, obj_verts, obj_colors, preview_bgr = \
+                verts, raw_colors, full_colors, obj_verts, obj_colors, preview_bgr = \
                     isolator._frame_queue.get(timeout=frame_timeout)
 
                 # ── Open3D point cloud ──────────────────────────────────────
                 if debug:
-                    # Always show the entire scene; background appears grayed.
+                    # Full scene with original, unmodified colours.
                     pts  = verts
-                    cols = full_colors
+                    cols = raw_colors
                 else:
                     pts  = obj_verts  if len(obj_verts)  > 0 else verts
                     cols = obj_colors if len(obj_colors) > 0 else full_colors

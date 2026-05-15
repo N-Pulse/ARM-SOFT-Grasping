@@ -69,8 +69,10 @@ def auto_zoom(vis: o3d.visualization.Visualizer,
     zoom = max(0.05, min(zoom, 1.5))
 
     ctr = vis.get_view_control()
-    ctr.set_lookat(centroid)   # centre on the point-cloud mean
-    ctr.set_zoom(zoom)         # fill 80 % of the window
+    ctr.set_lookat(centroid)    # centre on the point-cloud mean
+    ctr.set_front([0, 0, -1])  # look along -Z (into the scene)
+    ctr.set_up([0, -1, 0])     # -Y is up in RealSense camera space
+    ctr.set_zoom(zoom)          # fill 80 % of the window
 
 
 # ---------------------------------------------------------------------------

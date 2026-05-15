@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     libusb-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install \
+RUN pip3 install --ignore-installed \
     pyrealsense2 \
     open3d \
     numpy \

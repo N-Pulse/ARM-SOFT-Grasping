@@ -121,8 +121,13 @@ def run(checkpoint, device="cuda"):
     coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
         size=0.05, origin=[0.0, 0.0, 0.0]
     )
-    geom_added  = False
-    zoom_fitted = False   # set only after the first real isolated cloud
+    geom_added      = False
+    zoom_fitted     = False   # set only after the first real isolated cloud
+    last_grasp      = None    # track last grasp to avoid redundant updates
+    lineset_ready   = False   # True once the real gripper lineset has been added
+
+    RENDER_INTERVAL = 1.0 / 30.0   # cap renderer at 30 fps
+    _last_render    = 0.0
 
     frame_ready = False
 
@@ -171,21 +176,35 @@ def run(checkpoint, device="cuda"):
         except queue.Empty:
             pass
 
-        # Update grasp lineset whenever a new result is ready
+        # Update grasp lineset only when a new result arrives
         grasp = grasp_thread.get_grasp()
-        if grasp is not None:
+        if grasp is not None and grasp is not last_grasp:
+            last_grasp = grasp
             rot, trans, width = grasp
             new_ls = _gripper_lineset(rot, trans, width)
-            lineset.points = new_ls.points
-            lineset.lines  = new_ls.lines
-            lineset.colors = new_ls.colors
-            vis.update_geometry(lineset)
+            if not lineset_ready and geom_added:
+                # First real grasp: replace the empty placeholder with correct
+                # topology (different point/line count) — remove then re-add.
+                vis.remove_geometry(lineset, reset_bounding_box=False)
+                lineset.points = new_ls.points
+                lineset.lines  = new_ls.lines
+                lineset.colors = new_ls.colors
+                vis.add_geometry(lineset, reset_bounding_box=False)
+                lineset_ready = True
+            elif lineset_ready:
+                lineset.points = new_ls.points
+                lineset.lines  = new_ls.lines
+                lineset.colors = new_ls.colors
+                vis.update_geometry(lineset)
 
-        # ── Service both GUI event loops (identical to show_isolated_pcd) ──────
-        if not vis.poll_events():
-            _stop.set()
-            break
-        vis.update_renderer()
+        # ── Service both GUI event loops — capped at 30 fps ─────────────────
+        now = time.monotonic()
+        if now - _last_render >= RENDER_INTERVAL:
+            if not vis.poll_events():
+                _stop.set()
+                break
+            vis.update_renderer()
+            _last_render = now
 
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):   # ESC or q

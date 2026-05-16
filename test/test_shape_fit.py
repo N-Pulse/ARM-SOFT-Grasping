@@ -1,29 +1,34 @@
 """
 test_shape_fit.py
 
-Fits the best geometric primitive (ball, cylinder, cone, pyramid, cuboid) to
-the isolated red object point cloud and draws it as a coloured wireframe
-overlay in the Open3D window.
+Fits a geometric primitive (sphere, cylinder, cuboid) to the visible surface
+of the isolated red object and draws it as a wireframe overlay.
 
-Identical to test_obj_iso.py up to the shape-fitting overlay injected via the
-on_new_frame callback.  Only fits when a red object is detected (obj_verts
-non-empty); the wireframe is hidden otherwise.
+Since we only ever see one side of the object, fitting is done by matching
+the observed surface patch — not by guessing from bounding-box extents.
 
-How fitting works
------------------
-1. PCA on the isolated points → three orthogonal principal axes + extents.
-2. Two ratios (S/L, M/L) determine the shape class.
-3. Mesh dimensions are computed from actual point distributions (mean radial
-   distance from axis, etc.) rather than raw bounding extents, so the
-   wireframe surface overlaps the real cloud as closely as possible.
-4. The mesh is rotated into world frame and converted to a LineSet wireframe.
+Fitting strategy
+----------------
+Three primitives are tried every frame; the one whose surface best explains
+the observed points (lowest mean point-to-surface distance) wins.
+
+  Sphere   — least-squares sphere fit: find center c and radius r such that
+              every point lies on the sphere surface (||p - c|| = r).
+              Solved as a linear system.
+
+  Cylinder — the normals of a cylinder all point radially outward and are
+              therefore perpendicular to the axis.  PCA on the normals gives
+              the axis direction (smallest-variance eigenvector).  Points are
+              then projected onto the plane perpendicular to that axis and a
+              2D circle is fitted to find the radius and axis position.
+
+  Cuboid   — RANSAC plane fit.  If the surface is flat this wins trivially.
+              The wireframe is a thin box whose face matches the visible patch.
 
 Shape colours
 -------------
-  ball     → cyan
+  sphere   → cyan
   cylinder → orange
-  cone     → pink-red
-  pyramid  → green
   cuboid   → lavender
 
 Usage:
@@ -45,172 +50,219 @@ from capture.object_isolation import ObjectIsolator
 from helper.pcd_visualizer import show_isolated_pcd
 
 
-# ── Shape colours ─────────────────────────────────────────────────────────────
-
 _COLORS = {
-    "ball":     [0.2, 0.8, 1.0],   # cyan
+    "sphere":   [0.2, 0.8, 1.0],   # cyan
     "cylinder": [1.0, 0.5, 0.0],   # orange
-    "cone":     [1.0, 0.2, 0.4],   # pink-red
-    "pyramid":  [0.4, 1.0, 0.2],   # green
     "cuboid":   [0.8, 0.6, 1.0],   # lavender
 }
 
 
-# ── Mesh builders ─────────────────────────────────────────────────────────────
-# All meshes are built in PCA-local coordinates:
-#   local Z = major axis (L),  local Y = mid axis (M),  local X = minor (S)
-# Sizes are derived from the actual point distribution so the wireframe surface
-# sits on the real cloud rather than wrapping an abstract bounding box.
-#
-# pts_local : (N,3) array — points projected onto PCA axes, centred at origin.
-# L, M, S   : extents along major / mid / minor axes.
+# ── Surface fitting ────────────────────────────────────────────────────────────
 
-def _mesh_ball(pts_local, L, M, S):
-    # Mean distance from centroid ≈ sphere radius observed from any direction.
-    r = float(np.mean(np.linalg.norm(pts_local, axis=1)))
-    return o3d.geometry.TriangleMesh.create_sphere(radius=r, resolution=20)
+def _fit_sphere(pts):
+    """Least-squares sphere fit.
 
+    Linearise  ||p - c||² = r²  as:
+        -2px·cx - 2py·cy - 2pz·cz + (||c||² - r²) = -||p||²
 
-def _mesh_cylinder(pts_local, L, M, S):
-    # Radial distance from the major axis (local Z).
-    # pts_local[:,1] = mid projection, pts_local[:,2] = minor projection.
-    radial = np.sqrt(pts_local[:, 1] ** 2 + pts_local[:, 2] ** 2)
-    r = float(np.mean(radial))
-    return o3d.geometry.TriangleMesh.create_cylinder(radius=r, height=L,
-                                                     resolution=20)
-
-
-def _mesh_cone(pts_local, L, M, S):
-    # Estimate base radius from the widest cross-section (one end of major axis).
-    # Split points into bottom half and top half along local Z, take the half
-    # with larger mean radial spread as the base.
-    radial = np.sqrt(pts_local[:, 1] ** 2 + pts_local[:, 2] ** 2)
-    z      = pts_local[:, 0]
-    lo_r   = float(np.mean(radial[z < np.median(z)])) if (z < np.median(z)).any() else 0.0
-    hi_r   = float(np.mean(radial[z > np.median(z)])) if (z > np.median(z)).any() else 0.0
-    r_base = max(lo_r, hi_r, (M + S) / 4)
-
-    mesh = o3d.geometry.TriangleMesh.create_cone(radius=r_base, height=L,
-                                                 resolution=20)
-    # Open3D cone: base at Z=0, tip at Z=L → centroid at Z=L/4; centre it.
-    mesh.translate([0.0, 0.0, -L / 4.0])
-    return mesh
-
-
-def _mesh_pyramid(pts_local, L, M, S):
-    # Half base side from the wider end of the cloud.
-    radial = np.sqrt(pts_local[:, 1] ** 2 + pts_local[:, 2] ** 2)
-    z      = pts_local[:, 0]
-    lo_r   = float(np.mean(radial[z < np.median(z)])) if (z < np.median(z)).any() else 0.0
-    hi_r   = float(np.mean(radial[z > np.median(z)])) if (z > np.median(z)).any() else 0.0
-    b = max(lo_r, hi_r, (M + S) / 4)
-
-    base_z = -L / 4.0      # centroid of pyramid at 1/4 height
-    apex_z =  L * 3.0 / 4.0
-    verts = np.array([
-        [-b, -b, base_z], [ b, -b, base_z],
-        [ b,  b, base_z], [-b,  b, base_z],
-        [ 0,  0, apex_z],
-    ], dtype=np.float64)
-    tris = np.array([
-        [0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4],
-        [0, 2, 1], [0, 3, 2],
-    ], dtype=np.int32)
-    mesh = o3d.geometry.TriangleMesh()
-    mesh.vertices  = o3d.utility.Vector3dVector(verts)
-    mesh.triangles = o3d.utility.Vector3iVector(tris)
-    return mesh
-
-
-def _mesh_cuboid(pts_local, L, M, S):
-    # PCA extents are exactly the right dimensions for a box.
-    mesh = o3d.geometry.TriangleMesh.create_box(width=S, height=M, depth=L)
-    mesh.translate([-S / 2.0, -M / 2.0, -L / 2.0])
-    return mesh
-
-
-# ── Shape classifier + wireframe builder ──────────────────────────────────────
-
-def _fit_shape(pts: np.ndarray):
-    """Fit a geometric primitive to *pts* (N×3).
-
-    Returns (shape_name, lineset) — the lineset is a coloured wireframe already
-    positioned and oriented in world space.
-    Returns (None, None) when there are too few points.
+    Returns (center, radius, mean_residual) or (None, None, inf) on failure.
     """
-    if len(pts) < 30:
-        return None, None
+    A = np.column_stack([-2.0 * pts, np.ones(len(pts))])
+    b = -(pts ** 2).sum(axis=1)
+    x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    cx, cy, cz, d = x
+    r_sq = cx**2 + cy**2 + cz**2 - d
+    if r_sq <= 0:
+        return None, None, np.inf
+    center = np.array([cx, cy, cz])
+    r      = float(np.sqrt(r_sq))
+    resid  = float(np.mean(np.abs(np.linalg.norm(pts - center, axis=1) - r)))
+    return center, r, resid
 
-    # ── PCA ───────────────────────────────────────────────────────────────────
-    center   = pts.mean(axis=0)
-    centered = pts - center
 
-    _, evecs = np.linalg.eigh(np.cov(centered.T))  # eigenvalues ascending
-    evecs    = evecs[:, ::-1]                        # now descending: col0=major
+def _fit_cylinder(pts, normals):
+    """Fit a cylinder using normals to find the axis, then a 2-D circle.
 
-    # Project points onto PCA axes; extents along each axis.
-    pts_local = centered @ evecs           # (N,3) — local coords
-    extents   = pts_local.max(axis=0) - pts_local.min(axis=0)
-    L, M, S   = extents                   # large, mid, small
+    Cylinder normals are all perpendicular to the axis, so they span a plane.
+    The axis direction is the eigenvector of the normal covariance matrix with
+    the *smallest* eigenvalue (the direction with least normal variance).
 
-    if L < 1e-6:
-        return None, None
+    Returns (axis, center_on_axis, radius, height, mean_residual)
+    or      (None, None, None, None, inf) on failure.
+    """
+    if len(normals) < 10:
+        return None, None, None, None, np.inf
 
-    # ── Classify ──────────────────────────────────────────────────────────────
-    r1 = S / L   # small / large
-    r2 = M / L   # mid   / large
+    # Axis from normal PCA
+    cov           = np.cov(normals.T)
+    evals, evecs  = np.linalg.eigh(cov)
+    axis          = evecs[:, 0]                   # smallest eigenvalue
+    axis          = axis / (np.linalg.norm(axis) + 1e-9)
 
-    if r1 > 0.75:
-        shape = "ball"
-    elif r2 > 0.72:
-        shape = "cylinder"
-    elif r1 < 0.50 and abs(r1 - r2) < 0.18:
-        shape = "cone"
-    elif r1 > 0.35 and r2 > 0.50 and abs(r1 - r2) < 0.25:
-        shape = "pyramid"
+    # Project points perpendicular to axis for 2-D circle fit
+    mean_pt    = pts.mean(axis=0)
+    along_axis = (pts - mean_pt) @ axis           # scalar projection on axis
+    pts_perp   = pts - np.outer(along_axis, axis) # 3-D but in the cross-section plane
+
+    A = np.column_stack([-2.0 * pts_perp, np.ones(len(pts_perp))])
+    b = -(pts_perp ** 2).sum(axis=1)
+    x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    cx, cy, cz, d = x
+    r_sq = cx**2 + cy**2 + cz**2 - d
+    if r_sq <= 0:
+        return None, None, None, None, np.inf
+
+    r             = float(np.sqrt(r_sq))
+    axis_center   = np.array([cx, cy, cz])
+    radial_dist   = np.linalg.norm(pts_perp - axis_center, axis=1)
+    resid         = float(np.mean(np.abs(radial_dist - r)))
+    height        = float(along_axis.max() - along_axis.min())
+    # Center of the cylinder segment in world space
+    mid_along     = (along_axis.max() + along_axis.min()) / 2.0
+    world_center  = axis_center + axis * mid_along
+
+    return axis, world_center, r, height, resid
+
+
+def _fit_plane(pts):
+    """RANSAC plane fit.
+
+    Returns (normal, offset_d, inlier_pts, mean_residual).
+    """
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts)
+    plane, inlier_idx = pcd.segment_plane(
+        distance_threshold=0.005,
+        ransac_n=3,
+        num_iterations=100,
+    )
+    n     = np.array(plane[:3])
+    d     = float(plane[3])
+    resid = float(np.mean(np.abs(pts @ n + d)))
+    return n, d, pts[inlier_idx], resid
+
+
+# ── Wireframe builders ─────────────────────────────────────────────────────────
+
+def _wireframe_sphere(center, r):
+    mesh = o3d.geometry.TriangleMesh.create_sphere(radius=r, resolution=20)
+    mesh.translate(center)
+    ls = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
+    ls.paint_uniform_color(_COLORS["sphere"])
+    return ls
+
+
+def _wireframe_cylinder(axis, center, r, height):
+    """Build a cylinder wireframe along *axis* centred at *center*."""
+    mesh = o3d.geometry.TriangleMesh.create_cylinder(
+        radius=r, height=height, resolution=20
+    )
+    # Rotate Z-axis to match the fitted axis
+    z    = np.array([0.0, 0.0, 1.0])
+    v    = np.cross(z, axis)
+    s    = np.linalg.norm(v)
+    c    = float(np.dot(z, axis))
+    if s < 1e-6:
+        R = np.eye(3) if c > 0 else -np.eye(3)
     else:
-        shape = "cuboid"
-
-    # ── Build mesh in PCA-local frame (major axis = local Z) ──────────────────
-    builders = {
-        "ball":     _mesh_ball,
-        "cylinder": _mesh_cylinder,
-        "cone":     _mesh_cone,
-        "pyramid":  _mesh_pyramid,
-        "cuboid":   _mesh_cuboid,
-    }
-    mesh = builders[shape](pts_local, L, M, S)
-
-    # ── Rotate into world frame ────────────────────────────────────────────────
-    # The mesh was built with local-Z = major, local-Y = mid, local-X = minor.
-    # We need the rotation R such that:
-    #   R @ [0,0,1] = evecs[:,0]  (major)
-    #   R @ [0,1,0] = evecs[:,1]  (mid)
-    #   R @ [1,0,0] = evecs[:,2]  (minor)
-    # That gives R = evecs reordered as [minor | mid | major] columns.
-    R = evecs[:, [2, 1, 0]]
-    # Ensure proper rotation (det = +1); flip one column if it's a reflection.
-    if np.linalg.det(R) < 0:
-        R[:, 0] *= -1
+        vx = np.array([[0, -v[2], v[1]],
+                       [v[2], 0, -v[0]],
+                       [-v[1], v[0], 0]])
+        R  = np.eye(3) + vx + vx @ vx * (1.0 - c) / (s ** 2)
 
     mesh.rotate(R, center=np.zeros(3))
     mesh.translate(center)
+    ls = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
+    ls.paint_uniform_color(_COLORS["cylinder"])
+    return ls
 
-    # ── Convert to wireframe ──────────────────────────────────────────────────
-    lineset = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
-    lineset.paint_uniform_color(_COLORS[shape])
 
-    return shape, lineset
+def _wireframe_cuboid(plane_normal, inlier_pts):
+    """Build a thin box whose face matches the visible flat patch.
+
+    Projects inlier points onto the plane, finds the 2-D bounding rectangle,
+    and extrudes a box with a small depth so the wireframe is visible.
+    """
+    n = plane_normal / (np.linalg.norm(plane_normal) + 1e-9)
+
+    # Build two orthonormal tangent vectors on the plane
+    ref = np.array([0.0, 0.0, 1.0]) if abs(n[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    t1  = np.cross(n, ref);  t1 /= np.linalg.norm(t1)
+    t2  = np.cross(n, t1);   t2 /= np.linalg.norm(t2)
+
+    # 2-D extents of the inlier patch
+    u   = inlier_pts @ t1
+    v   = inlier_pts @ t2
+    w   = inlier_pts @ n
+    du, dv, dw = u.max() - u.min(), v.max() - v.min(), max(w.max() - w.min(), 0.005)
+
+    mesh = o3d.geometry.TriangleMesh.create_box(width=du, height=dv, depth=dw)
+    mesh.translate([-du / 2, -dv / 2, -dw / 2])
+
+    # Rotation: box axes [X,Y,Z] → [t1, t2, n]
+    R = np.column_stack([t1, t2, n])
+    if np.linalg.det(R) < 0:
+        R[:, 2] *= -1
+    mesh.rotate(R, center=np.zeros(3))
+
+    center = np.array([
+        (u.max() + u.min()) / 2 * t1[i] +
+        (v.max() + v.min()) / 2 * t2[i] +
+        (w.max() + w.min()) / 2 * n[i]
+        for i in range(3)
+    ])
+    mesh.translate(center)
+
+    ls = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
+    ls.paint_uniform_color(_COLORS["cuboid"])
+    return ls
+
+
+# ── Main fitting dispatcher ────────────────────────────────────────────────────
+
+def _fit_shape(pts: np.ndarray):
+    """Fit the best-matching surface primitive to *pts*.
+
+    Returns (shape_name, lineset) or (None, None) if fitting fails.
+    """
+    if len(pts) < 50:
+        return None, None
+
+    # Estimate surface normals
+    pcd_tmp = o3d.geometry.PointCloud()
+    pcd_tmp.points = o3d.utility.Vector3dVector(pts)
+    pcd_tmp.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30)
+    )
+    normals = np.asarray(pcd_tmp.normals)
+
+    # Try all three fits and measure residuals
+    sph_center, sph_r,  sph_err               = _fit_sphere(pts)
+    cyl_axis, cyl_ctr, cyl_r, cyl_h, cyl_err  = _fit_cylinder(pts, normals)
+    pln_n, pln_d, pln_inliers, pln_err         = _fit_plane(pts)
+
+    candidates = []
+    if sph_r is not None and 0.005 < sph_r < 1.0:
+        candidates.append(("sphere",   sph_err))
+    if cyl_r is not None and 0.005 < cyl_r < 1.0 and cyl_h > 0:
+        candidates.append(("cylinder", cyl_err))
+    candidates.append(("cuboid", pln_err))
+
+    shape = min(candidates, key=lambda x: x[1])[0]
+
+    if shape == "sphere":
+        ls = _wireframe_sphere(sph_center, sph_r)
+    elif shape == "cylinder":
+        ls = _wireframe_cylinder(cyl_axis, cyl_ctr, cyl_r, cyl_h)
+    else:
+        ls = _wireframe_cuboid(pln_n, pln_inliers)
+
+    return shape, ls
 
 
 # ── on_new_frame callback ─────────────────────────────────────────────────────
 
 def _make_shape_overlay():
-    """Return a stateful callback for show_isolated_pcd's on_new_frame hook.
-
-    The callback is only invoked when obj_verts is non-empty (red detected),
-    so the wireframe is naturally absent when there is no detection.
-    """
     state = {"lineset": None, "label": None}
 
     def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer):

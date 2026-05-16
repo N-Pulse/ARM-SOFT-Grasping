@@ -20,6 +20,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from capture.object_isolation import ObjectIsolator
 from helper.pcd_visualizer import show_isolated_pcd
 
+try:
+    import rclpy
+    from rclpy.node import Node
+except:
+    print('Ros is not installed')
 
 def run(debug: bool = False):
     isolator = ObjectIsolator(min_points=50)

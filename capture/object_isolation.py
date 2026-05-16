@@ -79,6 +79,42 @@ RED_VAL_MIN   =  50   # minimum HSV value      (rejects near-black pixels)
 RED_MIN_AREA  = 500   # minimum contour area in pixels (rejects noise specks)
 
 
+# ─── Cluster filtering ────────────────────────────────────────────────────────
+# After colour-mask isolation, stray reflections or background leakage can
+# leave disconnected point patches.  DBSCAN groups points into connected
+# regions; keeping only the largest removes those fragments.
+
+CLUSTER_EPS        = 0.02   # 2 cm — max neighbour distance within a cluster
+CLUSTER_MIN_POINTS = 10     # fragments smaller than this are discarded
+
+
+def _keep_largest_cluster(verts: np.ndarray,
+                          colors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return only the points in the largest DBSCAN cluster.
+
+    If no cluster is found or the input is too small, the original arrays are
+    returned unchanged.
+    """
+    if len(verts) < CLUSTER_MIN_POINTS:
+        return verts, colors
+
+    tmp = o3d.geometry.PointCloud()
+    tmp.points = o3d.utility.Vector3dVector(verts)
+    labels = np.array(tmp.cluster_dbscan(
+        eps=CLUSTER_EPS,
+        min_points=CLUSTER_MIN_POINTS,
+        print_progress=False,
+    ))
+
+    valid = labels >= 0
+    if not valid.any():
+        return verts, colors
+
+    largest = np.bincount(labels[valid]).argmax()
+    mask    = labels == largest
+    return verts[mask], colors[mask]
+
+
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 
 def _build_pipeline():
@@ -325,8 +361,9 @@ class ObjectIsolator:
                     inside         = last_mask[v, u]
                     full_colors    = np.full_like(colors, 0.35)
                     full_colors[inside] = colors[inside]
-                    obj_verts_raw  = verts[inside]
-                    obj_colors_raw = colors[inside]
+                    obj_verts_raw, obj_colors_raw = _keep_largest_cluster(
+                        verts[inside], colors[inside]
+                    )
                 else:
                     full_colors    = colors
                     obj_verts_raw  = np.zeros((0, 3), np.float32)

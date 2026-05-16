@@ -154,14 +154,15 @@ def _build_foreground_mask(bgr: np.ndarray, depth_frame,
         cv2.MORPH_RECT, (DEPTH_KERNEL_SIZE, DEPTH_KERNEL_SIZE)
     )
 
-    depth   = np.asanyarray(depth_frame.get_data()).astype(np.float32)
+    depth   = np.asanyarray(depth_frame.get_data()).astype(np.uint16)
     invalid = depth == 0
 
-    depth_max      = cv2.dilate(depth, kernel)
+    depth_max      = cv2.dilate(depth, kernel).astype(np.float32)
     depth_erode_in = depth.copy()
-    depth_erode_in[invalid] = 65535.0
-    depth_min = cv2.erode(depth_erode_in, kernel)
+    depth_erode_in[invalid] = 65535
+    depth_min = cv2.erode(depth_erode_in, kernel).astype(np.float32)
     depth_min[depth_min >= 65535.0] = 0.0
+    depth = depth.astype(np.float32)
 
     depth_gap_mask = (depth_max - depth_min > DEPTH_GAP_UNITS) | invalid
 

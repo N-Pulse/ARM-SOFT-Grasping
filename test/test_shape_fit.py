@@ -101,8 +101,16 @@ _R_MIN            = 0.005       # m
 _R_MAX            = 2.0         # m
 _CAP_NORMAL_DOT   = 0.7         # |n·axis| > this → end-cap point
 _CAP_MIN_PTS      = 10
-_SNAP_THRESH_DEG  = 45.0        # angle from table_normal below which → vertical
+_SNAP_THRESH_DEG  = 45.0        # curvature-axis fallback: angle below which → vertical
 _MAX_RADIAL_ERR   = 0.015       # m — if mean radial error > this → fallback cuboid
+
+# Aspect ratio thresholds for vertical / horizontal decision
+# aspect = extent_along_table_normal / max_extent_in_table_plane
+# 250 mm bottle (r≈30 mm) seen from the side : aspect ≈ 250/60  ≈ 4.2  → vertical
+# 120 mm can (r≈35 mm) lying down            : aspect ≈  70/120 ≈ 0.58 → horizontal
+_ASPECT_VERTICAL   = 1.5    # aspect > this → definitely vertical
+_ASPECT_HORIZONTAL = 0.85   # aspect < this → definitely horizontal
+                             # between the two → curvature axis angle as fallback
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -296,32 +304,73 @@ def _classify(k1, k2):
 # STAGE ② — Confirm axis with table constraint
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _confirm_axis(raw_axis, table_normal):
+def _confirm_axis(raw_axis, table_normal, pts):
     """
-    Snap the raw curvature axis to either:
-      · table_normal          (vertical cylinder,   |angle| < _SNAP_THRESH_DEG)
-      · ⊥ table_normal        (horizontal cylinder, |angle| ≥ _SNAP_THRESH_DEG)
+    Decide whether the cylinder is vertical or horizontal, then snap the axis.
 
-    The in-plane direction for horizontal cylinders is preserved from
-    raw_axis — curvature already tells us which way the object lies.
+    Decision strategy — two signals, primary wins:
+    ────────────────────────────────────────────────────────────────────────
+    PRIMARY  Point-cloud aspect ratio  (geometric, robust to curvature noise)
+      · extent_up   = PCD range along table_normal
+      · extent_wide = largest PCD range in the table plane
+      · aspect = extent_up / extent_wide
+
+      aspect > _ASPECT_VERTICAL   → vertical   (tall object, e.g. bottle)
+      aspect < _ASPECT_HORIZONTAL → horizontal  (wide object, e.g. can lying)
+
+    FALLBACK  Curvature axis angle  (used only when aspect is ambiguous)
+      · |raw_axis · table_normal| ≥ cos(_SNAP_THRESH_DEG) → vertical
+      · otherwise                                          → horizontal
+    ────────────────────────────────────────────────────────────────────────
+
+    For horizontal cylinders the in-plane direction is kept from raw_axis,
+    because curvature correctly tells us which way the object is oriented
+    even when the tilt estimate is noisy.
 
     Returns (confirmed_axis, "vertical" | "horizontal").
     """
-    cos_a     = abs(float(raw_axis @ table_normal))
-    threshold = float(np.cos(np.radians(_SNAP_THRESH_DEG)))
+    # ── Primary: aspect ratio of the PCD bounding box ────────────────────────
+    centroid = pts.mean(axis=0)
+    d        = pts - centroid
 
-    if cos_a >= threshold:
-        # ── Vertical: axis ≈ table normal ────────────────────────────────────
-        snapped     = table_normal.copy()
+    # Height: extent along the table normal direction
+    proj_up    = d @ table_normal
+    extent_up  = float(proj_up.max() - proj_up.min())
+
+    # Width: build two orthonormal vectors in the table plane and take max range
+    ref  = np.array([1., 0., 0.]) if abs(table_normal[0]) < 0.9 \
+           else np.array([0., 1., 0.])
+    p1   = np.cross(table_normal, ref);  p1 /= np.linalg.norm(p1)
+    p2   = np.cross(table_normal, p1);   p2 /= np.linalg.norm(p2)
+    u    = d @ p1;  v = d @ p2
+    extent_wide = float(max(u.max() - u.min(), v.max() - v.min()))
+
+    aspect = extent_up / (extent_wide + 1e-6)
+    print(f"[shape_fit]  extent_up={extent_up*1000:.0f} mm  "
+          f"extent_wide={extent_wide*1000:.0f} mm  "
+          f"aspect={aspect:.2f}")
+
+    if aspect > _ASPECT_VERTICAL:
         orientation = "vertical"
+    elif aspect < _ASPECT_HORIZONTAL:
+        orientation = "horizontal"
     else:
-        # ── Horizontal: project onto table plane, keep curvature direction ───
+        # ── Fallback: curvature axis angle ────────────────────────────────────
+        cos_a     = abs(float(raw_axis @ table_normal))
+        threshold = float(np.cos(np.radians(_SNAP_THRESH_DEG)))
+        orientation = "vertical" if cos_a >= threshold else "horizontal"
+        print(f"[shape_fit]  aspect ambiguous → curvature fallback → {orientation}")
+
+    # ── Snap axis ─────────────────────────────────────────────────────────────
+    if orientation == "vertical":
+        snapped = table_normal.copy()
+    else:
+        # Project raw_axis onto the table plane (removes out-of-plane tilt noise)
         snapped = raw_axis - (raw_axis @ table_normal) * table_normal
         nrm     = np.linalg.norm(snapped)
         if nrm < 1e-6:
             return raw_axis, "unknown"
-        snapped      = snapped / nrm
-        orientation  = "horizontal"
+        snapped = snapped / nrm
 
     # Preserve sign (same hemisphere as raw_axis)
     if float(snapped @ raw_axis) < 0:
@@ -538,7 +587,7 @@ def fit_shape(pts: np.ndarray, table_normal: np.ndarray = None):
 
     # ── STAGE ②  Confirm axis with table constraint ───────────────────────────
     if table_normal is not None:
-        axis, orientation = _confirm_axis(raw_axis, table_normal)
+        axis, orientation = _confirm_axis(raw_axis, table_normal, pts)
         print(f"[shape_fit]  axis confirmed: {orientation}  {np.round(axis, 3)}")
     else:
         axis = raw_axis

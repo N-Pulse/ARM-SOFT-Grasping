@@ -427,24 +427,27 @@ class _ShapeTracker:
 
             self.axis    = (1-alpha)*self.axis    + alpha*raw_axis
             self.axis   /= np.linalg.norm(self.axis)
-            self.axis_pt = (1-alpha)*self.axis_pt + alpha*raw_axis_pt
-            self.radius  = (1-alpha)*self.radius  + alpha*raw_r
             self.h_ctr   = (1-alpha)*self.h_ctr   + alpha*raw_h_ctr
             self.height  = (1-alpha)*self.height  + alpha*raw_h
 
-            # ── Constrain axis: must be vertical OR parallel to the table ──────
-            # Regardless of whether orientation is locked yet, we always snap
-            # the smoothed axis so it never drifts to an intermediate angle.
+            # ── Constrain axis to vertical; position cylinder on the surface ───
+            # Only vertical is considered for now.  The axis is always snapped
+            # to table_normal so it never drifts to an intermediate angle.
+            # axis_pt and radius are taken directly from the current frame's
+            # circle fit (no EMA) so the wireframe stays as tight as possible
+            # to the actual point-cloud surface.
             if self.orient == "vertical":
-                self.axis = table_normal.copy()
-            elif self.orient == "horizontal":
-                proj = self.axis - (self.axis @ table_normal) * table_normal
-                nrm  = np.linalg.norm(proj)
-                if nrm > 1e-6:
-                    self.axis = proj / nrm
-                # else: axis is (pathologically) nearly collinear with
-                # table_normal — leave it alone; _confirm_orientation will
-                # correct it next frame
+                self.axis    = table_normal.copy()
+                self.axis_pt = raw_axis_pt.copy()   # raw fit → no lag
+                self.radius  = raw_r                # raw fit → no lag
+            else:
+                # Horizontal case commented out for now
+                # proj = self.axis - (self.axis @ table_normal) * table_normal
+                # nrm  = np.linalg.norm(proj)
+                # if nrm > 1e-6:
+                #     self.axis = proj / nrm
+                self.axis_pt = (1-alpha)*self.axis_pt + alpha*raw_axis_pt
+                self.radius  = (1-alpha)*self.radius  + alpha*raw_r
 
         h_min = self.h_ctr - self.height / 2.0
         h_max = self.h_ctr + self.height / 2.0

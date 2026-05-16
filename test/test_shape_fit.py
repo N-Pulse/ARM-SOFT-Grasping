@@ -1,46 +1,45 @@
 """
 test_shape_fit.py
 =================
-Curvature-based geometric primitive fitting for single-view point clouds.
+Curvature-based primitive fitting for single-view point clouds.
+Only cylinder and cuboid are fitted (sphere is disabled — see note below).
+
+Design constraints
+------------------
+  · The camera captures only one face of the object.
+  · However, the *entire* physical object is within the camera frame,
+    so at least ~30% of the surface is visible.
+  · This guarantees that the curvature signature of the visible patch is
+    representative of the true primitive:
+      - a cylinder exposes enough of its curved face that κ₁ ≈ 0, κ₂ ≠ 0
+        is stable and reliable;
+      - a flat face exposes enough surface that κ₁ ≈ κ₂ ≈ 0 is reliable.
+  · Given this, curvature alone is sufficient for classification.
+    No secondary consistency check is needed.
+
+Why sphere is disabled
+----------------------
+  Sphere (κ₁ ≈ κ₂ ≠ 0) is commented out.  With ≥30% of the object visible,
+  a sphere is distinguishable in principle, but in practice the objects in
+  this pipeline are bottles, cans, and boxes — not spheres.  Re-enable the
+  sphere branch if needed.
 
 Pipeline
 --------
-  1. LOCAL   — for every point, fit a quadratic patch in its tangent frame
-               → principal curvatures κ₁ ≤ κ₂ and the zero-curvature axis
-  2. FEATURE — aggregate over the visible patch:
-               · median κ₁, κ₂  →  shape classification
-               · consensus zero-curvature direction  →  cylinder axis
-               · mean curvature H = (κ₁+κ₂)/2  →  radius
-  3. REBUILD — extrapolate the full primitive from the extracted features,
-               not from point extents
-
-Why not global fitting?
------------------------
-A partial point cloud (one visible face) cannot disambiguate sphere / cylinder /
-flat by position alone — all three look identical head-on.  Curvature is a
-*local* differential property that encodes shape type in even a small patch.
-
-Shape classification
---------------------
-  κ₁ ≈ κ₂ ≠ 0          →  sphere    (isotropic curvature in all directions)
-  κ₁ ≈ 0,  κ₂ ≠ 0      →  cylinder  (flat along axis, curved across it)
-  κ₁ ≈ κ₂ ≈ 0          →  cuboid / flat
+  1. LOCAL   — per-point quadratic patch fit → κ₁ ≤ κ₂, zero-curvature axis
+  2. FEATURE — median κ₁, κ₂ over patch → classify; consensus axis direction
+  3. REBUILD — cylinder: r from curvature, height from point-cloud extent
+                         + end-cap refinement if top/bottom faces are visible
+               cuboid : RANSAC plane + thin box
 
 Wireframe colours
 -----------------
-  sphere   → cyan     [0.2, 0.8, 1.0]
   cylinder → orange   [1.0, 0.5, 0.0]
   cuboid   → lavender [0.8, 0.6, 1.0]
 
 Usage
 -----
   python test_shape_fit.py [--debug]
-
-  --debug   show the raw full point cloud instead of the isolated object
-
-Dependencies
-------------
-  open3d, numpy, scipy
 """
 
 import sys
@@ -58,98 +57,72 @@ from helper.pcd_visualizer import show_isolated_pcd
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 _COLOR = {
-    "sphere":   [0.2, 0.8, 1.0],
+    # "sphere":   [0.2, 0.8, 1.0],   # disabled
     "cylinder": [1.0, 0.5, 0.0],
     "cuboid":   [0.8, 0.6, 1.0],
 }
 
 # ── Tuning ─────────────────────────────────────────────────────────────────────
-# All curvature values are in m⁻¹ (inverse metres).
-# A sphere/cylinder of radius 5 cm has κ ≈ 20 m⁻¹.
-# A flat surface has κ ≈ 0 m⁻¹.
-# Adjust _FLAT_THRESH if your objects are much larger or smaller than ~5–20 cm.
-
-_KNN_NORMAL   = 30     # neighbours for Open3D normal estimation
-_KNN_CURV     = 25     # neighbours for local quadratic curvature fit
-_SUBSAMPLE    = 600    # max points used in the curvature loop (speed)
-_FLAT_THRESH  = 2.0    # |κ| < this  →  treated as "zero curvature"
-_ANISO_RATIO  = 5.0    # |κ_max/κ_min| > this  →  cylinder rather than sphere
-_R_MIN        = 0.005  # smallest plausible radius (m)
-_R_MAX        = 2.0    # largest  plausible radius (m)
+_KNN_NORMAL     = 30     # neighbours for normal estimation
+_KNN_CURV       = 25     # neighbours for local quadratic curvature fit
+_SUBSAMPLE      = 600    # max points in the curvature loop (speed)
+_FLAT_THRESH    = 2.0    # |κ| < this (m⁻¹) → treated as zero curvature
+_ANISO_RATIO    = 5.0    # |κ_max / κ_min| > this → cylinder
+_R_MIN          = 0.005  # smallest plausible radius (m)
+_R_MAX          = 2.0    # largest  plausible radius (m)
+_CAP_NORMAL_DOT = 0.7    # |n · axis| > this → point belongs to an end cap
+_CAP_MIN_PTS    = 10     # minimum end-cap points needed to trust cap detection
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 1 — Local curvature at a single point
+# STEP 1 — Local principal curvatures at a single point
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _fit_local_curvature(p, n, neighbours):
     """
-    Estimate the principal curvatures at point *p* with outward normal *n*
-    using the surrounding *neighbours* (k×3 array, not including *p* itself).
+    Fit  h = a·u² + b·u·v + c·v²  in the tangent frame of (p, n).
 
-    Method
-    ------
-    Express each neighbour in the local tangent frame (t1, t2, n).
-    Its coordinates are (u, v, h) where u,v are in-plane and h is height.
-    For a smooth surface:  h ≈ a·u² + b·u·v + c·v²   (quadratic, no linear
-    term because n is the exact normal at p).
+    The second fundamental form  [[2a, b], [b, 2c]]  yields eigenvalues κ₁ ≤ κ₂
+    (principal curvatures) and eigenvectors (principal directions).
 
-    The second fundamental form  II = [[2a, b], [b, 2c]]  has eigenvalues
-    equal to the two principal curvatures κ₁ ≤ κ₂.
+    The eigenvector of κ₁ (the *smaller* curvature) is the zero-curvature
+    direction — this becomes the cylinder axis candidate.
 
-    Returns
-    -------
-    (kappa1, kappa2, zero_axis_3d)
-      kappa1, kappa2 : float  — principal curvatures, |κ₁| ≤ |κ₂|
-      zero_axis_3d   : (3,)   — world-space direction of *minimal* curvature
-                               (= cylinder axis when κ₁ ≈ 0)
-    Returns None if the local neighbourhood is degenerate.
+    Returns (κ₁, κ₂, zero_axis_3d) or None on degenerate input.
     """
-    # --- build orthonormal tangent frame ---
     ref = np.array([0., 0., 1.]) if abs(n[2]) < 0.9 else np.array([1., 0., 0.])
     t1  = np.cross(n, ref);  t1 /= np.linalg.norm(t1)
     t2  = np.cross(n, t1);   t2 /= np.linalg.norm(t2)
 
-    # --- project neighbours into (u, v, h) ---
     d = neighbours - p
     u = d @ t1
     v = d @ t2
     h = d @ n
 
-    # --- least-squares quadratic fit: h = a·u² + b·u·v + c·v² ---
     A = np.column_stack([u ** 2, u * v, v ** 2])
     if np.linalg.matrix_rank(A) < 3:
-        return None                         # degenerate (coplanar neighbours)
+        return None
 
     (a, b, c), *_ = np.linalg.lstsq(A, h, rcond=None)
 
-    # --- second fundamental form → principal curvatures ---
-    II            = np.array([[2 * a, b],
-                               [b,    2 * c]])
-    evals, evecs  = np.linalg.eigh(II)     # ascending: |κ₁| ≤ |κ₂|
+    II           = np.array([[2 * a, b],
+                              [b,    2 * c]])
+    evals, evecs = np.linalg.eigh(II)      # ascending: κ₁ ≤ κ₂
 
-    # Convert the minimal-curvature 2-D eigenvector back to world space
-    ev_min     = evecs[:, 0]               # eigenvec of the smaller |κ|
-    zero_axis  = ev_min[0] * t1 + ev_min[1] * t2
+    zero_axis = evecs[0, 0] * t1 + evecs[1, 0] * t2   # κ₁ eigenvector in 3D
 
     return float(evals[0]), float(evals[1]), zero_axis
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 2 — Aggregate curvatures over the whole visible patch
+# STEP 2 — Aggregate and classify
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _aggregate_curvatures(pts, normals):
     """
-    Run _fit_local_curvature on every point in *pts* and aggregate:
-      · median κ₁, κ₂  (robust to outliers from noisy regions)
-      · mean zero-curvature axis  (cylinder axis candidate)
-
-    Returns
-    -------
-    kappa1 : float     median of the smaller principal curvature
-    kappa2 : float     median of the larger principal curvature
-    axis   : (3,) or None   consensus zero-curvature direction
+    Run _fit_local_curvature on every point; return:
+      kappa1, kappa2 — median principal curvatures over the patch
+      axis           — consensus zero-curvature direction (cylinder axis)
     """
     tree = cKDTree(pts)
     k1_list, k2_list, axis_list = [], [], []
@@ -170,7 +143,7 @@ def _aggregate_curvatures(pts, normals):
     kappa1 = float(np.median(k1_list))
     kappa2 = float(np.median(k2_list))
 
-    # Robust average of unit axes (handle ± sign ambiguity)
+    # Robust mean of unit axes — resolve ± sign ambiguity before averaging
     axes  = np.array(axis_list)
     signs = np.sign(axes @ axes[0])
     signs[signs == 0] = 1
@@ -184,77 +157,103 @@ def _aggregate_curvatures(pts, normals):
 
 def _classify(k1, k2):
     """
-    Map (κ₁, κ₂) to a shape label.
+    Classify into "cylinder" or "cuboid" from principal curvatures.
 
-    Decision logic
-    --------------
-    |κ₂| < _FLAT_THRESH          → both curvatures negligible  → cuboid
-    |κ₁| < _FLAT_THRESH  OR
-    |κ₂/κ₁| > _ANISO_RATIO       → one direction is flat        → cylinder
-    otherwise                    → both directions curved        → sphere
+    With ≥30% of the object visible, the curvature signature is stable:
+      · κ₂ negligible              → flat surface → cuboid
+      · κ₁ ≈ 0 but κ₂ significant → one curved direction → cylinder
+      · both significant (isotropic) → would be sphere, but sphere is
+        disabled; treated as cylinder (falls back to cuboid if axis fails)
+
+    Disabled:
+    # if a1 > _FLAT_THRESH and (a2 / (a1 + 1e-9)) < _ANISO_RATIO:
+    #     return "sphere"
     """
-    a1, a2 = abs(k1), abs(k2)      # |κ₁| ≤ |κ₂| from eigh
+    a1, a2 = abs(k1), abs(k2)
 
     if a2 < _FLAT_THRESH:
         return "cuboid"
 
-    if a1 < _FLAT_THRESH or (a2 / (a1 + 1e-9)) > _ANISO_RATIO:
-        return "cylinder"
-
-    return "sphere"
+    # One or both curvatures are significant → attempt cylinder.
+    # With ≥30% surface visible, a genuine cylinder will have a clear axis;
+    # if axis extraction fails the pipeline falls back to cuboid automatically.
+    return "cylinder"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 3 — Reconstruct full primitive from extracted features
+# STEP 3 — Cylinder height from point-cloud extents + end-cap detection
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _rebuild_sphere(pts, normals, k1, k2):
+def _estimate_cylinder_bounds(pts, normals, axis, centroid):
     """
-    Reconstruct a sphere from curvature.
+    Find the axial extent (h_min, h_max) of the visible cylinder segment.
 
-    Radius   r = 1/|H|  where  H = (κ₁+κ₂)/2  (mean curvature).
-    Centre   = surface centroid shifted *inward* along the mean outward normal
-               by r.  (Normals point away from the centre; we go the other way.)
+    Two evidence sources:
+
+    1. Point extents (primary)
+       Project every point onto the axis; take 1st/99th percentile to trim
+       depth-camera fringe noise at object boundaries.
+
+    2. End-cap points (refinement)
+       Points whose normals are nearly parallel to the axis come from the
+       flat top or bottom face of the cylinder (when those faces are visible).
+       These give sharper bounds than the raw point spread because they sit
+       exactly on the rim of the cylinder.
+
+       Guard: end-cap bounds are only accepted if the detected cap lies within
+       the outer 30% of the raw extent — this prevents mid-surface noisy
+       normals from being mistaken for caps.
     """
-    H  = (k1 + k2) / 2.0
-    r  = float(np.clip(1.0 / (abs(H) + 1e-9), _R_MIN, _R_MAX))
+    proj  = (pts - centroid) @ axis
+    h_min = float(np.percentile(proj, 1))
+    h_max = float(np.percentile(proj, 99))
 
-    centroid = pts.mean(axis=0)
-    mean_n   = normals.mean(axis=0)
-    mean_n  /= np.linalg.norm(mean_n) + 1e-9
-    center   = centroid - mean_n * r        # inward = opposite outward normal
+    # End-cap detection: normals roughly parallel to axis
+    cap_mask = np.abs(normals @ axis) > _CAP_NORMAL_DOT
 
-    mesh = o3d.geometry.TriangleMesh.create_sphere(radius=r, resolution=20)
-    mesh.translate(center)
-    ls   = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
-    ls.paint_uniform_color(_COLOR["sphere"])
-    return ls
+    if cap_mask.sum() >= _CAP_MIN_PTS:
+        cap_proj = proj[cap_mask]
+        extent   = h_max - h_min
 
+        candidate_min = float(cap_proj.min())
+        candidate_max = float(cap_proj.max())
+
+        if candidate_min < h_min + 0.3 * extent:
+            h_min = candidate_min
+            print(f"[shape_fit]  bottom cap detected  h_min = {h_min:.3f} m")
+
+        if candidate_max > h_max - 0.3 * extent:
+            h_max = candidate_max
+            print(f"[shape_fit]  top cap detected     h_max = {h_max:.3f} m")
+
+    return h_min, h_max
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 4 — Build wireframes
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _rebuild_cylinder(pts, normals, k1, k2, axis):
     """
-    Reconstruct a cylinder from curvature + axis direction.
+    Build a cylinder wireframe.
 
-    Radius   r = 1/|κ_max|  (the non-zero principal curvature).
-    Axis     already extracted in Step 2 as the zero-curvature eigenvector.
-    Height   from the point extents projected along the axis
-             (only for wireframe height — this is the *visible* segment).
-    Centre   surface centroid pushed inward along the mean radial direction.
+    Radius  r = 1 / |κ_max|         (from curvature — no bounding-box guessing)
+    Height  from _estimate_cylinder_bounds (point extent + end-cap refinement)
+    Centre  centroid pushed inward along the mean radial normal by r,
+            then shifted to the axial midpoint.
     """
     a1, a2  = abs(k1), abs(k2)
     k_curve = k2 if a2 >= a1 else k1
     r       = float(np.clip(1.0 / (abs(k_curve) + 1e-9), _R_MIN, _R_MAX))
 
-    centroid = pts.mean(axis=0)
+    centroid            = pts.mean(axis=0)
+    h_min, h_max        = _estimate_cylinder_bounds(pts, normals, axis, centroid)
+    height              = float(np.clip(h_max - h_min, 0.005, 5.0))
+    mid                 = (h_min + h_max) / 2.0
 
-    # Height: extent of visible points along axis
-    proj   = (pts - centroid) @ axis
-    height = float(np.clip(proj.max() - proj.min(), 0.005, 5.0))
-    mid    = float((proj.max() + proj.min()) / 2.0)
-
-    # Radial direction: mean normal with axial component removed
+    # Inward radial direction: mean normal minus its axial component
     mean_n  = normals.mean(axis=0)
-    mean_n -= (mean_n @ axis) * axis        # project out the axial component
+    mean_n -= (mean_n @ axis) * axis
     nrm     = np.linalg.norm(mean_n)
     if nrm > 1e-6:
         mean_n /= nrm
@@ -262,7 +261,7 @@ def _rebuild_cylinder(pts, normals, k1, k2, axis):
     else:
         center = centroid + axis * mid
 
-    # Rotate Open3D's Z-axis-aligned cylinder to match the fitted axis
+    # Rotate Open3D's default Z-axis cylinder to match the fitted axis
     z   = np.array([0., 0., 1.])
     v   = np.cross(z, axis)
     s   = np.linalg.norm(v)
@@ -287,10 +286,7 @@ def _rebuild_cylinder(pts, normals, k1, k2, axis):
 
 def _rebuild_cuboid(pts):
     """
-    Fit a plane to the flat patch (RANSAC) and extrude a thin box.
-
-    The box face matches the inlier patch extent; depth is whatever the
-    point spread perpendicular to the plane is (minimum 5 mm so it's visible).
+    RANSAC plane fit → thin box extruded from the inlier patch extent.
     """
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
@@ -300,7 +296,6 @@ def _rebuild_cuboid(pts):
     n   = np.array(plane[:3]);  n /= np.linalg.norm(n) + 1e-9
     inl = pts[np.array(inlier_idx)]
 
-    # Tangent frame for the fitted plane
     ref = np.array([0., 0., 1.]) if abs(n[2]) < 0.9 else np.array([1., 0., 0.])
     t1  = np.cross(n, ref);  t1 /= np.linalg.norm(t1)
     t2  = np.cross(n, t1);   t2 /= np.linalg.norm(t2)
@@ -334,22 +329,12 @@ def _rebuild_cuboid(pts):
 
 def fit_shape(pts: np.ndarray):
     """
-    Run the full three-step pipeline on one frame of isolated object points.
-
-    Parameters
-    ----------
-    pts : (N, 3) float array   world-space points of the isolated object
-
-    Returns
-    -------
-    (shape_name, LineSet)  or  (None, None) if there are too few points.
+    Full pipeline for one frame.  Returns (shape_name, LineSet) or (None, None).
     """
     if len(pts) < 50:
         return None, None
 
-    # --- Normal estimation ---
-    # Orient normals away from the camera.  For a RealSense in depth-frame
-    # coordinates the camera sits at the origin, so camera_location=[0,0,0].
+    # Normal estimation — orient away from camera (at origin in depth frame)
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     pcd.estimate_normals(
@@ -360,7 +345,7 @@ def fit_shape(pts: np.ndarray):
     )
     normals = np.asarray(pcd.normals)
 
-    # --- Subsample for the O(N·k) curvature loop ---
+    # Subsample for the O(N·k) curvature loop
     N = len(pts)
     if N > _SUBSAMPLE:
         idx     = np.random.choice(N, _SUBSAMPLE, replace=False)
@@ -369,25 +354,20 @@ def fit_shape(pts: np.ndarray):
     else:
         s_pts, s_norms = pts, normals
 
-    # --- Steps 1 & 2: local fits → aggregate ---
+    # Steps 1 & 2: local fits → aggregate → classify
     k1, k2, axis = _aggregate_curvatures(s_pts, s_norms)
     shape        = _classify(k1, k2)
 
-    print(f"[shape_fit]  κ₁={k1:+.2f} m⁻¹   κ₂={k2:+.2f} m⁻¹   → {shape}")
+    print(f"[shape_fit]  κ₁={k1:+.2f}  κ₂={k2:+.2f}  → {shape}")
 
-    # --- Step 3: reconstruct full primitive ---
-    if shape == "sphere":
-        ls = _rebuild_sphere(pts, normals, k1, k2)
+    # Cylinder requires a valid axis; fall back to cuboid if extraction failed
+    if shape == "cylinder" and axis is None:
+        print("[shape_fit]  axis extraction failed → cuboid")
+        shape = "cuboid"
 
-    elif shape == "cylinder":
-        if axis is None:
-            # Axis extraction failed — fall back to cuboid
-            shape = "cuboid"
-            ls    = _rebuild_cuboid(pts)
-        else:
-            ls = _rebuild_cylinder(pts, normals, k1, k2, axis)
-
-    else:   # cuboid
+    if shape == "cylinder":
+        ls = _rebuild_cylinder(pts, normals, k1, k2, axis)
+    else:
         ls = _rebuild_cuboid(pts)
 
     return shape, ls
@@ -398,10 +378,6 @@ def fit_shape(pts: np.ndarray):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _make_overlay_callback():
-    """
-    Returns an on_new_frame callback that maintains a single wireframe
-    LineSet in the Open3D visualizer, updating it in-place each frame.
-    """
     state = {"ls": None, "label": None}
 
     def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer):
@@ -413,11 +389,9 @@ def _make_overlay_callback():
             print(f"[shape_fit]  *** shape → {shape} ***")
 
         if state["ls"] is None:
-            # First frame: add geometry to the scene
             vis.add_geometry(new_ls)
             state["ls"] = new_ls
         else:
-            # Subsequent frames: update in-place (avoids flickering)
             ls = state["ls"]
             ls.points = new_ls.points
             ls.lines  = new_ls.lines
@@ -439,7 +413,7 @@ def run(debug: bool = False):
 
     print("Waiting for camera …")
     isolator.ready.wait()
-    print("Camera ready — opening visualizer window.\n")
+    print("Camera ready — opening visualizer.\n")
 
     try:
         show_isolated_pcd(
@@ -452,13 +426,7 @@ def run(debug: bool = False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Curvature-based shape fitting over a single-view point cloud."
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Show the full scene point cloud instead of the isolated object.",
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     run(debug=args.debug)

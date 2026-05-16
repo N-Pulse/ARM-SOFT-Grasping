@@ -381,73 +381,29 @@ class _ShapeTracker:
         # Adaptive alpha: high-error frames contribute less
         alpha = float(np.clip(_ALPHA / (1.0 + raw_err * 30), 0.04, 0.35))
 
-        # ── Orientation locking ───────────────────────────────────────────────
-        if not self._locked:
-            if raw_orient == self.orient:
-                self._streak += 1
-                if self._streak >= _N_LOCK:
-                    self._locked = True
-                    print(f"[tracker]  ★ LOCKED → {self.orient}")
-            else:
-                self.orient  = raw_orient
-                self._streak = 1
-        else:
-            if raw_orient != self.orient:
-                self._flip_str += 1
-                if self._flip_str >= _N_UNLOCK:
-                    print(f"[tracker]  ★ UNLOCKED (was {self.orient})")
-                    self._locked   = False
-                    self._flip_str = 0
-                    self.orient    = raw_orient
-                    self._streak   = 1
-            else:
-                self._flip_str = 0
-
-        # ── Force axis to locked orientation ─────────────────────────────────
-        if self._locked:
-            if self.orient == "vertical":
-                raw_axis = table_normal.copy()
-            # horizontal: keep raw_axis (curvature gives the in-plane direction)
-
         # ── EMA parameter blend ───────────────────────────────────────────────
         raw_h_ctr = (raw_h_min + raw_h_max) / 2.0
         raw_h     = raw_h_max - raw_h_min
 
         if self.axis is None:
             # First valid frame — initialise directly
-            self.axis    = raw_axis.copy()
+            self.axis    = table_normal.copy()
             self.axis_pt = raw_axis_pt.copy()
             self.radius  = raw_r
             self.h_ctr   = raw_h_ctr
             self.height  = raw_h
         else:
-            # Keep axis in same hemisphere before blending
-            if float(self.axis @ raw_axis) < 0:
-                raw_axis = -raw_axis
+            # Smooth height; position and radius taken raw each frame so the
+            # wireframe stays as tight as possible to the object surface.
+            self.h_ctr  = (1-alpha)*self.h_ctr  + alpha*raw_h_ctr
+            self.height = (1-alpha)*self.height  + alpha*raw_h
+            self.axis_pt = raw_axis_pt.copy()   # raw fit → no lag
+            self.radius  = raw_r                # raw fit → no lag
 
-            self.axis    = (1-alpha)*self.axis    + alpha*raw_axis
-            self.axis   /= np.linalg.norm(self.axis)
-            self.h_ctr   = (1-alpha)*self.h_ctr   + alpha*raw_h_ctr
-            self.height  = (1-alpha)*self.height  + alpha*raw_h
-
-            # ── Constrain axis to vertical; position cylinder on the surface ───
-            # Only vertical is considered for now.  The axis is always snapped
-            # to table_normal so it never drifts to an intermediate angle.
-            # axis_pt and radius are taken directly from the current frame's
-            # circle fit (no EMA) so the wireframe stays as tight as possible
-            # to the actual point-cloud surface.
-            if self.orient == "vertical":
-                self.axis    = table_normal.copy()
-                self.axis_pt = raw_axis_pt.copy()   # raw fit → no lag
-                self.radius  = raw_r                # raw fit → no lag
-            else:
-                # Horizontal case commented out for now
-                # proj = self.axis - (self.axis @ table_normal) * table_normal
-                # nrm  = np.linalg.norm(proj)
-                # if nrm > 1e-6:
-                #     self.axis = proj / nrm
-                self.axis_pt = (1-alpha)*self.axis_pt + alpha*raw_axis_pt
-                self.radius  = (1-alpha)*self.radius  + alpha*raw_r
+        # ── Axis is ALWAYS the chessboard table normal — no convergence drift ─
+        # This is set unconditionally after every update so that neither EMA
+        # blending nor orientation detection can tilt the axis away from vertical.
+        self.axis = table_normal.copy()
 
         h_min = self.h_ctr - self.height / 2.0
         h_max = self.h_ctr + self.height / 2.0
@@ -482,24 +438,30 @@ def _build_cylinder(axis, axis_pt, r, h_min, h_max):
     return ls
 
 
-def _build_cuboid(pts):
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pts)
-    plane, idx = pcd.segment_plane(distance_threshold=0.005,ransac_n=3,num_iterations=200)
-    n   = np.array(plane[:3]); n/=np.linalg.norm(n)+1e-9
-    inl = pts[np.array(idx)]
-    ref = np.array([0.,0.,1.]) if abs(n[2])<0.9 else np.array([1.,0.,0.])
-    t1  = np.cross(n,ref); t1/=np.linalg.norm(t1)
-    t2  = np.cross(n,t1);  t2/=np.linalg.norm(t2)
-    u=inl@t1; v=inl@t2; w=inl@n
-    du=u.max()-u.min(); dv=v.max()-v.min(); dw=max(w.max()-w.min(),0.005)
-    mesh = o3d.geometry.TriangleMesh.create_box(width=du,height=dv,depth=dw)
-    mesh.translate([-du/2,-dv/2,-dw/2])
-    R = np.column_stack([t1,t2,n])
-    if np.linalg.det(R)<0: R[:,2]*=-1
-    mesh.rotate(R,center=np.zeros(3))
-    ctr = np.array([(u.max()+u.min())/2*t1[i]+(v.max()+v.min())/2*t2[i]
-                    +(w.max()+w.min())/2*n[i] for i in range(3)])
+def _build_cuboid(pts, table_normal):
+    """
+    Build an axis-aligned cuboid wireframe whose height axis is always the
+    chessboard table normal (vertical to the platform).  The two horizontal
+    axes are derived from table_normal so they lie flat on the table plane.
+    """
+    n   = table_normal.copy()
+    ref = np.array([1.,0.,0.]) if abs(n[0])<0.9 else np.array([0.,1.,0.])
+    t1  = np.cross(n, ref); t1 /= np.linalg.norm(t1)
+    t2  = np.cross(n, t1);  t2 /= np.linalg.norm(t2)
+
+    u = pts @ t1;  v = pts @ t2;  w = pts @ n
+    du = u.max()-u.min()
+    dv = v.max()-v.min()
+    dw = max(w.max()-w.min(), 0.005)
+
+    mesh = o3d.geometry.TriangleMesh.create_box(width=du, height=dv, depth=dw)
+    mesh.translate([-du/2, -dv/2, -dw/2])
+    R = np.column_stack([t1, t2, n])
+    if np.linalg.det(R) < 0: R[:,2] *= -1
+    mesh.rotate(R, center=np.zeros(3))
+    ctr = ((u.max()+u.min())/2 * t1
+         + (v.max()+v.min())/2 * t2
+         + (w.max()+w.min())/2 * n)
     mesh.translate(ctr)
     ls = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
     ls.paint_uniform_color(_COLOR["cuboid"])
@@ -540,19 +502,22 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: _ShapeTracker):
 
     if shape == "cuboid" or raw_axis is None:
         tracker.reset()
-        return "cuboid", _build_cuboid(pts)
+        return "cuboid", _build_cuboid(pts, table_normal)
 
-    # ② Confirm orientation
+    # ② Axis is always the chessboard table normal — vertical to the platform.
+    # Orientation detection is skipped; the axis is never derived from curvature
+    # or aspect ratio so convergence cannot tilt it.
     if table_normal is not None:
-        orient, axis = _confirm_orientation(pts, raw_axis, table_normal)
+        axis = table_normal.copy()
     else:
-        orient, axis = "unknown", raw_axis
+        axis = raw_axis     # fallback: no table plane detected yet
+    orient = "vertical"
 
     # ③ Best fit
     axis_pt, r, err = _best_fit_cylinder(pts, normals, axis)
     if axis_pt is None:
         tracker.reset()
-        return "cuboid", _build_cuboid(pts)
+        return "cuboid", _build_cuboid(pts, table_normal)
 
     r = float(np.clip(r, _R_MIN, _R_MAX))
 

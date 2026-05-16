@@ -108,8 +108,15 @@ _SNAP_THRESH_DEG   = 45.0   # curvature-angle fallback threshold
 _EDGE_KNN              = 12    # kNN for normal-coherence edge scoring
 _EDGE_COHERENCE_THRESH = 0.60  # normal coherence below this → edge/corner point
 _EDGE_FRAC_CUBOID      = 0.06  # > 6 % edge points → strong cuboid signal
-_CORNER_ANGLE_MAX      = 105.0 # convex-hull vertex interior angle ≤ this → rigid corner
-_MIN_CORNERS_CUBOID    = 2     # need ≥ this many detected corners to trust vertex method
+_CORNER_ANGLE_MAX      = 120.0 # convex-hull vertex interior angle ≤ this → rigid corner
+_MIN_CORNERS_CUBOID    = 1     # even a single detected corner is strong cuboid evidence
+
+# ── Normal-distribution classifier ────────────────────────────────────────────
+# A cylinder's lateral normals fan out uniformly in all azimuths around the axis
+# (entropy ≈ max).  A cuboid's lateral normals collapse into 2–4 tight clusters
+# (one per visible flat face), leaving large empty sectors and low entropy.
+_NORMAL_HIST_BINS      = 36    # 10 ° per bin
+_NORMAL_CLUSTER_THRESH = 0.35  # normalised entropy below this → clustered → cuboid
 
 # ── Tracker ────────────────────────────────────────────────────────────────────
 _ALPHA     = 0.20           # EMA base learning rate
@@ -360,44 +367,107 @@ def _complete_rectangle_2d(corners: np.ndarray,
     return _ccw(box)
 
 
+def _normal_cluster_score(normals: np.ndarray, axis: np.ndarray) -> float:
+    """
+    Measure how clustered the lateral surface normals are around the axis.
+
+    Returns a normalised-entropy score in [0, 1]:
+      · ≈ 1.0  uniform / smoothly varying  →  cylinder
+      · ≈ 0.0  collapsed into discrete bins →  cuboid
+
+    Algorithm
+    ---------
+    1. Discard cap normals (those nearly parallel to the axis) so only
+       side-wall normals contribute.
+    2. Project each remaining normal onto the plane ⊥ axis and normalise.
+    3. Compute the azimuth angle of each projected normal.
+    4. Build a histogram over [−π, π) with _NORMAL_HIST_BINS bins.
+    5. Return the normalised Shannon entropy of that histogram.
+
+    For a cylinder the azimuths are spread evenly → entropy ≈ log(N_bins)
+    → normalised score ≈ 1.0.
+    For a cuboid with two visible faces the azimuths cluster at the two
+    face-normal directions → entropy ≪ log(N_bins) → score ≈ 0.0–0.3.
+    """
+    # Keep only lateral normals (cap normals are nearly parallel to axis)
+    axial    = np.abs(normals @ axis)
+    lat_mask = axial < 0.70
+    if lat_mask.sum() < 10:
+        return 1.0   # too few lateral normals → inconclusive → assume cylinder
+
+    lat_n = normals[lat_mask]
+
+    # Project onto horizontal plane
+    horiz  = lat_n - np.outer(lat_n @ axis, axis)
+    norms  = np.linalg.norm(horiz, axis=1)
+    good   = norms > 0.30
+    if good.sum() < 10:
+        return 1.0
+
+    horiz_n = horiz[good] / norms[good, None]
+
+    # Azimuth angles in the horizontal plane
+    ref = np.array([1., 0., 0.]) if abs(axis[0]) < 0.9 else np.array([0., 1., 0.])
+    e1  = np.cross(axis, ref);  e1 /= np.linalg.norm(e1)
+    e2  = np.cross(axis, e1)
+    angles = np.arctan2(horiz_n @ e2, horiz_n @ e1)   # (M,) in [−π, π)
+
+    hist, _ = np.histogram(angles, bins=_NORMAL_HIST_BINS, range=(-np.pi, np.pi))
+    p       = hist.astype(float) / (hist.sum() + 1e-8)
+    entropy = -float(np.sum(p * np.log(p + 1e-10)))
+    return entropy / np.log(_NORMAL_HIST_BINS)         # normalise to [0, 1]
+
+
 def _classify(k1: float, k2: float,
               pts: np.ndarray, normals: np.ndarray,
               axis: np.ndarray) -> str:
     """
     Classify the isolated object as 'cylinder' or 'cuboid'.
 
-    Primary signal   : curvature anisotropy.
-                       Flat κ₂ → planar surface → cuboid-like.
-    Secondary signal : rigid-angle vertex and edge detection.
-                       A cylinder has a smoothly curved surface — no sharp
-                       corners and no high-coherence-drop edge bands.
-                       A cuboid always has both.
+    Three independent signals are computed; the decision is conservative —
+    "cylinder" requires ALL signals to agree, so a cube is hard to miss.
+
+    Signals
+    -------
+    1. Normal-distribution entropy  (primary, most robust)
+         Cylinder: lateral normals fan out uniformly in azimuth → high entropy
+         Cuboid  : lateral normals cluster at 2–4 face directions → low entropy
+         Threshold: _NORMAL_CLUSTER_THRESH  (below = clustered = cuboid)
+
+    2. 2-D rigid-corner detection   (geometric, axis-projected)
+         Cuboid hull vertices have interior angles ≈ 90°.
+         Cylinder hull vertices are all near 180°.
+
+    3. Curvature anisotropy         (fallback, noisy for edge-heavy regions)
+         κ₂ flat → planar surfaces → cuboid-like.
 
     Decision
     --------
-    → "cylinder"  if κ₂ signals a curved surface   AND  no rigid corners found
-                  AND  edge-point fraction is low
-    → "cuboid"    in all other cases
+    → "cylinder"  only when ALL three say "not cuboid":
+                    entropy is high  AND  no rigid corners  AND  κ₂ is curved
+    → "cuboid"    if ANY signal fires: low entropy  OR  corners found  OR  κ₂ flat
     """
-    curv_cylinder = abs(k2) >= _FLAT_THRESH
+    # ── Signal 1: normal-distribution entropy ─────────────────────────────
+    norm_entropy = _normal_cluster_score(normals, axis)
+    is_clustered = norm_entropy < _NORMAL_CLUSTER_THRESH   # low entropy = clustered
 
-    # Project pts onto the plane ⊥ axis for corner detection
+    # ── Signal 2: 2-D rigid corners ───────────────────────────────────────
     ref = np.array([1., 0., 0.]) if abs(axis[0]) < 0.9 else np.array([0., 1., 0.])
     e1  = np.cross(axis, ref);  e1 /= np.linalg.norm(e1)
     e2  = np.cross(axis, e1)
     d   = pts - pts.mean(axis=0)
-    pts_2d = np.column_stack([d @ e1, d @ e2])
-
+    pts_2d     = np.column_stack([d @ e1, d @ e2])
     corners_2d = _detect_2d_corners(pts_2d)
     has_corners = len(corners_2d) >= _MIN_CORNERS_CUBOID
 
-    edge_flags = _edge_mask(pts, normals)
-    edge_frac  = float(edge_flags.mean())
+    # ── Signal 3: curvature ────────────────────────────────────────────────
+    curv_cylinder = abs(k2) >= _FLAT_THRESH
 
-    print(f"[shape_fit]  edge_frac={edge_frac:.3f}  "
-          f"corners={len(corners_2d)}  has_corners={has_corners}")
+    print(f"[shape_fit]  norm_entropy={norm_entropy:.3f}  "
+          f"corners={len(corners_2d)}  curv_cyl={curv_cylinder}")
 
-    if curv_cylinder and not has_corners and edge_frac < _EDGE_FRAC_CUBOID:
+    # Cylinder only when every signal consistently says "curved, no flat faces"
+    if curv_cylinder and not is_clustered and not has_corners:
         return "cylinder"
     return "cuboid"
 

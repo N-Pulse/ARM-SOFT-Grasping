@@ -19,3 +19,5 @@ RUN pip3 install --ignore-installed \
     torch
 
 WORKDIR /workspace
+
+COPY . /workspace/

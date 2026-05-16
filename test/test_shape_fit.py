@@ -28,12 +28,18 @@ Pipeline
   PER FRAME
     ① Normals + curvature  →  κ₁, κ₂, raw_axis
     ② Classify             →  "cylinder" | "cuboid"
+                              Primary  : κ₂ curvature signal
+                              Secondary: rigid-angle vertex + straight-edge
+                                         detection — cylinders have neither
     ③ Confirm orientation  →  aspect-ratio primary, curvature-angle fallback
     ④ Best fit             →  2D circle in cross-section plane
                               → axis_pt, radius, mean_err
     ⑤ Height               →  percentile extents + end-cap refinement
     ⑥ Tracker.update()     →  EMA blend of all params into running estimate
-    ⑦ Build wireframe      →  from smoothed params (not raw frame params)
+    ⑦ Build wireframe      →  cylinder : from smoothed tracker params
+                              cuboid   : axis (table normal) + visible corners
+                                         detected from PCD → mirror to complete
+                                         the rectangle → 8 vertices
 
 Tracker tuning
 --------------
@@ -97,6 +103,13 @@ _MAX_RADIAL_ERR   = 0.020   # m — raw fits with error > this are downweighted
 _ASPECT_VERTICAL   = 1.5    # extent_up / extent_wide > this → vertical
 _ASPECT_HORIZONTAL = 0.85   # extent_up / extent_wide < this → horizontal
 _SNAP_THRESH_DEG   = 45.0   # curvature-angle fallback threshold
+
+# ── Edge / vertex detection ───────────────────────────────────────────────────
+_EDGE_KNN              = 12    # kNN for normal-coherence edge scoring
+_EDGE_COHERENCE_THRESH = 0.60  # normal coherence below this → edge/corner point
+_EDGE_FRAC_CUBOID      = 0.06  # > 6 % edge points → strong cuboid signal
+_CORNER_ANGLE_MAX      = 105.0 # convex-hull vertex interior angle ≤ this → rigid corner
+_MIN_CORNERS_CUBOID    = 2     # need ≥ this many detected corners to trust vertex method
 
 # ── Tracker ────────────────────────────────────────────────────────────────────
 _ALPHA     = 0.20           # EMA base learning rate
@@ -235,8 +248,158 @@ def _aggregate_curvatures(pts, normals):
     return k1, k2, m/nrm if nrm>1e-6 else None
 
 
-def _classify(k1, k2):
-    return "cuboid" if abs(k2) < _FLAT_THRESH else "cylinder"
+def _edge_mask(pts: np.ndarray, normals: np.ndarray,
+               k: int = _EDGE_KNN) -> np.ndarray:
+    """
+    Return bool mask (N,) where True = edge or corner point.
+
+    Normal coherence = |mean of k unit normals|  ∈ [0, 1].
+      · Interior of a flat face   : normals nearly identical  → coherence ≈ 1
+      · Edge between two faces    : normals split two ways    → coherence < 1
+      · Corner (three faces meet) : normals spread three ways → coherence ≪ 1
+
+    Points whose coherence < _EDGE_COHERENCE_THRESH are flagged as edges.
+    """
+    tree  = cKDTree(pts)
+    score = np.zeros(len(pts))
+    for i in range(len(pts)):
+        _, idx  = tree.query(pts[i], k=k + 1)
+        mean_n  = normals[idx[1:]].mean(axis=0)
+        score[i] = 1.0 - np.linalg.norm(mean_n)   # 0 = flat-face, 1 = random
+    return score > (1.0 - _EDGE_COHERENCE_THRESH)
+
+
+def _detect_2d_corners(pts_2d: np.ndarray,
+                       angle_max: float = _CORNER_ANGLE_MAX) -> np.ndarray:
+    """
+    Find rigid-corner vertices on the convex hull of a 2-D point set.
+
+    A vertex is a rigid corner if its interior angle ≤ angle_max degrees.
+    For a perfect rectangle every hull corner is ≈ 90°; noise may push it to
+    ~100°.  A cylinder's convex hull has no such sharp interior angles.
+
+    Parameters
+    ----------
+    pts_2d  : (N, 2) projected points — any centring / scale
+    angle_max : threshold in degrees
+
+    Returns
+    -------
+    (M, 2) array of detected corner positions, or empty array if none found.
+    """
+    if len(pts_2d) < 4:
+        return np.empty((0, 2))
+    pts_f = pts_2d.astype(np.float32).reshape(-1, 1, 2)
+    hull  = cv2.convexHull(pts_f, returnPoints=True).reshape(-1, 2).astype(float)
+    n     = len(hull)
+    if n < 3:
+        return np.empty((0, 2))
+
+    corners = []
+    for i in range(n):
+        prev_ = hull[(i - 1) % n]
+        curr  = hull[i]
+        next_ = hull[(i + 1) % n]
+        v1 = prev_ - curr;  n1 = np.linalg.norm(v1)
+        v2 = next_ - curr;  n2 = np.linalg.norm(v2)
+        if n1 < 1e-9 or n2 < 1e-9:
+            continue
+        angle = np.degrees(np.arccos(np.clip((v1 / n1) @ (v2 / n2), -1.0, 1.0)))
+        if angle <= angle_max:
+            corners.append(curr)
+    return np.array(corners) if corners else np.empty((0, 2))
+
+
+def _complete_rectangle_2d(corners: np.ndarray,
+                            pts_2d: np.ndarray) -> np.ndarray:
+    """
+    Given M detected corners, complete a rectangle by mirroring and return
+    exactly 4 corners in CCW angular order.
+
+    M == 4  → order and return as-is
+    M == 3  → 4th corner = P0 + P2 − P1  (parallelogram / mirror rule)
+    M == 2  → the pair defines one edge; extend perpendicularly by the cloud
+              width in that direction (signed toward the cloud centroid)
+    M other → fall back to cv2.minAreaRect of pts_2d
+    """
+    def _ccw(c: np.ndarray) -> np.ndarray:
+        ctr    = c.mean(axis=0)
+        angles = np.arctan2(c[:, 1] - ctr[1], c[:, 0] - ctr[0])
+        return c[np.argsort(angles)]
+
+    m = len(corners)
+
+    if m == 4:
+        return _ccw(corners)
+
+    if m == 3:
+        c  = _ccw(corners)
+        p3 = c[0] + c[2] - c[1]          # mirror: complete the parallelogram
+        return _ccw(np.vstack([c, p3]))
+
+    if m == 2:
+        p0, p1   = corners[0], corners[1]
+        edge_v   = p1 - p0
+        edge_len = np.linalg.norm(edge_v)
+        if edge_len > 1e-9:
+            eu   = edge_v / edge_len
+            perp = np.array([-eu[1], eu[0]])
+            mid  = (p0 + p1) / 2.0
+            # Width = PCD extent perpendicular to the known edge
+            proj  = (pts_2d - mid) @ perp
+            width = float(proj.max() - proj.min())
+            # Shift toward the cloud centroid side
+            direction = np.sign((pts_2d.mean(axis=0) - mid) @ perp) or 1.0
+            p2 = p1 + direction * width * perp
+            p3 = p0 + direction * width * perp
+            return _ccw(np.array([p0, p1, p2, p3]))
+
+    # Fallback: minimum-area bounding rectangle
+    pts_f = pts_2d.astype(np.float32).reshape(-1, 1, 2)
+    box   = cv2.boxPoints(cv2.minAreaRect(pts_f)).astype(float)
+    return _ccw(box)
+
+
+def _classify(k1: float, k2: float,
+              pts: np.ndarray, normals: np.ndarray,
+              axis: np.ndarray) -> str:
+    """
+    Classify the isolated object as 'cylinder' or 'cuboid'.
+
+    Primary signal   : curvature anisotropy.
+                       Flat κ₂ → planar surface → cuboid-like.
+    Secondary signal : rigid-angle vertex and edge detection.
+                       A cylinder has a smoothly curved surface — no sharp
+                       corners and no high-coherence-drop edge bands.
+                       A cuboid always has both.
+
+    Decision
+    --------
+    → "cylinder"  if κ₂ signals a curved surface   AND  no rigid corners found
+                  AND  edge-point fraction is low
+    → "cuboid"    in all other cases
+    """
+    curv_cylinder = abs(k2) >= _FLAT_THRESH
+
+    # Project pts onto the plane ⊥ axis for corner detection
+    ref = np.array([1., 0., 0.]) if abs(axis[0]) < 0.9 else np.array([0., 1., 0.])
+    e1  = np.cross(axis, ref);  e1 /= np.linalg.norm(e1)
+    e2  = np.cross(axis, e1)
+    d   = pts - pts.mean(axis=0)
+    pts_2d = np.column_stack([d @ e1, d @ e2])
+
+    corners_2d = _detect_2d_corners(pts_2d)
+    has_corners = len(corners_2d) >= _MIN_CORNERS_CUBOID
+
+    edge_flags = _edge_mask(pts, normals)
+    edge_frac  = float(edge_flags.mean())
+
+    print(f"[shape_fit]  edge_frac={edge_frac:.3f}  "
+          f"corners={len(corners_2d)}  has_corners={has_corners}")
+
+    if curv_cylinder and not has_corners and edge_frac < _EDGE_FRAC_CUBOID:
+        return "cylinder"
+    return "cuboid"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -438,54 +601,75 @@ def _build_cylinder(axis, axis_pt, r, h_min, h_max):
     return ls
 
 
-def _build_cuboid(pts, table_normal):
+def _build_cuboid(pts: np.ndarray, axis: np.ndarray) -> o3d.geometry.LineSet:
     """
-    Build a tight cuboid wireframe whose height axis is always table_normal.
+    Build a tight cuboid wireframe using the known axis and visible vertices
+    detected from the point cloud, then mirror to complete the rectangle.
 
-    In the horizontal plane (perpendicular to table_normal) the minimum-area
-    bounding rectangle of the projected point cloud is used, so the box fits
-    tightly regardless of how the object is rotated on the table.
+    Algorithm
+    ---------
+    1. Project pts onto the plane ⊥ axis (the horizontal footprint).
+    2. Find the convex-hull vertices whose interior angle ≤ _CORNER_ANGLE_MAX —
+       these are the actual cuboid corners visible to the camera.
+    3. Complete the rectangle by mirroring any missing corners:
+         · 4 found → use directly
+         · 3 found → 4th = P0 + P2 − P1  (parallelogram rule)
+         · 2 found → extend perpendicularly by the cloud width
+         · 0–1     → fall back to cv2.minAreaRect
+    4. Reconstruct 8 three-dimensional vertices (4 bottom + 4 top) and build
+       the 12-edge line set directly — no intermediate TriangleMesh.
     """
-    n   = table_normal.copy()
-    ref = np.array([1.,0.,0.]) if abs(n[0])<0.9 else np.array([0.,1.,0.])
-    e1  = np.cross(n, ref); e1 /= np.linalg.norm(e1)
-    e2  = np.cross(n, e1);  e2 /= np.linalg.norm(e2)
+    n   = axis.copy()
+    ref = np.array([1., 0., 0.]) if abs(n[0]) < 0.9 else np.array([0., 1., 0.])
+    e1  = np.cross(n, ref);  e1 /= np.linalg.norm(e1)
+    e2  = np.cross(n, e1)
 
-    # Project onto horizontal plane and vertical axis
-    u = (pts @ e1).astype(np.float32)
-    v = (pts @ e2).astype(np.float32)
-    w = pts @ n
+    # ── Project onto horizontal plane (centred on cloud mean) ─────────────
+    mean_pt = pts.mean(axis=0)
+    d       = pts - mean_pt
+    u       = (d @ e1).astype(np.float32)
+    v       = (d @ e2).astype(np.float32)
+    w       = pts @ n                          # absolute height along axis
+    pts_2d  = np.column_stack([u, v])          # (N, 2), centred
 
-    # Minimum-area bounding rectangle in the horizontal plane.
-    # Use the convex hull first for robustness and speed.
-    pts_2d = np.column_stack([u, v]).reshape(-1, 1, 2)
-    hull   = cv2.convexHull(pts_2d)
-    rect   = cv2.minAreaRect(hull)   # ((cx,cy), (rw,rh), angle_deg)
+    h_min = float(np.percentile(w, 1))
+    h_max = float(np.percentile(w, 99))
+    h_min = h_min if h_max - h_min > 0.005 else h_min - 0.0025
 
-    (cx, cy), (rw, rh), angle_deg = rect
-    angle_rad = np.radians(angle_deg)
-    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+    # ── Detect visible corners, then mirror to complete rectangle ──────────
+    # Subsample to ≤ 500 pts for corner detection; hull angle test is O(hull).
+    if len(pts) > 500:
+        idx    = np.random.choice(len(pts), 500, replace=False)
+        sub_2d = pts_2d[idx]
+    else:
+        sub_2d = pts_2d
 
-    # Box axes in 3D — rotated within the table plane
-    t1 =  cos_a * e1 + sin_a * e2
-    t2 = -sin_a * e1 + cos_a * e2
+    corners_2d   = _detect_2d_corners(sub_2d)
+    rect_corners = _complete_rectangle_2d(corners_2d, pts_2d)  # (4, 2) CCW
 
-    du = float(max(rw, 0.005))
-    dv = float(max(rh, 0.005))
-    dw = float(max(np.percentile(w, 99) - np.percentile(w, 1), 0.005))
+    # ── Reconstruct 3D vertices ────────────────────────────────────────────
+    # The horizontal base position of the mean point (strips the n-component).
+    mean_horiz = mean_pt - (mean_pt @ n) * n
 
-    # Box centre in 3D
-    w_ctr  = (np.percentile(w, 99) + np.percentile(w, 1)) / 2.0
-    ctr_3d = cx * e1 + cy * e2 + w_ctr * n
+    verts = []
+    for (cu, cv) in rect_corners:
+        horiz = mean_horiz + cu * e1 + cv * e2
+        verts.append(horiz + h_min * n)   # bottom corner
+        verts.append(horiz + h_max * n)   # top corner
+    # Layout: [bot_0, top_0, bot_1, top_1, bot_2, top_2, bot_3, top_3]
+    verts = np.array(verts)               # (8, 3)
 
-    mesh = o3d.geometry.TriangleMesh.create_box(width=du, height=dv, depth=dw)
-    mesh.translate([-du/2, -dv/2, -dw/2])
-    R = np.column_stack([t1, t2, n])
-    if np.linalg.det(R) < 0:
-        R[:, 2] *= -1
-    mesh.rotate(R, center=np.zeros(3))
-    mesh.translate(ctr_3d)
-    ls = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
+    # ── Build 12 edges (4 bottom + 4 top + 4 vertical) ────────────────────
+    lines = []
+    for i in range(4):
+        j = (i + 1) % 4
+        lines.append([2 * i,     2 * j    ])   # bottom ring edge i → j
+        lines.append([2 * i + 1, 2 * j + 1])   # top    ring edge i → j
+        lines.append([2 * i,     2 * i + 1])   # vertical pillar at corner i
+
+    ls = o3d.geometry.LineSet()
+    ls.points = o3d.utility.Vector3dVector(verts)
+    ls.lines  = o3d.utility.Vector2iVector(lines)
     ls.paint_uniform_color(_COLOR["cuboid"])
     return ls
 
@@ -518,13 +702,19 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: _ShapeTracker):
         sp,sn  = pts, normals
 
     # ① Curvature + classify
-    k1,k2,raw_axis = _aggregate_curvatures(sp, sn)
-    shape          = _classify(k1, k2)
+    # For classification we need the projection axis; use table_normal when
+    # available (it's always our vertical), fall back to raw curvature axis.
+    k1, k2, raw_axis = _aggregate_curvatures(sp, sn)
+    _cls_axis = (table_normal.copy() if table_normal is not None
+                 else (raw_axis if raw_axis is not None
+                       else np.array([0., 0., 1.])))
+    shape = _classify(k1, k2, sp, sn, _cls_axis)
     print(f"[shape_fit]  κ₁={k1:+.2f}  κ₂={k2:+.2f}  → {shape}")
 
     if shape == "cuboid" or raw_axis is None:
         tracker.reset()
-        return "cuboid", _build_cuboid(pts, table_normal)
+        _cub_axis = table_normal if table_normal is not None else _cls_axis
+        return "cuboid", _build_cuboid(pts, _cub_axis)
 
     # ② Axis is always the chessboard table normal — vertical to the platform.
     # Orientation detection is skipped; the axis is never derived from curvature
@@ -539,7 +729,7 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: _ShapeTracker):
     axis_pt, r, err = _best_fit_cylinder(pts, normals, axis)
     if axis_pt is None:
         tracker.reset()
-        return "cuboid", _build_cuboid(pts, table_normal)
+        return "cuboid", _build_cuboid(pts, axis)
 
     r = float(np.clip(r, _R_MIN, _R_MAX))
 

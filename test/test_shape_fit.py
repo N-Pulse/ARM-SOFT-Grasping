@@ -432,6 +432,20 @@ class _ShapeTracker:
             self.h_ctr   = (1-alpha)*self.h_ctr   + alpha*raw_h_ctr
             self.height  = (1-alpha)*self.height  + alpha*raw_h
 
+            # ── Constrain axis: must be vertical OR parallel to the table ──────
+            # Regardless of whether orientation is locked yet, we always snap
+            # the smoothed axis so it never drifts to an intermediate angle.
+            if self.orient == "vertical":
+                self.axis = table_normal.copy()
+            elif self.orient == "horizontal":
+                proj = self.axis - (self.axis @ table_normal) * table_normal
+                nrm  = np.linalg.norm(proj)
+                if nrm > 1e-6:
+                    self.axis = proj / nrm
+                # else: axis is (pathologically) nearly collinear with
+                # table_normal — leave it alone; _confirm_orientation will
+                # correct it next frame
+
         h_min = self.h_ctr - self.height / 2.0
         h_max = self.h_ctr + self.height / 2.0
         return self.axis, self.axis_pt, self.radius, h_min, h_max
@@ -577,6 +591,9 @@ def _make_overlay_callback(table_normal):
 
         if shape != state["label"]:
             print(f"[shape_fit]  *** shape → {shape} ***")
+
+        # Re-centre the camera lookat on the object centroid every frame
+        vis.get_view_control().set_lookat(obj_verts.mean(axis=0).tolist())
 
         if state["ls"] is None:
             vis.add_geometry(new_ls)

@@ -2,40 +2,47 @@
 test_shape_fit.py
 =================
 Curvature-based primitive fitting for single-view point clouds.
-Only cylinder and cuboid are fitted (sphere is disabled — see note below).
-
-Design constraints
-------------------
-  · The camera captures only one face of the object.
-  · However, the *entire* physical object is within the camera frame,
-    so at least ~30% of the surface is visible.
-  · This guarantees that the curvature signature of the visible patch is
-    representative of the true primitive:
-      - a cylinder exposes enough of its curved face that κ₁ ≈ 0, κ₂ ≠ 0
-        is stable and reliable;
-      - a flat face exposes enough surface that κ₁ ≈ κ₂ ≈ 0 is reliable.
-  · Given this, curvature alone is sufficient for classification.
-    No secondary consistency check is needed.
-
-Why sphere is disabled
-----------------------
-  Sphere (κ₁ ≈ κ₂ ≠ 0) is commented out.  With ≥30% of the object visible,
-  a sphere is distinguishable in principle, but in practice the objects in
-  this pipeline are bottles, cans, and boxes — not spheres.  Re-enable the
-  sphere branch if needed.
+Only cylinder and cuboid are fitted.
 
 Pipeline
 --------
   1. LOCAL   — per-point quadratic patch fit → κ₁ ≤ κ₂, zero-curvature axis
-  2. FEATURE — median κ₁, κ₂ over patch → classify; consensus axis direction
-  3. REBUILD — cylinder: r from curvature, height from point-cloud extent
-                         + end-cap refinement if top/bottom faces are visible
-               cuboid : RANSAC plane + thin box
+  2. FEATURE — median κ₁, κ₂ → classify; consensus axis direction
+  3. ALIGN   — (cylinder only) 2D circle fit in the cross-section plane
+               This is the critical step for surface alignment:
+               · Project all points onto the plane ⊥ to the axis
+               · Fit a circle → gives the true axis position and radius
+               · The cylinder surface now passes through the visible PCD
+               · Curvature gives us the *axis direction*; the circle fit
+                 gives us the *axis position* and *radius* — both are needed
+  4. HEIGHT  — point-cloud extents along the axis + end-cap refinement
+  5. REBUILD — place the Open3D cylinder at the fitted center / axis / radius
+
+Surface alignment guarantee
+----------------------------
+After step 3, every point in the PCD is at distance ≈ r from the axis.
+The generated cylinder wireframe therefore sits flush on the visible surface,
+not floating in front of or behind it.
+
+Axis orientation
+----------------
+After averaging the per-point zero-curvature eigenvectors, there is a ±1
+sign ambiguity in the axis direction.  We resolve it by comparing against
+the world up vector (0, 0, 1 in camera depth frame): if the dot product is
+negative we flip the axis.  This keeps the axis pointing consistently
+"upward" for tall objects like bottles and cans.
+If the axis is nearly horizontal (|axis·up| < 0.2) we fall back to
+orienting toward positive X, which is a reasonable convention for objects
+lying on their side.
 
 Wireframe colours
 -----------------
   cylinder → orange   [1.0, 0.5, 0.0]
   cuboid   → lavender [0.8, 0.6, 1.0]
+
+Disabled
+--------
+  Sphere fitting is commented out.  Re-enable if needed.
 
 Usage
 -----
@@ -64,31 +71,28 @@ _COLOR = {
 
 # ── Tuning ─────────────────────────────────────────────────────────────────────
 _KNN_NORMAL     = 30     # neighbours for normal estimation
-_KNN_CURV       = 25     # neighbours for local quadratic curvature fit
-_SUBSAMPLE      = 600    # max points in the curvature loop (speed)
-_FLAT_THRESH    = 2.0    # |κ| < this (m⁻¹) → treated as zero curvature
+_KNN_CURV       = 25     # neighbours for per-point curvature fit
+_SUBSAMPLE      = 600    # max points in the curvature loop
+_FLAT_THRESH    = 2.0    # |κ| < this (m⁻¹) → zero curvature
 _ANISO_RATIO    = 5.0    # |κ_max / κ_min| > this → cylinder
 _R_MIN          = 0.005  # smallest plausible radius (m)
 _R_MAX          = 2.0    # largest  plausible radius (m)
-_CAP_NORMAL_DOT = 0.7    # |n · axis| > this → point belongs to an end cap
-_CAP_MIN_PTS    = 10     # minimum end-cap points needed to trust cap detection
+_CAP_NORMAL_DOT = 0.7    # |n · axis| > this → end-cap point
+_CAP_MIN_PTS    = 10     # min points to trust end-cap detection
+_WORLD_UP       = np.array([0., 0., 1.])   # camera depth frame: Z points forward,
+                                            # adjust to (0,1,0) if Y is up in your rig
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 1 — Local principal curvatures at a single point
+# STEP 1 — Local principal curvatures
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _fit_local_curvature(p, n, neighbours):
     """
-    Fit  h = a·u² + b·u·v + c·v²  in the tangent frame of (p, n).
-
-    The second fundamental form  [[2a, b], [b, 2c]]  yields eigenvalues κ₁ ≤ κ₂
-    (principal curvatures) and eigenvectors (principal directions).
-
-    The eigenvector of κ₁ (the *smaller* curvature) is the zero-curvature
-    direction — this becomes the cylinder axis candidate.
-
-    Returns (κ₁, κ₂, zero_axis_3d) or None on degenerate input.
+    Fit h = a·u² + b·u·v + c·v² in the tangent frame of (p, n).
+    Returns (κ₁, κ₂, zero_axis_3d) — κ₁ ≤ κ₂; zero_axis is the direction
+    of minimal curvature (= cylinder axis candidate).
+    Returns None on degenerate input.
     """
     ref = np.array([0., 0., 1.]) if abs(n[2]) < 0.9 else np.array([1., 0., 0.])
     t1  = np.cross(n, ref);  t1 /= np.linalg.norm(t1)
@@ -107,22 +111,25 @@ def _fit_local_curvature(p, n, neighbours):
 
     II           = np.array([[2 * a, b],
                               [b,    2 * c]])
-    evals, evecs = np.linalg.eigh(II)      # ascending: κ₁ ≤ κ₂
-
-    zero_axis = evecs[0, 0] * t1 + evecs[1, 0] * t2   # κ₁ eigenvector in 3D
+    evals, evecs = np.linalg.eigh(II)          # ascending: κ₁ ≤ κ₂
+    ev_min       = evecs[:, 0]                  # eigenvector for κ₁
+    zero_axis    = ev_min[0] * t1 + ev_min[1] * t2
 
     return float(evals[0]), float(evals[1]), zero_axis
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 2 — Aggregate and classify
+# STEP 2 — Aggregate curvatures and extract axis direction
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _aggregate_curvatures(pts, normals):
     """
-    Run _fit_local_curvature on every point; return:
-      kappa1, kappa2 — median principal curvatures over the patch
-      axis           — consensus zero-curvature direction (cylinder axis)
+    Run _fit_local_curvature on every point.
+
+    Returns
+    -------
+    kappa1, kappa2 : float    median principal curvatures
+    axis           : (3,) ndarray or None   consensus zero-curvature direction
     """
     tree = cKDTree(pts)
     k1_list, k2_list, axis_list = [], [], []
@@ -143,7 +150,7 @@ def _aggregate_curvatures(pts, normals):
     kappa1 = float(np.median(k1_list))
     kappa2 = float(np.median(k2_list))
 
-    # Robust mean of unit axes — resolve ± sign ambiguity before averaging
+    # Resolve ± sign ambiguity before averaging
     axes  = np.array(axis_list)
     signs = np.sign(axes @ axes[0])
     signs[signs == 0] = 1
@@ -155,113 +162,181 @@ def _aggregate_curvatures(pts, normals):
     return kappa1, kappa2, axis
 
 
+def _orient_axis(axis):
+    """
+    Resolve the remaining ±1 global sign ambiguity in the cylinder axis.
+
+    Strategy
+    --------
+    Prefer the axis direction that has a positive component along the world
+    up vector.  This keeps "vertical" cylinders (bottles, cans) pointing
+    consistently upward across frames, preventing sudden 180° flips.
+
+    If the axis is nearly horizontal (|axis · up| < 0.2), orient toward
+    positive X instead — a reasonable fallback for objects lying on their side.
+    """
+    up_dot = float(axis @ _WORLD_UP)
+
+    if abs(up_dot) >= 0.2:
+        # Axis has a meaningful vertical component — orient it upward
+        if up_dot < 0:
+            axis = -axis
+    else:
+        # Nearly horizontal — orient toward positive X
+        if axis[0] < 0:
+            axis = -axis
+
+    return axis
+
+
 def _classify(k1, k2):
     """
-    Classify into "cylinder" or "cuboid" from principal curvatures.
-
-    With ≥30% of the object visible, the curvature signature is stable:
-      · κ₂ negligible              → flat surface → cuboid
-      · κ₁ ≈ 0 but κ₂ significant → one curved direction → cylinder
-      · both significant (isotropic) → would be sphere, but sphere is
-        disabled; treated as cylinder (falls back to cuboid if axis fails)
+    "cylinder" or "cuboid" from principal curvatures.
 
     Disabled:
     # if a1 > _FLAT_THRESH and (a2 / (a1 + 1e-9)) < _ANISO_RATIO:
     #     return "sphere"
     """
     a1, a2 = abs(k1), abs(k2)
-
     if a2 < _FLAT_THRESH:
         return "cuboid"
-
-    # One or both curvatures are significant → attempt cylinder.
-    # With ≥30% surface visible, a genuine cylinder will have a clear axis;
-    # if axis extraction fails the pipeline falls back to cuboid automatically.
     return "cylinder"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 3 — Cylinder height from point-cloud extents + end-cap detection
+# STEP 3 — 2D circle fit in the cross-section plane (surface alignment)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fit_cross_section(pts, axis):
+    """
+    Project all points onto the plane perpendicular to *axis* and fit a 2D
+    circle.  This gives the true axis position (center of the cylinder) and
+    the true radius such that the cylinder surface aligns with the PCD.
+
+    Why this is necessary
+    ---------------------
+    The curvature step gives us the *direction* of the axis (from the
+    zero-curvature eigenvector) but NOT its position or exact radius.
+    Estimating the center by pushing the centroid inward by r = 1/|κ| along
+    the mean normal is an approximation that accumulates error whenever the
+    visible patch is not centred on the cylinder's curved face.
+
+    The 2D circle fit is exact: it finds (cx, cy) in the cross-section plane
+    such that every projected point is at distance r from (cx, cy).  The 3D
+    axis then passes through (cx, cy) in that plane.
+
+    Returns
+    -------
+    axis_pt : (3,) — a point on the cylinder axis at the centroid's axial depth
+    radius  : float
+    or (None, None) on failure.
+    """
+    centroid = pts.mean(axis=0)
+
+    # Build an orthonormal 2D frame in the cross-section plane
+    ref = np.array([0., 0., 1.]) if abs(axis[2]) < 0.9 else np.array([1., 0., 0.])
+    e1  = np.cross(axis, ref);  e1 /= np.linalg.norm(e1)
+    e2  = np.cross(axis, e1);   e2 /= np.linalg.norm(e2)
+
+    # Collapse all points onto the cross-section plane by dropping the axial
+    # component — for a cylinder every cross-section is the same circle
+    d = pts - centroid
+    u = d @ e1          # 2D coordinate 1
+    v = d @ e2          # 2D coordinate 2
+
+    # Linearised circle fit:  (u - cu)² + (v - cv)² = r²
+    #   →  -2cu·u  -2cv·v  + (cu² + cv² - r²)  =  -(u² + v²)
+    A  = np.column_stack([-2 * u, -2 * v, np.ones(len(u))])
+    b  = -(u ** 2 + v ** 2)
+    x, *_ = np.linalg.lstsq(A, b, rcond=None)
+    cu, cv, d_val = x
+
+    r_sq = cu ** 2 + cv ** 2 - d_val
+    if r_sq <= 0:
+        return None, None
+
+    radius  = float(np.sqrt(r_sq))
+    axis_pt = centroid + cu * e1 + cv * e2   # 3D point on the axis
+
+    return axis_pt, radius
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 4 — Cylinder height: point extents + end-cap refinement
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _estimate_cylinder_bounds(pts, normals, axis, centroid):
     """
-    Find the axial extent (h_min, h_max) of the visible cylinder segment.
+    Axial extent (h_min, h_max) of the visible cylinder segment.
 
-    Two evidence sources:
-
-    1. Point extents (primary)
-       Project every point onto the axis; take 1st/99th percentile to trim
-       depth-camera fringe noise at object boundaries.
-
-    2. End-cap points (refinement)
-       Points whose normals are nearly parallel to the axis come from the
-       flat top or bottom face of the cylinder (when those faces are visible).
-       These give sharper bounds than the raw point spread because they sit
-       exactly on the rim of the cylinder.
-
-       Guard: end-cap bounds are only accepted if the detected cap lies within
-       the outer 30% of the raw extent — this prevents mid-surface noisy
-       normals from being mistaken for caps.
+    Primary  : 1st / 99th percentile of point projections along the axis.
+    Refinement: points with normals nearly parallel to the axis come from the
+               flat end caps (top/bottom face).  When enough exist and are
+               near the extremes of the point spread, they pin the true edge.
     """
     proj  = (pts - centroid) @ axis
     h_min = float(np.percentile(proj, 1))
     h_max = float(np.percentile(proj, 99))
 
-    # End-cap detection: normals roughly parallel to axis
     cap_mask = np.abs(normals @ axis) > _CAP_NORMAL_DOT
-
     if cap_mask.sum() >= _CAP_MIN_PTS:
         cap_proj = proj[cap_mask]
         extent   = h_max - h_min
 
-        candidate_min = float(cap_proj.min())
-        candidate_max = float(cap_proj.max())
+        c_min = float(cap_proj.min())
+        c_max = float(cap_proj.max())
 
-        if candidate_min < h_min + 0.3 * extent:
-            h_min = candidate_min
-            print(f"[shape_fit]  bottom cap detected  h_min = {h_min:.3f} m")
-
-        if candidate_max > h_max - 0.3 * extent:
-            h_max = candidate_max
-            print(f"[shape_fit]  top cap detected     h_max = {h_max:.3f} m")
+        if c_min < h_min + 0.3 * extent:
+            h_min = c_min
+            print(f"[shape_fit]  bottom cap → h_min = {h_min:.3f} m")
+        if c_max > h_max - 0.3 * extent:
+            h_max = c_max
+            print(f"[shape_fit]  top cap    → h_max = {h_max:.3f} m")
 
     return h_min, h_max
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 4 — Build wireframes
+# STEP 5 — Build wireframes
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _rebuild_cylinder(pts, normals, k1, k2, axis):
     """
-    Build a cylinder wireframe.
+    Build a cylinder wireframe that is flush with the visible PCD surface.
 
-    Radius  r = 1 / |κ_max|         (from curvature — no bounding-box guessing)
-    Height  from _estimate_cylinder_bounds (point extent + end-cap refinement)
-    Centre  centroid pushed inward along the mean radial normal by r,
-            then shifted to the axial midpoint.
+    Parameters come from two sources:
+      axis direction  ← curvature eigenvector (step 2) + orientation fix
+      axis position,  ← 2D cross-section circle fit (step 3)
+      radius
+      height          ← point-cloud extents + end-cap refinement (step 4)
     """
-    a1, a2  = abs(k1), abs(k2)
-    k_curve = k2 if a2 >= a1 else k1
-    r       = float(np.clip(1.0 / (abs(k_curve) + 1e-9), _R_MIN, _R_MAX))
+    # ── Step 3: 2D circle fit for surface alignment ──────────────────────────
+    axis_pt, r = _fit_cross_section(pts, axis)
 
-    centroid            = pts.mean(axis=0)
-    h_min, h_max        = _estimate_cylinder_bounds(pts, normals, axis, centroid)
-    height              = float(np.clip(h_max - h_min, 0.005, 5.0))
-    mid                 = (h_min + h_max) / 2.0
+    if axis_pt is None:
+        # Circle fit failed — fall back to curvature-derived radius
+        print("[shape_fit]  circle fit failed, using curvature radius")
+        a1, a2  = abs(k1), abs(k2)
+        k_curve = k2 if a2 >= a1 else k1
+        r       = 1.0 / (abs(k_curve) + 1e-9)
+        axis_pt = pts.mean(axis=0)
 
-    # Inward radial direction: mean normal minus its axial component
-    mean_n  = normals.mean(axis=0)
-    mean_n -= (mean_n @ axis) * axis
-    nrm     = np.linalg.norm(mean_n)
-    if nrm > 1e-6:
-        mean_n /= nrm
-        center = centroid - mean_n * r + axis * mid
-    else:
-        center = centroid + axis * mid
+    r = float(np.clip(r, _R_MIN, _R_MAX))
 
-    # Rotate Open3D's default Z-axis cylinder to match the fitted axis
+    # ── Step 4: height from point extents + end-cap ──────────────────────────
+    centroid       = pts.mean(axis=0)
+    h_min, h_max   = _estimate_cylinder_bounds(pts, normals, axis, centroid)
+    height         = float(np.clip(h_max - h_min, 0.005, 5.0))
+    mid            = (h_min + h_max) / 2.0
+
+    # axis_pt is the axis position at the centroid's axial depth (h=0).
+    # The 3D centre of the visible cylinder segment is:
+    center = axis_pt + axis * mid
+
+    print(f"[shape_fit]  cylinder  r={r:.3f} m  h={height:.3f} m  "
+          f"axis={np.round(axis, 2)}")
+
+    # ── Rotate Open3D Z-axis cylinder to match the fitted axis ───────────────
     z   = np.array([0., 0., 1.])
     v   = np.cross(z, axis)
     s   = np.linalg.norm(v)
@@ -285,9 +360,7 @@ def _rebuild_cylinder(pts, normals, k1, k2, axis):
 
 
 def _rebuild_cuboid(pts):
-    """
-    RANSAC plane fit → thin box extruded from the inlier patch extent.
-    """
+    """RANSAC plane → thin box extruded from the inlier patch extent."""
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     plane, inlier_idx = pcd.segment_plane(
@@ -324,17 +397,15 @@ def _rebuild_cuboid(pts):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Full pipeline dispatcher
+# Full pipeline
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fit_shape(pts: np.ndarray):
-    """
-    Full pipeline for one frame.  Returns (shape_name, LineSet) or (None, None).
-    """
+    """Returns (shape_name, LineSet) or (None, None)."""
     if len(pts) < 50:
         return None, None
 
-    # Normal estimation — orient away from camera (at origin in depth frame)
+    # Normal estimation — orient away from camera at origin
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     pcd.estimate_normals(
@@ -354,16 +425,19 @@ def fit_shape(pts: np.ndarray):
     else:
         s_pts, s_norms = pts, normals
 
-    # Steps 1 & 2: local fits → aggregate → classify
+    # Steps 1 & 2: local fits → median curvatures → classify + axis
     k1, k2, axis = _aggregate_curvatures(s_pts, s_norms)
     shape        = _classify(k1, k2)
 
     print(f"[shape_fit]  κ₁={k1:+.2f}  κ₂={k2:+.2f}  → {shape}")
 
-    # Cylinder requires a valid axis; fall back to cuboid if extraction failed
-    if shape == "cylinder" and axis is None:
-        print("[shape_fit]  axis extraction failed → cuboid")
-        shape = "cuboid"
+    if shape == "cylinder":
+        if axis is None:
+            print("[shape_fit]  axis extraction failed → cuboid")
+            shape = "cuboid"
+        else:
+            # Resolve axis orientation ambiguity before reconstruction
+            axis = _orient_axis(axis)
 
     if shape == "cylinder":
         ls = _rebuild_cylinder(pts, normals, k1, k2, axis)

@@ -578,6 +578,9 @@ def _make_overlay_callback(table_normal):
         if shape != state["label"]:
             print(f"[shape_fit]  *** shape → {shape} ***")
 
+        # Re-centre the camera lookat on the object centroid every frame
+        vis.get_view_control().set_lookat(obj_verts.mean(axis=0).tolist())
+
         if state["ls"] is None:
             vis.add_geometry(new_ls)
             state["ls"] = new_ls

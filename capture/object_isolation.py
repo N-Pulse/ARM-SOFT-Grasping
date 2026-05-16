@@ -154,7 +154,7 @@ def _build_foreground_mask(bgr: np.ndarray, depth_frame,
         cv2.MORPH_RECT, (DEPTH_KERNEL_SIZE, DEPTH_KERNEL_SIZE)
     )
 
-    depth   = np.array(depth_frame.get_data(), dtype=np.uint16)
+    depth   = np.asanyarray(depth_frame.get_data()).astype(np.uint16).copy()
     invalid = depth == 0
 
     depth_max      = cv2.dilate(depth, kernel).astype(np.float32)

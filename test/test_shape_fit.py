@@ -1,66 +1,55 @@
 """
 test_shape_fit.py
 =================
-Curvature-based primitive fitting with table-plane-constrained axis snapping.
+Curvature-based primitive fitting with temporal convergence.
 
-Chessboard specs (from calibration target config)
---------------------------------------------------
-  Board size   : 200 × 150 mm
-  Rows         : 8   →  inner corners = 7
-  Columns      : 11  →  inner corners = 10
-  Square width : 15 mm
-  → board_shape = (10, 7) for cv2.findChessboardCorners
+Key design change vs previous version
+--------------------------------------
+Each frame used to fit independently → parameters jumped every frame.
+
+Now a _ShapeTracker maintains a running smoothed estimate:
+
+  · All parameters (axis, radius, center, height) are updated via EMA
+    (Exponential Moving Average) — each new frame nudges the estimate,
+    rather than replacing it.
+
+  · Orientation (vertical / horizontal) is decided by the PCD aspect ratio
+    (robust to curvature noise), then *locked* after N_LOCK consistent frames.
+    Once locked, it takes N_UNLOCK consecutive opposing frames to flip —
+    preventing noise-driven oscillation.
+
+  · The confidence of each frame's fit (mean radial error) scales the EMA
+    learning rate: a high-error frame contributes less than a clean one.
 
 Pipeline
 --------
-  INIT
-    detect_table_plane()
-      · OpenCV finds the 10×7 inner corners in the colour frame
-      · Each corner is back-projected to 3D via depth + RealSense intrinsics
-      · SVD plane fit on the 3D corners → table_normal
-      · Residual check: mean error must be < 5 mm (one third of a square)
+  INIT    detect_table_plane()  →  table_normal
 
-  PER FRAME  — three explicit stages:
+  PER FRAME
+    ① Normals + curvature  →  κ₁, κ₂, raw_axis
+    ② Classify             →  "cylinder" | "cuboid"
+    ③ Confirm orientation  →  aspect-ratio primary, curvature-angle fallback
+    ④ Best fit             →  2D circle in cross-section plane
+                              → axis_pt, radius, mean_err
+    ⑤ Height               →  percentile extents + end-cap refinement
+    ⑥ Tracker.update()     →  EMA blend of all params into running estimate
+    ⑦ Build wireframe      →  from smoothed params (not raw frame params)
 
-    ① CLASSIFY  (curvature)
-       · Per-point quadratic patch fit → κ₁ ≤ κ₂
-       · Median over patch → "cylinder" or "cuboid"
-       · Consensus zero-curvature eigenvector → raw axis direction
+Tracker tuning
+--------------
+  ALPHA      EMA learning rate  (0.2 = 20% toward new frame each step)
+             High-error frames get a lower effective alpha automatically.
+  N_LOCK     Consecutive frames with same orientation before locking (6)
+  N_UNLOCK   Consecutive opposing frames needed to break the lock (20)
 
-    ② CONFIRM AXIS  (table constraint)
-       · Raw axis is noisy (a few degrees error from normal estimation)
-       · Physical constraint: the cylinder axis is either
-           parallel to table_normal   (object standing upright)
-           perpendicular to table_normal (object lying on its side)
-       · Snap to whichever is closer (threshold 45°)
-       · This gives a clean, physically-grounded axis for the next step
-
-    ③ BEST FIT  (least-squares cylinder to the confirmed axis)
-       · Project all PCD points onto the plane ⊥ to the confirmed axis
-       · Fit a 2D circle (linearised least squares)
-         → axis position (centre of circle in 3D) + radius
-       · This minimises the mean squared radial error: Σ(dist_to_axis - r)²
-       · Height: 1st/99th percentile of axial projections
-                 refined by end-cap face detection if top/bottom are visible
-       · Build Open3D LineSet at the fitted (axis, center, r, height)
-
-Why axis-first, then fit?
---------------------------
-  If the axis direction has even 3° of error, the projected circle is
-  elliptical rather than circular, and the circle fit centre shifts
-  significantly (especially for large radii).  Snapping first gives the
-  circle fit a geometrically clean axis, producing the smallest possible
-  radial residuals.
+Chessboard
+----------
+  11 columns × 8 rows  →  inner corners (10, 7),  square = 15 mm
 
 Wireframe colours
 -----------------
   cylinder → orange   [1.0, 0.5, 0.0]
   cuboid   → lavender [0.8, 0.6, 1.0]
-
-Usage
------
-  python test_shape_fit.py [--debug]
-  python test_shape_fit.py --board-cols 10 --board-rows 7   # (default)
 """
 
 import sys
@@ -80,388 +69,375 @@ from helper.pcd_visualizer import show_isolated_pcd
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 _COLOR = {
-    # "sphere":   [0.2, 0.8, 1.0],   # disabled — see module docstring
+    # "sphere":   [0.2, 0.8, 1.0],   # disabled
     "cylinder": [1.0, 0.5, 0.0],
     "cuboid":   [0.8, 0.6, 1.0],
 }
 
-# ── Chessboard defaults (match your calibration target) ───────────────────────
-# Rows=8, Cols=11 on the printed board → inner corners = (10, 7)
-_BOARD_INNER_COLS = 10          # columns - 1
-_BOARD_INNER_ROWS = 7           # rows    - 1
-_SQUARE_SIZE_M    = 0.015       # 15 mm
+# ── Chessboard ─────────────────────────────────────────────────────────────────
+_BOARD_COLS   = 10          # inner corners  (11 col board  → 10)
+_BOARD_ROWS   = 7           # inner corners  ( 8 row board  →  7)
+_SQUARE_M     = 0.015       # 15 mm
 
-# ── Fitting tuning ─────────────────────────────────────────────────────────────
-_KNN_NORMAL       = 30
-_KNN_CURV         = 25
-_SUBSAMPLE        = 600
-_FLAT_THRESH      = 2.0         # |κ| < this (m⁻¹) → zero curvature
-_ANISO_RATIO      = 5.0         # |κ_max/κ_min| > this → cylinder
-_R_MIN            = 0.005       # m
-_R_MAX            = 2.0         # m
-_CAP_NORMAL_DOT   = 0.7         # |n·axis| > this → end-cap point
+# ── Curvature ──────────────────────────────────────────────────────────────────
+_KNN_NORMAL   = 30
+_KNN_CURV     = 25
+_SUBSAMPLE    = 600
+_FLAT_THRESH  = 2.0         # |κ| < this (m⁻¹) → zero curvature
+_ANISO_RATIO  = 5.0
+
+# ── Geometry ───────────────────────────────────────────────────────────────────
+_R_MIN            = 0.005
+_R_MAX            = 2.0
+_CAP_NORMAL_DOT   = 0.7
 _CAP_MIN_PTS      = 10
-_SNAP_THRESH_DEG  = 45.0        # curvature-axis fallback: angle below which → vertical
-_MAX_RADIAL_ERR   = 0.015       # m — if mean radial error > this → fallback cuboid
+_MAX_RADIAL_ERR   = 0.020   # m — raw fits with error > this are downweighted
 
-# Aspect ratio thresholds for vertical / horizontal decision
-# aspect = extent_along_table_normal / max_extent_in_table_plane
-# 250 mm bottle (r≈30 mm) seen from the side : aspect ≈ 250/60  ≈ 4.2  → vertical
-# 120 mm can (r≈35 mm) lying down            : aspect ≈  70/120 ≈ 0.58 → horizontal
-_ASPECT_VERTICAL   = 1.5    # aspect > this → definitely vertical
-_ASPECT_HORIZONTAL = 0.85   # aspect < this → definitely horizontal
-                             # between the two → curvature axis angle as fallback
+# ── Orientation decision ────────────────────────────────────────────────────────
+_ASPECT_VERTICAL   = 1.5    # extent_up / extent_wide > this → vertical
+_ASPECT_HORIZONTAL = 0.85   # extent_up / extent_wide < this → horizontal
+_SNAP_THRESH_DEG   = 45.0   # curvature-angle fallback threshold
+
+# ── Tracker ────────────────────────────────────────────────────────────────────
+_ALPHA     = 0.20           # EMA base learning rate
+_N_LOCK    = 6              # frames before orientation locks
+_N_UNLOCK  = 20             # opposing frames needed to break the lock
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# INIT — table plane from chessboard
+# TABLE PLANE DETECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def detect_table_plane(board_cols=_BOARD_INNER_COLS,
-                       board_rows=_BOARD_INNER_ROWS):
+def detect_table_plane(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
     """
-    Stream frames from the RealSense until the chessboard is visible and a
-    clean plane fit is obtained.
-
-    Returns
-    -------
-    table_normal : (3,) unit vector perpendicular to table, toward camera
-    table_d      : float  plane offset (normal·x + d = 0)
-
-    Blocks until success or ESC is pressed (returns None, None on abort).
+    Stream RealSense frames until chessboard is found; fit plane via SVD.
+    Returns (table_normal, d)  or  (None, None) on ESC.
     """
     board_shape = (board_cols, board_rows)
     criteria    = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 
-    pipe   = rs.pipeline()
-    cfg    = rs.config()
+    pipe  = rs.pipeline()
+    cfg   = rs.config()
     cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
     cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16,  30)
-    align  = rs.align(rs.stream.color)
+    align = rs.align(rs.stream.color)
 
     profile     = pipe.start(cfg)
     intr        = (profile.get_stream(rs.stream.color)
-                          .as_video_stream_profile()
-                          .get_intrinsics())
-    depth_scale = (profile.get_device()
-                          .first_depth_sensor()
-                          .get_depth_scale())
-    fx, fy      = intr.fx, intr.fy
-    cx, cy      = intr.ppx, intr.ppy
+                          .as_video_stream_profile().get_intrinsics())
+    depth_scale = (profile.get_device().first_depth_sensor().get_depth_scale())
+    fx, fy, cx, cy = intr.fx, intr.fy, intr.ppx, intr.ppy
 
-    print(f"\n[table]  Chessboard: inner corners {board_cols}×{board_rows}, "
-          f"square {_SQUARE_SIZE_M*1000:.0f} mm")
-    print("[table]  Point the camera at the chessboard on the table.")
-    print("[table]  Press ESC to skip table detection.\n")
+    print(f"\n[table]  Board inner corners {board_cols}×{board_rows}, "
+          f"square {_SQUARE_M*1000:.0f} mm")
+    print("[table]  Show chessboard to camera.  ESC to skip.\n")
 
     try:
         while True:
             frames      = pipe.wait_for_frames()
             aligned     = align.process(frames)
-            color_frame = aligned.get_color_frame()
-            depth_frame = aligned.get_depth_frame()
-            if not color_frame or not depth_frame:
+            cf, df      = aligned.get_color_frame(), aligned.get_depth_frame()
+            if not cf or not df:
                 continue
 
-            color_img = np.asarray(color_frame.get_data())
-            depth_img = np.asarray(depth_frame.get_data()).astype(np.float32) \
-                        * depth_scale                       # metres
+            img   = np.asarray(cf.get_data())
+            depth = np.asarray(df.get_data()).astype(np.float32) * depth_scale
 
-            gray         = cv2.cvtColor(color_img, cv2.COLOR_BGR2GRAY)
+            gray         = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             found, corners = cv2.findChessboardCorners(gray, board_shape, None)
 
-            # ── Live preview ─────────────────────────────────────────────────
-            display = color_img.copy()
+            disp = img.copy()
             if found:
-                cv2.drawChessboardCorners(display, board_shape, corners, True)
-            cv2.putText(display,
-                        "FOUND — hold still" if found else "Searching for chessboard …",
+                cv2.drawChessboardCorners(disp, board_shape, corners, True)
+            cv2.putText(disp,
+                        "FOUND — hold still" if found else "Searching …",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                         (0, 220, 0) if found else (0, 80, 255), 2)
-            cv2.imshow("Table plane detection  [ESC to skip]", display)
+            cv2.imshow("Table plane detection  [ESC to skip]", disp)
             if cv2.waitKey(1) == 27:
                 cv2.destroyAllWindows()
-                print("[table]  Skipped — running without table constraint.\n")
                 return None, None
-
             if not found:
                 continue
 
-            # ── Sub-pixel refinement ─────────────────────────────────────────
             corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
 
-            # ── Back-project corners to 3D ────────────────────────────────────
-            pts_3d = []
+            pts3 = []
             for (u, v) in corners.reshape(-1, 2):
                 ui, vi = int(round(u)), int(round(v))
-                if not (0 <= ui < depth_img.shape[1] and
-                        0 <= vi < depth_img.shape[0]):
+                if not (0 <= ui < depth.shape[1] and 0 <= vi < depth.shape[0]):
                     continue
-                z = float(depth_img[vi, ui])
-                if z < 0.05 or z > 3.0:        # 5 cm – 3 m sanity window
+                z = float(depth[vi, ui])
+                if z < 0.05 or z > 3.0:
                     continue
-                pts_3d.append([(u - cx) * z / fx,
-                                (v - cy) * z / fy,
-                                z])
+                pts3.append([(u-cx)*z/fx, (v-cy)*z/fy, z])
 
-            if len(pts_3d) < 6:
-                print("[table]  Too many missing depth values — retry.")
+            if len(pts3) < 6:
                 continue
 
-            pts_3d   = np.array(pts_3d)
-            centroid = pts_3d.mean(axis=0)
-
-            # ── SVD plane fit ─────────────────────────────────────────────────
-            _, _, Vt = np.linalg.svd(pts_3d - centroid)
-            normal   = Vt[-1]
-            normal  /= np.linalg.norm(normal)
+            pts3     = np.array(pts3)
+            centroid = pts3.mean(axis=0)
+            _, _, Vt = np.linalg.svd(pts3 - centroid)
+            normal   = Vt[-1] / np.linalg.norm(Vt[-1])
             d        = -float(normal @ centroid)
-
-            # Orient normal toward the camera (camera at origin)
             if float(normal @ centroid) < 0:
                 normal, d = -normal, -d
 
-            # ── Quality check: residuals must be < 5 mm ───────────────────────
-            # (one-third of the 15 mm square — tight enough to catch bad depth)
-            mean_res = float(np.abs((pts_3d - centroid) @ normal).mean())
-            if mean_res > 0.005:
-                print(f"[table]  Residual {mean_res*1000:.1f} mm > 5 mm — retry.")
+            res = float(np.abs((pts3 - centroid) @ normal).mean())
+            if res > 0.005:
+                print(f"[table]  Residual {res*1000:.1f} mm — retry")
                 continue
 
-            print(f"[table]  ✓  normal={np.round(normal, 3)}  "
-                  f"residual={mean_res*1000:.2f} mm\n")
+            print(f"[table]  ✓  normal={np.round(normal,3)}  "
+                  f"residual={res*1000:.2f} mm\n")
             cv2.waitKey(400)
             cv2.destroyAllWindows()
             return normal, d
-
     finally:
         pipe.stop()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE ① — Local curvature → classify → raw axis
+# STAGE ① — Local curvature + classify
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _fit_local_curvature(p, n, neighbours):
-    """
-    Quadratic patch h = a·u² + b·u·v + c·v² in the tangent frame of (p, n).
-    Returns (κ₁, κ₂, zero_axis_3d) or None on degenerate input.
-    κ₁ ≤ κ₂;  zero_axis is the direction of minimal curvature.
-    """
-    ref = np.array([0., 0., 1.]) if abs(n[2]) < 0.9 else np.array([1., 0., 0.])
-    t1  = np.cross(n, ref);  t1 /= np.linalg.norm(t1)
-    t2  = np.cross(n, t1);   t2 /= np.linalg.norm(t2)
-
-    d = neighbours - p
-    u = d @ t1;  v = d @ t2;  h = d @ n
-
-    A = np.column_stack([u ** 2, u * v, v ** 2])
+    ref = np.array([0.,0.,1.]) if abs(n[2])<0.9 else np.array([1.,0.,0.])
+    t1  = np.cross(n,ref); t1/=np.linalg.norm(t1)
+    t2  = np.cross(n,t1);  t2/=np.linalg.norm(t2)
+    d   = neighbours - p
+    u,v,h = d@t1, d@t2, d@n
+    A   = np.column_stack([u**2, u*v, v**2])
     if np.linalg.matrix_rank(A) < 3:
         return None
-
-    (a, b, c), *_ = np.linalg.lstsq(A, h, rcond=None)
-
-    II           = np.array([[2*a, b], [b, 2*c]])
-    evals, evecs = np.linalg.eigh(II)          # ascending κ₁ ≤ κ₂
-    ev_min       = evecs[:, 0]
-    zero_axis    = ev_min[0] * t1 + ev_min[1] * t2
-
-    return float(evals[0]), float(evals[1]), zero_axis
+    (a,b,c),*_ = np.linalg.lstsq(A, h, rcond=None)
+    II          = np.array([[2*a,b],[b,2*c]])
+    evals,evecs = np.linalg.eigh(II)
+    ev          = evecs[:,0]
+    return float(evals[0]), float(evals[1]), ev[0]*t1+ev[1]*t2
 
 
 def _aggregate_curvatures(pts, normals):
     tree = cKDTree(pts)
-    k1s, k2s, axs = [], [], []
-
+    k1s,k2s,axs = [],[],[]
     for i in range(len(pts)):
-        _, idx = tree.query(pts[i], k=_KNN_CURV + 1)
+        _,idx = tree.query(pts[i], k=_KNN_CURV+1)
         r = _fit_local_curvature(pts[i], normals[i], pts[idx[1:]])
-        if r is None:
-            continue
-        k1s.append(r[0]);  k2s.append(r[1]);  axs.append(r[2])
-
+        if r is None: continue
+        k1s.append(r[0]); k2s.append(r[1]); axs.append(r[2])
     if not k1s:
-        return 0.0, 0.0, None
-
-    kappa1 = float(np.median(k1s))
-    kappa2 = float(np.median(k2s))
-
+        return 0.,0.,None
+    k1,k2 = float(np.median(k1s)), float(np.median(k2s))
     axes  = np.array(axs)
-    signs = np.sign(axes @ axes[0]);  signs[signs == 0] = 1
-    axes *= signs[:, None]
-    m    = axes.mean(axis=0);  nrm = np.linalg.norm(m)
-    axis = m / nrm if nrm > 1e-6 else None
-
-    return kappa1, kappa2, axis
+    signs = np.sign(axes@axes[0]); signs[signs==0]=1
+    axes *= signs[:,None]
+    m = axes.mean(axis=0); nrm=np.linalg.norm(m)
+    return k1, k2, m/nrm if nrm>1e-6 else None
 
 
 def _classify(k1, k2):
-    # "sphere" intentionally disabled
     return "cuboid" if abs(k2) < _FLAT_THRESH else "cylinder"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE ② — Confirm axis with table constraint
+# STAGE ② — Confirm orientation (aspect ratio primary, curvature fallback)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _confirm_axis(raw_axis, table_normal, pts):
+def _confirm_orientation(pts, raw_axis, table_normal):
     """
-    Decide whether the cylinder is vertical or horizontal, then snap the axis.
+    Returns ("vertical" | "horizontal", snapped_axis).
 
-    Decision strategy — two signals, primary wins:
-    ────────────────────────────────────────────────────────────────────────
-    PRIMARY  Point-cloud aspect ratio  (geometric, robust to curvature noise)
-      · extent_up   = PCD range along table_normal
-      · extent_wide = largest PCD range in the table plane
-      · aspect = extent_up / extent_wide
+    PRIMARY — PCD bounding-box aspect ratio (robust to curvature noise):
+      aspect = extent_along_table_normal / max_extent_in_table_plane
+      > _ASPECT_VERTICAL   → vertical
+      < _ASPECT_HORIZONTAL → horizontal
 
-      aspect > _ASPECT_VERTICAL   → vertical   (tall object, e.g. bottle)
-      aspect < _ASPECT_HORIZONTAL → horizontal  (wide object, e.g. can lying)
-
-    FALLBACK  Curvature axis angle  (used only when aspect is ambiguous)
-      · |raw_axis · table_normal| ≥ cos(_SNAP_THRESH_DEG) → vertical
-      · otherwise                                          → horizontal
-    ────────────────────────────────────────────────────────────────────────
-
-    For horizontal cylinders the in-plane direction is kept from raw_axis,
-    because curvature correctly tells us which way the object is oriented
-    even when the tilt estimate is noisy.
-
-    Returns (confirmed_axis, "vertical" | "horizontal").
+    FALLBACK — curvature axis angle (only when aspect is ambiguous).
     """
-    # ── Primary: aspect ratio of the PCD bounding box ────────────────────────
-    centroid = pts.mean(axis=0)
-    d        = pts - centroid
+    d   = pts - pts.mean(axis=0)
+    up  = float((d @ table_normal).ptp())
 
-    # Height: extent along the table normal direction
-    proj_up    = d @ table_normal
-    extent_up  = float(proj_up.max() - proj_up.min())
+    ref = np.array([1.,0.,0.]) if abs(table_normal[0])<0.9 else np.array([0.,1.,0.])
+    p1  = np.cross(table_normal,ref); p1/=np.linalg.norm(p1)
+    p2  = np.cross(table_normal,p1);  p2/=np.linalg.norm(p2)
+    wide = float(max((d@p1).ptp(), (d@p2).ptp()))
 
-    # Width: build two orthonormal vectors in the table plane and take max range
-    ref  = np.array([1., 0., 0.]) if abs(table_normal[0]) < 0.9 \
-           else np.array([0., 1., 0.])
-    p1   = np.cross(table_normal, ref);  p1 /= np.linalg.norm(p1)
-    p2   = np.cross(table_normal, p1);   p2 /= np.linalg.norm(p2)
-    u    = d @ p1;  v = d @ p2
-    extent_wide = float(max(u.max() - u.min(), v.max() - v.min()))
-
-    aspect = extent_up / (extent_wide + 1e-6)
-    print(f"[shape_fit]  extent_up={extent_up*1000:.0f} mm  "
-          f"extent_wide={extent_wide*1000:.0f} mm  "
-          f"aspect={aspect:.2f}")
+    aspect = up / (wide + 1e-6)
+    print(f"[shape_fit]  up={up*1e3:.0f}mm  wide={wide*1e3:.0f}mm  "
+          f"aspect={aspect:.2f}", end="")
 
     if aspect > _ASPECT_VERTICAL:
-        orientation = "vertical"
+        orient = "vertical";    print("  → vertical (aspect)")
     elif aspect < _ASPECT_HORIZONTAL:
-        orientation = "horizontal"
+        orient = "horizontal";  print("  → horizontal (aspect)")
     else:
-        # ── Fallback: curvature axis angle ────────────────────────────────────
-        cos_a     = abs(float(raw_axis @ table_normal))
-        threshold = float(np.cos(np.radians(_SNAP_THRESH_DEG)))
-        orientation = "vertical" if cos_a >= threshold else "horizontal"
-        print(f"[shape_fit]  aspect ambiguous → curvature fallback → {orientation}")
+        cos_a  = abs(float(raw_axis @ table_normal))
+        orient = "vertical" if cos_a >= np.cos(np.radians(_SNAP_THRESH_DEG)) \
+                 else "horizontal"
+        print(f"  → {orient} (curvature fallback)")
 
-    # ── Snap axis ─────────────────────────────────────────────────────────────
-    if orientation == "vertical":
-        snapped = table_normal.copy()
+    # Snap axis
+    if orient == "vertical":
+        axis = table_normal.copy()
     else:
-        # Project raw_axis onto the table plane (removes out-of-plane tilt noise)
-        snapped = raw_axis - (raw_axis @ table_normal) * table_normal
-        nrm     = np.linalg.norm(snapped)
-        if nrm < 1e-6:
-            return raw_axis, "unknown"
-        snapped = snapped / nrm
+        axis = raw_axis - (raw_axis @ table_normal)*table_normal
+        nrm  = np.linalg.norm(axis)
+        axis = raw_axis if nrm < 1e-6 else axis/nrm
 
-    # Preserve sign (same hemisphere as raw_axis)
-    if float(snapped @ raw_axis) < 0:
-        snapped = -snapped
-
-    return snapped, orientation
+    if axis @ raw_axis < 0:
+        axis = -axis
+    return orient, axis
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE ③ — Best fit to the confirmed axis
+# STAGE ③ — Best fit (2D circle) + height
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _best_fit_cylinder(pts, normals, axis):
     """
-    Given a confirmed axis direction, find the cylinder that best fits the PCD.
-
-    Method
-    ------
-    Project every point onto the plane ⊥ to *axis* (dropping the axial
-    component — all cross-sections of a true cylinder are identical circles).
-    Fit a 2D circle by linearised least squares:
-
-        (u - cu)² + (v - cv)² = r²
-        → -2cu·u - 2cv·v + (cu²+cv²-r²) = -(u²+v²)
-
-    This minimises  Σ (radial_distance_to_axis - r)²  over all points,
-    which is the correct objective for cylinder fitting.
-
-    The axis passes through the 3D point  centroid + cu·e1 + cv·e2
-    (the circle centre lifted back into world space).
-
-    Returns
-    -------
-    axis_pt  : (3,)  a point on the cylinder axis
-    radius   : float
-    mean_err : float  mean radial residual (m) — used for quality check
-    or (None, None, inf) on failure.
+    Least-squares 2D circle fit in the plane ⊥ to axis.
+    Returns (axis_pt, radius, mean_radial_err) or (None, None, inf).
     """
     centroid = pts.mean(axis=0)
-
-    # 2D orthonormal frame in the cross-section plane
-    ref = np.array([0., 0., 1.]) if abs(axis[2]) < 0.9 else np.array([1., 0., 0.])
-    e1  = np.cross(axis, ref);  e1 /= np.linalg.norm(e1)
-    e2  = np.cross(axis, e1);   e2 /= np.linalg.norm(e2)
-
-    d = pts - centroid
-    u = d @ e1
-    v = d @ e2                  # axial component dropped — intentional
-
-    A  = np.column_stack([-2*u, -2*v, np.ones(len(u))])
-    b  = -(u**2 + v**2)
-    x, *_ = np.linalg.lstsq(A, b, rcond=None)
-    cu, cv, dval = x
-
-    r_sq = cu**2 + cv**2 - dval
+    ref = np.array([0.,0.,1.]) if abs(axis[2])<0.9 else np.array([1.,0.,0.])
+    e1  = np.cross(axis,ref); e1/=np.linalg.norm(e1)
+    e2  = np.cross(axis,e1);  e2/=np.linalg.norm(e2)
+    d   = pts - centroid
+    u,v = d@e1, d@e2
+    A   = np.column_stack([-2*u, -2*v, np.ones(len(u))])
+    b   = -(u**2 + v**2)
+    x,*_ = np.linalg.lstsq(A, b, rcond=None)
+    cu,cv,dv = x
+    r_sq = cu**2+cv**2-dv
     if r_sq <= 0:
         return None, None, np.inf
-
-    r        = float(np.sqrt(r_sq))
-    axis_pt  = centroid + cu * e1 + cv * e2
-
-    # Radial residual: how well the PCD lies on this cylinder
-    along      = (pts - axis_pt) @ axis
-    on_axis    = axis_pt + np.outer(along, axis)
-    radial     = np.linalg.norm(pts - on_axis, axis=1)
-    mean_err   = float(np.mean(np.abs(radial - r)))
-
-    return axis_pt, r, mean_err
+    r       = float(np.sqrt(r_sq))
+    axis_pt = centroid + cu*e1 + cv*e2
+    along   = (pts-axis_pt)@axis
+    on_ax   = axis_pt + np.outer(along, axis)
+    err     = float(np.mean(np.abs(np.linalg.norm(pts-on_ax, axis=1) - r)))
+    return axis_pt, r, err
 
 
 def _estimate_height(pts, normals, axis, centroid):
-    """
-    Axial extent via 1st/99th percentile + end-cap face refinement.
-    """
-    proj  = (pts - centroid) @ axis
+    proj  = (pts-centroid)@axis
     h_min = float(np.percentile(proj, 1))
     h_max = float(np.percentile(proj, 99))
-
-    cap_mask = np.abs(normals @ axis) > _CAP_NORMAL_DOT
-    if cap_mask.sum() >= _CAP_MIN_PTS:
-        cp    = proj[cap_mask]
-        span  = h_max - h_min
-        cmin  = float(cp.min());  cmax = float(cp.max())
-        if cmin < h_min + 0.3 * span:
-            h_min = cmin
-            print(f"[shape_fit]  bottom cap → h_min = {h_min:.3f} m")
-        if cmax > h_max - 0.3 * span:
-            h_max = cmax
-            print(f"[shape_fit]  top cap    → h_max = {h_max:.3f} m")
-
+    cap   = np.abs(normals@axis) > _CAP_NORMAL_DOT
+    if cap.sum() >= _CAP_MIN_PTS:
+        cp  = proj[cap]; span = h_max-h_min
+        cm,cx = float(cp.min()), float(cp.max())
+        if cm < h_min+0.3*span: h_min=cm; print(f"[shape_fit]  bottom cap {h_min*1e3:.0f}mm")
+        if cx > h_max-0.3*span: h_max=cx; print(f"[shape_fit]  top cap    {h_max*1e3:.0f}mm")
     return h_min, h_max
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE ④ — Temporal convergence tracker
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _ShapeTracker:
+    """
+    Maintains a temporally-smoothed estimate of the cylinder parameters.
+
+    Each call to update() blends one frame's raw fit into the running estimate
+    via EMA, then returns the smoothed parameters used to build the wireframe.
+
+    Orientation locking
+    -------------------
+    After N_LOCK consecutive frames agree on "vertical" or "horizontal", the
+    orientation is locked.  While locked, the axis is forced to the locked
+    direction regardless of what the current frame estimates.
+    Unlocking requires N_UNLOCK consecutive opposing frames — making accidental
+    flips very unlikely without a real change in the scene.
+    """
+
+    def __init__(self):
+        self.orient     = None      # "vertical" | "horizontal" | None
+        self._streak    = 0         # consecutive frames with current orient
+        self._locked    = False
+        self._flip_str  = 0         # consecutive frames with opposing orient
+
+        # Smoothed parameters
+        self.axis    = None         # (3,) unit vector
+        self.axis_pt = None         # (3,) point on axis
+        self.radius  = None         # float (m)
+        self.h_ctr   = None         # (h_min+h_max)/2
+        self.height  = None         # h_max-h_min
+
+    def update(self, raw_orient, raw_axis, raw_axis_pt, raw_r,
+               raw_h_min, raw_h_max, raw_err, table_normal):
+        """
+        Parameters
+        ----------
+        raw_*        : estimates from the current frame
+        raw_err      : mean radial error (m) — scales learning rate
+        table_normal : used to force axis when orientation is locked vertical
+
+        Returns
+        -------
+        (axis, axis_pt, radius, h_min, h_max)  — smoothed
+        """
+        # Adaptive alpha: high-error frames contribute less
+        alpha = float(np.clip(_ALPHA / (1.0 + raw_err * 30), 0.04, 0.35))
+
+        # ── Orientation locking ───────────────────────────────────────────────
+        if not self._locked:
+            if raw_orient == self.orient:
+                self._streak += 1
+                if self._streak >= _N_LOCK:
+                    self._locked = True
+                    print(f"[tracker]  ★ LOCKED → {self.orient}")
+            else:
+                self.orient  = raw_orient
+                self._streak = 1
+        else:
+            if raw_orient != self.orient:
+                self._flip_str += 1
+                if self._flip_str >= _N_UNLOCK:
+                    print(f"[tracker]  ★ UNLOCKED (was {self.orient})")
+                    self._locked   = False
+                    self._flip_str = 0
+                    self.orient    = raw_orient
+                    self._streak   = 1
+            else:
+                self._flip_str = 0
+
+        # ── Force axis to locked orientation ─────────────────────────────────
+        if self._locked:
+            if self.orient == "vertical":
+                raw_axis = table_normal.copy()
+            # horizontal: keep raw_axis (curvature gives the in-plane direction)
+
+        # ── EMA parameter blend ───────────────────────────────────────────────
+        raw_h_ctr = (raw_h_min + raw_h_max) / 2.0
+        raw_h     = raw_h_max - raw_h_min
+
+        if self.axis is None:
+            # First valid frame — initialise directly
+            self.axis    = raw_axis.copy()
+            self.axis_pt = raw_axis_pt.copy()
+            self.radius  = raw_r
+            self.h_ctr   = raw_h_ctr
+            self.height  = raw_h
+        else:
+            # Keep axis in same hemisphere before blending
+            if float(self.axis @ raw_axis) < 0:
+                raw_axis = -raw_axis
+
+            self.axis    = (1-alpha)*self.axis    + alpha*raw_axis
+            self.axis   /= np.linalg.norm(self.axis)
+            self.axis_pt = (1-alpha)*self.axis_pt + alpha*raw_axis_pt
+            self.radius  = (1-alpha)*self.radius  + alpha*raw_r
+            self.h_ctr   = (1-alpha)*self.h_ctr   + alpha*raw_h_ctr
+            self.height  = (1-alpha)*self.height  + alpha*raw_h
+
+        h_min = self.h_ctr - self.height / 2.0
+        h_max = self.h_ctr + self.height / 2.0
+        return self.axis, self.axis_pt, self.radius, h_min, h_max
+
+    def reset(self):
+        self.__init__()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -469,29 +445,19 @@ def _estimate_height(pts, normals, axis, centroid):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _build_cylinder(axis, axis_pt, r, h_min, h_max):
-    """
-    Build a cylinder LineSet at the given axis / center / radius / height.
-    axis_pt is the axis at h=0 relative to the point-cloud centroid;
-    the full 3D center is axis_pt + axis * mid.
-    """
-    height = float(np.clip(h_max - h_min, 0.005, 5.0))
-    center = axis_pt + axis * (h_min + h_max) / 2.0
+    r      = float(np.clip(r, _R_MIN, _R_MAX))
+    height = float(np.clip(h_max-h_min, 0.005, 5.0))
+    center = axis_pt + axis*(h_min+h_max)/2.0
 
-    z   = np.array([0., 0., 1.])
-    v   = np.cross(z, axis)
-    s   = np.linalg.norm(v)
-    c   = float(np.dot(z, axis))
+    z  = np.array([0.,0.,1.])
+    v  = np.cross(z, axis);  s = np.linalg.norm(v);  c = float(np.dot(z,axis))
     if s < 1e-6:
-        R = np.eye(3) if c > 0 else np.diag([1., -1., -1.])
+        R = np.eye(3) if c>0 else np.diag([1.,-1.,-1.])
     else:
-        vx = np.array([[0,    -v[2],  v[1]],
-                       [v[2],  0,    -v[0]],
-                       [-v[1], v[0],  0   ]])
-        R  = np.eye(3) + vx + vx @ vx * (1.0 - c) / (s**2)
+        vx = np.array([[0,-v[2],v[1]],[v[2],0,-v[0]],[-v[1],v[0],0]])
+        R  = np.eye(3) + vx + vx@vx*(1.0-c)/(s**2)
 
-    mesh = o3d.geometry.TriangleMesh.create_cylinder(
-        radius=r, height=height, resolution=20
-    )
+    mesh = o3d.geometry.TriangleMesh.create_cylinder(radius=r,height=height,resolution=20)
     mesh.rotate(R, center=np.zeros(3))
     mesh.translate(center)
     ls = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
@@ -502,32 +468,21 @@ def _build_cylinder(axis, axis_pt, r, h_min, h_max):
 def _build_cuboid(pts):
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
-    plane, inlier_idx = pcd.segment_plane(
-        distance_threshold=0.005, ransac_n=3, num_iterations=200
-    )
-    n   = np.array(plane[:3]);  n /= np.linalg.norm(n) + 1e-9
-    inl = pts[np.array(inlier_idx)]
-
-    ref = np.array([0., 0., 1.]) if abs(n[2]) < 0.9 else np.array([1., 0., 0.])
-    t1  = np.cross(n, ref);  t1 /= np.linalg.norm(t1)
-    t2  = np.cross(n, t1);   t2 /= np.linalg.norm(t2)
-
-    u  = inl @ t1;  v = inl @ t2;  w = inl @ n
-    du = u.max()-u.min();  dv = v.max()-v.min()
-    dw = max(w.max()-w.min(), 0.005)
-
-    mesh = o3d.geometry.TriangleMesh.create_box(width=du, height=dv, depth=dw)
-    mesh.translate([-du/2, -dv/2, -dw/2])
-    R = np.column_stack([t1, t2, n])
-    if np.linalg.det(R) < 0:
-        R[:, 2] *= -1
-    mesh.rotate(R, center=np.zeros(3))
-    ctr = np.array([
-        (u.max()+u.min())/2*t1[i] +
-        (v.max()+v.min())/2*t2[i] +
-        (w.max()+w.min())/2*n[i]
-        for i in range(3)
-    ])
+    plane, idx = pcd.segment_plane(distance_threshold=0.005,ransac_n=3,num_iterations=200)
+    n   = np.array(plane[:3]); n/=np.linalg.norm(n)+1e-9
+    inl = pts[np.array(idx)]
+    ref = np.array([0.,0.,1.]) if abs(n[2])<0.9 else np.array([1.,0.,0.])
+    t1  = np.cross(n,ref); t1/=np.linalg.norm(t1)
+    t2  = np.cross(n,t1);  t2/=np.linalg.norm(t2)
+    u=inl@t1; v=inl@t2; w=inl@n
+    du=u.max()-u.min(); dv=v.max()-v.min(); dw=max(w.max()-w.min(),0.005)
+    mesh = o3d.geometry.TriangleMesh.create_box(width=du,height=dv,depth=dw)
+    mesh.translate([-du/2,-dv/2,-dw/2])
+    R = np.column_stack([t1,t2,n])
+    if np.linalg.det(R)<0: R[:,2]*=-1
+    mesh.rotate(R,center=np.zeros(3))
+    ctr = np.array([(u.max()+u.min())/2*t1[i]+(v.max()+v.min())/2*t2[i]
+                    +(w.max()+w.min())/2*n[i] for i in range(3)])
     mesh.translate(ctr)
     ls = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
     ls.paint_uniform_color(_COLOR["cuboid"])
@@ -535,85 +490,75 @@ def _build_cuboid(pts):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Top-level: per-frame fitting
+# Per-frame entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fit_shape(pts: np.ndarray, table_normal: np.ndarray = None):
+def fit_and_track(pts: np.ndarray, table_normal, tracker: _ShapeTracker):
     """
-    Three-stage pipeline: classify → confirm axis → best fit.
+    Run one frame through the full pipeline and update the tracker.
 
-    Parameters
-    ----------
-    pts          : (N, 3) isolated object points
-    table_normal : (3,) unit vector ⊥ to table (from detect_table_plane).
-                   Pass None to skip axis snapping.
-
-    Returns
-    -------
-    (shape_name, LineSet)  or  (None, None)
+    Returns (shape_name, LineSet) or (None, None).
     """
     if len(pts) < 50:
         return None, None
 
-    # ── Normal estimation ─────────────────────────────────────────────────────
+    # Normals
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
-    pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamKNN(knn=_KNN_NORMAL)
-    )
-    pcd.orient_normals_towards_camera_location(
-        camera_location=np.array([0., 0., 0.])
-    )
+    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=_KNN_NORMAL))
+    pcd.orient_normals_towards_camera_location(camera_location=np.array([0.,0.,0.]))
     normals = np.asarray(pcd.normals)
 
     N = len(pts)
     if N > _SUBSAMPLE:
-        idx     = np.random.choice(N, _SUBSAMPLE, replace=False)
-        s_pts   = pts[idx];  s_norms = normals[idx]
+        idx    = np.random.choice(N, _SUBSAMPLE, replace=False)
+        sp,sn  = pts[idx], normals[idx]
     else:
-        s_pts, s_norms = pts, normals
+        sp,sn  = pts, normals
 
-    # ── STAGE ①  Classify + raw axis ─────────────────────────────────────────
-    k1, k2, raw_axis = _aggregate_curvatures(s_pts, s_norms)
-    shape            = _classify(k1, k2)
+    # ① Curvature + classify
+    k1,k2,raw_axis = _aggregate_curvatures(sp, sn)
+    shape          = _classify(k1, k2)
     print(f"[shape_fit]  κ₁={k1:+.2f}  κ₂={k2:+.2f}  → {shape}")
 
-    if shape == "cylinder" and raw_axis is None:
-        print("[shape_fit]  axis extraction failed → cuboid")
-        shape = "cuboid"
+    if shape == "cuboid" or raw_axis is None:
+        tracker.reset()
+        return "cuboid", _build_cuboid(pts)
 
-    if shape != "cylinder":
-        return shape, _build_cuboid(pts)
-
-    # ── STAGE ②  Confirm axis with table constraint ───────────────────────────
+    # ② Confirm orientation
     if table_normal is not None:
-        axis, orientation = _confirm_axis(raw_axis, table_normal, pts)
-        print(f"[shape_fit]  axis confirmed: {orientation}  {np.round(axis, 3)}")
+        orient, axis = _confirm_orientation(pts, raw_axis, table_normal)
     else:
-        axis = raw_axis
+        orient, axis = "unknown", raw_axis
 
-    # ── STAGE ③  Best fit to the confirmed axis ───────────────────────────────
-    axis_pt, r, mean_err = _best_fit_cylinder(pts, normals, axis)
-
+    # ③ Best fit
+    axis_pt, r, err = _best_fit_cylinder(pts, normals, axis)
     if axis_pt is None:
-        print("[shape_fit]  circle fit failed → cuboid")
+        tracker.reset()
         return "cuboid", _build_cuboid(pts)
 
     r = float(np.clip(r, _R_MIN, _R_MAX))
 
-    if mean_err > _MAX_RADIAL_ERR:
-        print(f"[shape_fit]  radial error {mean_err*1000:.1f} mm > "
-              f"{_MAX_RADIAL_ERR*1000:.0f} mm → cuboid")
-        return "cuboid", _build_cuboid(pts)
+    # ④ Height
+    centroid = pts.mean(axis=0)
+    h_min, h_max = _estimate_height(pts, normals, axis, centroid)
 
-    centroid         = pts.mean(axis=0)
-    h_min, h_max     = _estimate_height(pts, normals, axis, centroid)
+    print(f"[shape_fit]  raw  r={r*1e3:.1f}mm  "
+          f"h={(h_max-h_min)*1e3:.1f}mm  err={err*1e3:.2f}mm")
 
-    print(f"[shape_fit]  ✓ cylinder  r={r*1000:.1f} mm  "
-          f"h={( h_max-h_min)*1000:.1f} mm  "
-          f"err={mean_err*1000:.2f} mm")
+    # ⑤ Tracker: blend into running estimate
+    if table_normal is not None:
+        s_axis,s_pt,s_r,s_hmin,s_hmax = tracker.update(
+            orient, axis, axis_pt, r, h_min, h_max, err, table_normal
+        )
+    else:
+        s_axis,s_pt,s_r,s_hmin,s_hmax = axis, axis_pt, r, h_min, h_max
 
-    ls = _build_cylinder(axis, axis_pt, r, h_min, h_max)
+    print(f"[shape_fit]  smooth r={s_r*1e3:.1f}mm  "
+          f"h={(s_hmax-s_hmin)*1e3:.1f}mm  "
+          f"locked={tracker._locked}  orient={tracker.orient}")
+
+    ls = _build_cylinder(s_axis, s_pt, s_r, s_hmin, s_hmax)
     return "cylinder", ls
 
 
@@ -622,10 +567,11 @@ def fit_shape(pts: np.ndarray, table_normal: np.ndarray = None):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _make_overlay_callback(table_normal):
-    state = {"ls": None, "label": None}
+    tracker = _ShapeTracker()
+    state   = {"ls": None, "label": None}
 
     def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer):
-        shape, new_ls = fit_shape(obj_verts, table_normal=table_normal)
+        shape, new_ls = fit_and_track(obj_verts, table_normal, tracker)
         if new_ls is None:
             return
 
@@ -651,17 +597,14 @@ def _make_overlay_callback(table_normal):
 # Entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run(board_cols=_BOARD_INNER_COLS, board_rows=_BOARD_INNER_ROWS,
-        debug=False):
-
-    table_normal, _ = detect_table_plane(board_cols=board_cols,
-                                         board_rows=board_rows)
+def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS, debug=False):
+    table_normal, _ = detect_table_plane(board_cols, board_rows)
 
     isolator = ObjectIsolator(min_points=50)
     isolator.start()
     print("Waiting for camera …")
     isolator.ready.wait()
-    print("Camera ready — opening visualizer.\n")
+    print("Camera ready.\n")
 
     try:
         show_isolated_pcd(
@@ -675,10 +618,8 @@ def run(board_cols=_BOARD_INNER_COLS, board_rows=_BOARD_INNER_ROWS,
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--board-cols", type=int, default=_BOARD_INNER_COLS,
-                   help=f"Inner corner columns (default {_BOARD_INNER_COLS})")
-    p.add_argument("--board-rows", type=int, default=_BOARD_INNER_ROWS,
-                   help=f"Inner corner rows (default {_BOARD_INNER_ROWS})")
+    p.add_argument("--board-cols", type=int, default=_BOARD_COLS)
+    p.add_argument("--board-rows", type=int, default=_BOARD_ROWS)
     p.add_argument("--debug", action="store_true")
-    args = p.parse_args()
-    run(board_cols=args.board_cols, board_rows=args.board_rows, debug=args.debug)
+    a = p.parse_args()
+    run(board_cols=a.board_cols, board_rows=a.board_rows, debug=a.debug)

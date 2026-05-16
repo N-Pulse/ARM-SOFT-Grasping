@@ -440,29 +440,51 @@ def _build_cylinder(axis, axis_pt, r, h_min, h_max):
 
 def _build_cuboid(pts, table_normal):
     """
-    Build an axis-aligned cuboid wireframe whose height axis is always the
-    chessboard table normal (vertical to the platform).  The two horizontal
-    axes are derived from table_normal so they lie flat on the table plane.
+    Build a tight cuboid wireframe whose height axis is always table_normal.
+
+    In the horizontal plane (perpendicular to table_normal) the minimum-area
+    bounding rectangle of the projected point cloud is used, so the box fits
+    tightly regardless of how the object is rotated on the table.
     """
     n   = table_normal.copy()
     ref = np.array([1.,0.,0.]) if abs(n[0])<0.9 else np.array([0.,1.,0.])
-    t1  = np.cross(n, ref); t1 /= np.linalg.norm(t1)
-    t2  = np.cross(n, t1);  t2 /= np.linalg.norm(t2)
+    e1  = np.cross(n, ref); e1 /= np.linalg.norm(e1)
+    e2  = np.cross(n, e1);  e2 /= np.linalg.norm(e2)
 
-    u = pts @ t1;  v = pts @ t2;  w = pts @ n
-    du = u.max()-u.min()
-    dv = v.max()-v.min()
-    dw = max(w.max()-w.min(), 0.005)
+    # Project onto horizontal plane and vertical axis
+    u = (pts @ e1).astype(np.float32)
+    v = (pts @ e2).astype(np.float32)
+    w = pts @ n
+
+    # Minimum-area bounding rectangle in the horizontal plane.
+    # Use the convex hull first for robustness and speed.
+    pts_2d = np.column_stack([u, v]).reshape(-1, 1, 2)
+    hull   = cv2.convexHull(pts_2d)
+    rect   = cv2.minAreaRect(hull)   # ((cx,cy), (rw,rh), angle_deg)
+
+    (cx, cy), (rw, rh), angle_deg = rect
+    angle_rad = np.radians(angle_deg)
+    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+
+    # Box axes in 3D — rotated within the table plane
+    t1 =  cos_a * e1 + sin_a * e2
+    t2 = -sin_a * e1 + cos_a * e2
+
+    du = float(max(rw, 0.005))
+    dv = float(max(rh, 0.005))
+    dw = float(max(np.percentile(w, 99) - np.percentile(w, 1), 0.005))
+
+    # Box centre in 3D
+    w_ctr  = (np.percentile(w, 99) + np.percentile(w, 1)) / 2.0
+    ctr_3d = cx * e1 + cy * e2 + w_ctr * n
 
     mesh = o3d.geometry.TriangleMesh.create_box(width=du, height=dv, depth=dw)
     mesh.translate([-du/2, -dv/2, -dw/2])
     R = np.column_stack([t1, t2, n])
-    if np.linalg.det(R) < 0: R[:,2] *= -1
+    if np.linalg.det(R) < 0:
+        R[:, 2] *= -1
     mesh.rotate(R, center=np.zeros(3))
-    ctr = ((u.max()+u.min())/2 * t1
-         + (v.max()+v.min())/2 * t2
-         + (w.max()+w.min())/2 * n)
-    mesh.translate(ctr)
+    mesh.translate(ctr_3d)
     ls = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
     ls.paint_uniform_color(_COLOR["cuboid"])
     return ls

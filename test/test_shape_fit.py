@@ -320,48 +320,26 @@ def _detect_2d_corners(pts_2d: np.ndarray,
 def _complete_rectangle_2d(corners: np.ndarray,
                             pts_2d: np.ndarray) -> np.ndarray:
     """
-    Given M detected corners, complete a rectangle by mirroring and return
-    exactly 4 corners in CCW angular order.
+    Return exactly 4 rectangle corners in CCW angular order.
 
-    M == 4  → order and return as-is
-    M == 3  → 4th corner = P0 + P2 − P1  (parallelogram / mirror rule)
-    M == 2  → the pair defines one edge; extend perpendicularly by the cloud
-              width in that direction (signed toward the cloud centroid)
-    M other → fall back to cv2.minAreaRect of pts_2d
+    M == 4  → the four detected corners are already known; order and return.
+    M other → fall back to cv2.minAreaRect of the full projected cloud.
+
+    Note: partial-completion heuristics (parallelogram rule for M==3, edge
+    extension for M==2) were removed because they require the detected corners
+    to be exactly consecutive rectangle vertices — an assumption that breaks
+    silently with noisy point clouds and produces skewed wireframes.
+    minAreaRect is more robust when fewer than 4 clean corners are found.
     """
     def _ccw(c: np.ndarray) -> np.ndarray:
         ctr    = c.mean(axis=0)
         angles = np.arctan2(c[:, 1] - ctr[1], c[:, 0] - ctr[0])
         return c[np.argsort(angles)]
 
-    m = len(corners)
-
-    if m == 4:
+    if len(corners) == 4:
         return _ccw(corners)
 
-    if m == 3:
-        c  = _ccw(corners)
-        p3 = c[0] + c[2] - c[1]          # mirror: complete the parallelogram
-        return _ccw(np.vstack([c, p3]))
-
-    if m == 2:
-        p0, p1   = corners[0], corners[1]
-        edge_v   = p1 - p0
-        edge_len = np.linalg.norm(edge_v)
-        if edge_len > 1e-9:
-            eu   = edge_v / edge_len
-            perp = np.array([-eu[1], eu[0]])
-            mid  = (p0 + p1) / 2.0
-            # Width = PCD extent perpendicular to the known edge
-            proj  = (pts_2d - mid) @ perp
-            width = float(proj.max() - proj.min())
-            # Shift toward the cloud centroid side
-            direction = np.sign((pts_2d.mean(axis=0) - mid) @ perp) or 1.0
-            p2 = p1 + direction * width * perp
-            p3 = p0 + direction * width * perp
-            return _ccw(np.array([p0, p1, p2, p3]))
-
-    # Fallback: minimum-area bounding rectangle
+    # Fallback: minimum-area bounding rectangle of the full point cloud
     pts_f = pts_2d.astype(np.float32).reshape(-1, 1, 2)
     box   = cv2.boxPoints(cv2.minAreaRect(pts_f)).astype(float)
     return _ccw(box)
@@ -571,18 +549,32 @@ def _estimate_height(pts, normals, axis, centroid):
 
 class _ShapeTracker:
     """
-    Maintains a temporally-smoothed estimate of the cylinder parameters.
+    Maintains a temporally-smoothed estimate of the cylinder parameters AND
+    a voted commitment to the current shape type ("cylinder" | "cuboid").
 
+    Shape voting
+    ------------
+    Per-frame classifier output is noisy.  The shape type is decided by a
+    streak-and-lock mechanism identical to the orientation locking:
+      · After _N_LOCK consecutive frames agree on the same shape, the type
+        is *locked* — the wireframe type stops flickering.
+      · While locked, _N_UNLOCK consecutive opposing frames are required to
+        flip — preventing noise-driven oscillation.
+      · Until locked, the most recent raw vote is shown directly so the user
+        can see the classifier converging.
+
+    Cylinder parameter smoothing
+    ----------------------------
     Each call to update() blends one frame's raw fit into the running estimate
-    via EMA, then returns the smoothed parameters used to build the wireframe.
+    via EMA.  reset() clears only these cylinder parameters; shape voting state
+    is intentionally preserved so a transient cuboid frame doesn't erase the
+    accumulated streak.
 
     Orientation locking
     -------------------
     After N_LOCK consecutive frames agree on "vertical" or "horizontal", the
-    orientation is locked.  While locked, the axis is forced to the locked
-    direction regardless of what the current frame estimates.
-    Unlocking requires N_UNLOCK consecutive opposing frames — making accidental
-    flips very unlikely without a real change in the scene.
+    orientation is locked.  Unlocking requires N_UNLOCK consecutive opposing
+    frames.
     """
 
     def __init__(self):
@@ -591,12 +583,64 @@ class _ShapeTracker:
         self._locked    = False
         self._flip_str  = 0         # consecutive frames with opposing orient
 
-        # Smoothed parameters
+        # Smoothed cylinder parameters
         self.axis    = None         # (3,) unit vector
         self.axis_pt = None         # (3,) point on axis
         self.radius  = None         # float (m)
         self.h_ctr   = None         # (h_min+h_max)/2
         self.height  = None         # h_max-h_min
+
+        # Shape voting — separate state so reset() does not clear it
+        self.shape          = None  # committed shape: "cylinder" | "cuboid" | None
+        self._shape_streak  = 0     # consecutive frames voting for self.shape
+        self._shape_locked  = False
+        self._shape_flip    = 0     # consecutive opposing frames while locked
+
+    # ── Shape voting ──────────────────────────────────────────────────────────
+
+    def vote_shape(self, raw_shape: str) -> str:
+        """
+        Submit one frame's raw shape vote and return the currently committed
+        shape type.
+
+        Before the shape locks (< _N_LOCK consistent votes), the most recent
+        raw vote is returned so the user sees the classifier converging.
+        After locking, the committed type is returned until _N_UNLOCK
+        consecutive opposing votes force a flip.
+        """
+        if self.shape is None:
+            # Very first frame — initialise with no commitment yet
+            self.shape         = raw_shape
+            self._shape_streak = 1
+            self._shape_locked = False
+            self._shape_flip   = 0
+            return raw_shape
+
+        if raw_shape == self.shape:
+            self._shape_flip = 0
+            if not self._shape_locked:
+                self._shape_streak += 1
+                if self._shape_streak >= _N_LOCK:
+                    self._shape_locked = True
+                    print(f"[shape_fit]  *** shape LOCKED → {self.shape} ***")
+        else:
+            if self._shape_locked:
+                self._shape_flip += 1
+                if self._shape_flip >= _N_UNLOCK:
+                    print(f"[shape_fit]  *** shape UNLOCKED → {raw_shape} ***")
+                    self.shape         = raw_shape
+                    self._shape_locked = False
+                    self._shape_streak = 1
+                    self._shape_flip   = 0
+            else:
+                # Not yet locked: new vote resets the streak toward raw_shape
+                self.shape         = raw_shape
+                self._shape_streak = 1
+                self._shape_flip   = 0
+
+        return self.shape
+
+    # ── Cylinder parameter update ─────────────────────────────────────────────
 
     def update(self, raw_orient, raw_axis, raw_axis_pt, raw_r,
                raw_h_min, raw_h_max, raw_err, table_normal):
@@ -643,7 +687,16 @@ class _ShapeTracker:
         return self.axis, self.axis_pt, self.radius, h_min, h_max
 
     def reset(self):
-        self.__init__()
+        """Reset cylinder parameters only; shape voting state is preserved."""
+        self.orient    = None
+        self._streak   = 0
+        self._locked   = False
+        self._flip_str = 0
+        self.axis      = None
+        self.axis_pt   = None
+        self.radius    = None
+        self.h_ctr     = None
+        self.height    = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -771,17 +824,28 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: _ShapeTracker):
     else:
         sp,sn  = pts, normals
 
-    # ① Curvature + classify
+    # ① Curvature + classify + shape voting
     # For classification we need the projection axis; use table_normal when
     # available (it's always our vertical), fall back to raw curvature axis.
     k1, k2, raw_axis = _aggregate_curvatures(sp, sn)
     _cls_axis = (table_normal.copy() if table_normal is not None
                  else (raw_axis if raw_axis is not None
                        else np.array([0., 0., 1.])))
-    shape = _classify(k1, k2, sp, sn, _cls_axis)
-    print(f"[shape_fit]  κ₁={k1:+.2f}  κ₂={k2:+.2f}  → {shape}")
+    raw_shape = _classify(k1, k2, sp, sn, _cls_axis)
 
-    if shape == "cuboid" or raw_axis is None:
+    # Vote: only commit to a shape after _N_LOCK consecutive agreeing frames.
+    # raw_axis is None means we genuinely cannot do a cylinder fit — override
+    # the vote and force cuboid immediately without burning a vote.
+    if raw_axis is None:
+        shape = "cuboid"
+    else:
+        shape = tracker.vote_shape(raw_shape)
+
+    print(f"[shape_fit]  κ₁={k1:+.2f}  κ₂={k2:+.2f}  "
+          f"raw={raw_shape}  committed={shape}  "
+          f"streak={tracker._shape_streak}  locked={tracker._shape_locked}")
+
+    if shape == "cuboid":
         tracker.reset()
         _cub_axis = table_normal if table_normal is not None else _cls_axis
         return "cuboid", _build_cuboid(pts, _cub_axis)

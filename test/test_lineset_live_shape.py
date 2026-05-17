@@ -437,11 +437,8 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
     opt.line_width       = 3.0
     opt.background_color = np.array([1.0, 1.0, 1.0])
 
-    pcd         = o3d.geometry.PointCloud()
-    grasp_ls    = _empty_lineset()
-    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
-        size=0.05, origin=[0.0, 0.0, 0.0]
-    )
+    pcd      = o3d.geometry.PointCloud()
+    grasp_ls = _empty_lineset()
 
     geom_added     = False
     zoom_fitted    = False
@@ -475,7 +472,6 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
             if not geom_added:
                 vis.add_geometry(pcd)
                 vis.add_geometry(grasp_ls)
-                vis.add_geometry(coord_frame)
                 geom_added = True
             else:
                 vis.update_geometry(pcd)

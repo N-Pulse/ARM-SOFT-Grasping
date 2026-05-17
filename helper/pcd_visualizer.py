@@ -151,6 +151,10 @@ def show_isolated_pcd(
     pcd_accum   = o3d.geometry.PointCloud() if _do_accum else None
     accum_added = False
 
+    # ── Movement detection — clear history when the object shifts ──────────
+    _MOVE_THRESH_M     = 0.015   # 1.5 cm in 3-D; below this is stationary
+    _prev_obj_centroid: "np.ndarray | None" = None
+
     print("[pcd_visualizer] Window open — close the Open3D window or press Ctrl+C to stop.")
     if debug:
         print("[pcd_visualizer] DEBUG MODE — showing full point cloud.")
@@ -202,6 +206,19 @@ def show_isolated_pcd(
                 # ── Accumulated cloud ──────────────────────────────────────
                 if _do_accum:
                     if has_obj:
+                        # Detect object movement — clear history if it shifted.
+                        curr_centroid = np.mean(obj_verts, axis=0)
+                        if _prev_obj_centroid is not None:
+                            dist = float(np.linalg.norm(
+                                curr_centroid - _prev_obj_centroid))
+                            if dist > _MOVE_THRESH_M:
+                                _accum_buf.clear()
+                                if accum_added:
+                                    vis.remove_geometry(pcd_accum,
+                                                        reset_bounding_box=False)
+                                    accum_added = False
+                        _prev_obj_centroid = curr_centroid
+
                         _accum_buf.append(
                             (obj_verts.copy(), obj_colors.copy()))
 
@@ -228,12 +245,14 @@ def show_isolated_pcd(
                         else:
                             vis.update_geometry(pcd_accum)
 
-                    elif accum_added:
+                    else:
                         # Object lost — clear the accumulated cloud.
-                        vis.remove_geometry(pcd_accum,
-                                            reset_bounding_box=False)
-                        accum_added = False
+                        if accum_added:
+                            vis.remove_geometry(pcd_accum,
+                                                reset_bounding_box=False)
+                            accum_added = False
                         _accum_buf.clear()
+                        _prev_obj_centroid = None
 
                 # ── Per-frame callback ─────────────────────────────────────
                 # Always called (even when obj_verts is empty) so the callback

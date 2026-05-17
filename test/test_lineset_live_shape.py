@@ -535,7 +535,7 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
                 trajectory_msg.joint_names.append('joint_wrist_x')
                 trajectory_msg.joint_names.append('joint_wrist_y')
                 point = JointTrajectoryPoint()
-                point.time_from_start = 5
+                point.time_from_start = Duration(sec=5, nanosec=0)
                 point.positions.append(bearing_deg)
                 point.positions.append(elevation_deg)
                 trajectory_msg.points.append(point)

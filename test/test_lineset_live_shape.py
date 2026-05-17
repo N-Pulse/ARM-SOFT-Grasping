@@ -55,6 +55,63 @@ from helper.pcd_visualizer import auto_zoom
 from test_shape_fit import detect_table_plane
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Background fit thread
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ShapeFitThread:
+    """
+    Background thread that runs fit_and_track on incoming point-cloud frames.
+
+    A single-slot input queue holds the most recent obj_verts; stale frames
+    are dropped if the worker is busy.  The latest (shape, ls) result is
+    stored internally and consumed by pop().
+    """
+
+    def __init__(self, table_normal, tracker):
+        self._table_normal = table_normal
+        self._tracker      = tracker
+        self._in           = queue.Queue(maxsize=1)
+        self._out          = {"shape": None, "ls": None}
+        self._lock         = threading.Lock()
+        self._thread       = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            try:
+                verts = self._in.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if verts is None:       # sentinel — shut down
+                break
+            shape, ls = fit_and_track(verts, self._table_normal, self._tracker)
+            if ls is not None:
+                with self._lock:
+                    self._out["shape"] = shape
+                    self._out["ls"]    = ls
+
+    def push(self, verts: np.ndarray):
+        """Push a new frame (drops the queued one if the worker is busy)."""
+        try:
+            self._in.get_nowait()
+        except queue.Empty:
+            pass
+        self._in.put(verts.copy())
+
+    def pop(self):
+        """Return (shape, ls) if a new result is ready, else (None, None)."""
+        with self._lock:
+            shape           = self._out["shape"]
+            ls              = self._out["ls"]
+            self._out["ls"] = None  # consume so the same result is not returned twice
+        return shape, ls
+
+    def stop(self):
+        """Send shutdown sentinel to the worker thread."""
+        self._in.put(None)
+
+
 # ── Chessboard defaults ────────────────────────────────────────────────────────
 _BOARD_COLS = 10
 _BOARD_ROWS = 7
@@ -288,40 +345,10 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
     print("YOLO ready — opening viewer.\n")
     print("Running — close the Open3D window or Ctrl+C to stop.\n")
 
-    # ── Shape-fit + grasp background thread ───────────────────────────────────
+    # ── Shape-fit background thread ────────────────────────────────────────────
     tracker  = ShapeTracker()
     smoother = GraspSmoother()
-
-    _fit_in   = queue.Queue(maxsize=1)
-    _fit_out  = {"shape": None, "shape_ls": None, "grasp": None}
-    _fit_lock = threading.Lock()
-
-    def _fit_worker():
-        while True:
-            try:
-                verts = _fit_in.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            if verts is None:       # sentinel — shut down
-                break
-
-            shape, shape_ls = fit_and_track(verts, table_normal, tracker)
-            if shape is None or shape_ls is None:
-                continue
-
-            new_rot, new_trans = _grasp_from_shape(shape, tracker, shape_ls)
-            if new_rot is None:
-                continue
-
-            rot, trans = smoother.update(new_rot, new_trans)
-
-            with _fit_lock:
-                _fit_out["shape"]    = shape
-                _fit_out["shape_ls"] = shape_ls
-                _fit_out["grasp"]    = (rot, trans)
-
-    fit_thread = threading.Thread(target=_fit_worker, daemon=True)
-    fit_thread.start()
+    fitter   = ShapeFitThread(table_normal, tracker)
 
     # ── Clean-exit flag ────────────────────────────────────────────────────────
     _stop = threading.Event()
@@ -411,12 +438,7 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
                     tmp = tmp.voxel_down_sample(_ACCUM_VOXEL_M)
                 fit_pts = np.asarray(tmp.points)
 
-                # Push accumulated cloud to shape fitter (drop stale if busy)
-                try:
-                    _fit_in.get_nowait()
-                except queue.Empty:
-                    pass
-                _fit_in.put(fit_pts)
+                fitter.push(fit_pts)
             else:
                 _accum_buf.clear()
                 _prev_centroid = None
@@ -424,12 +446,14 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
         except queue.Empty:
             pass
 
-        # ── Pull latest shape wireframe ──────────────────────────────────────
-        with _fit_lock:
-            new_shape    = _fit_out["shape"]
-            new_shape_ls = _fit_out["shape_ls"]
-            new_grasp    = _fit_out["grasp"]
-            _fit_out["shape_ls"] = None   # consume
+        # ── Pull latest shape wireframe + compute grasp ───────────────────────
+        new_shape, new_shape_ls = fitter.pop()
+        new_grasp = None
+        if new_shape_ls is not None:
+            new_rot, new_trans = _grasp_from_shape(new_shape, tracker, new_shape_ls)
+            if new_rot is not None:
+                rot, trans = smoother.update(new_rot, new_trans)
+                new_grasp = (rot, trans)
 
         if new_shape_ls is not None and geom_added:
             if new_shape != last_shape:
@@ -483,7 +507,7 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
 
     # ── Teardown ──────────────────────────────────────────────────────────────
     print("\n[test_lineset_live_shape] shutting down...")
-    _fit_in.put(None)
+    fitter.stop()
     isolator.stop()
     cv2.destroyAllWindows()
     vis.destroy_window()

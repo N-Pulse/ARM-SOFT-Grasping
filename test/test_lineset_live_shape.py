@@ -526,8 +526,8 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
                 
                 # Send object type and position
                 object_msg = Float64MultiArray()
-                shape = 1 # 0 for cube, 1 for cylinder
-                object_msg.data = [shape, distance_m, 0, 0, 0, 0, 0] #[object_type, x, y, z, roll, pitch, yaw]
+                shape = 1. # 0 for cube, 1 for cylinder
+                object_msg.data = [shape, distance_m, 0., 0., 0., 0., 0.] #[object_type, x, y, z, roll, pitch, yaw]
                 object_publisher.publish(object_msg)
 
                 # Send wrist rotation

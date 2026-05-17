@@ -526,16 +526,29 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
             if new_rot is not None:
                 rot, trans = smoother.update(new_rot, new_trans)
                 new_grasp = (rot, trans)
-
                 distance_m, elevation_deg, bearing_deg = _object_params(rot, trans)
-                msg = Float64MultiArray()
-                msg.data = [distance_m, elevation_deg, bearing_deg]
-                object_publisher.publish(msg)
+                
+                # Send object type and position
+                object_msg = Float64MultiArray()
+                shape = 1 # 0 for cube, 1 for cylinder
+                object_msg.data = [shape, distance_m, 0, 0, 0, 0, 0] #[object_type, x, y, z, roll, pitch, yaw]
+                object_publisher.publish(object_msg)
 
-                #send close hand command to simulation
-                pose = Int8()
-                pose.data = 1
-                pose_publisher.publish(pose)    
+                # Send wrist rotation
+                trajectory_msg = JointTrajectory()
+                trajectory_msg.joint_names.append('joint_wrist_x')
+                trajectory_msg.joint_names.append('joint_wrist_y')
+                point = JointTrajectoryPoint()
+                point.time_from_start = 5
+                point.positions.append(bearing_deg)
+                point.positions.append(elevation_deg)
+                trajectory_msg.points.append(point)
+                trajectory_publisher.publish(trajectory_msg)
+
+                # Send close hand command to simulation
+                pose_msg = Int8()
+                pose_msg.data = 1
+                pose_publisher.publish(pose_msg)    
 
         if new_shape_ls is not None and geom_added:
             if new_shape != last_shape:

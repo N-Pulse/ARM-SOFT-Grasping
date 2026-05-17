@@ -38,6 +38,7 @@ import signal
 import threading
 import time
 import argparse
+from collections import deque
 
 _HERE = os.path.dirname(__file__)
 _ROOT = os.path.abspath(os.path.join(_HERE, ".."))
@@ -48,7 +49,7 @@ import cv2
 import numpy as np
 import open3d as o3d
 
-from capture.object_isolation import ObjectIsolator
+from capture.object_isolation import ObjectIsolator, keep_largest_cluster
 from capture.shape_fitter import ShapeTracker, fit_and_track
 from helper.pcd_visualizer import auto_zoom
 from test_shape_fit import detect_table_plane
@@ -57,6 +58,11 @@ from test_shape_fit import detect_table_plane
 # ── Chessboard defaults ────────────────────────────────────────────────────────
 _BOARD_COLS = 10
 _BOARD_ROWS = 7
+
+# ── Frame accumulation (mirrors pcd_visualizer.show_isolated_pcd) ─────────────
+_ACCUM_FRAMES  = 20      # number of past frames merged into the shape-fit cloud
+_ACCUM_VOXEL_M = 0.003   # voxel size (m) for downsampling the accumulated cloud
+_MOVE_THRESH_M = 0.015   # clear history when object moves more than this (m)
 
 # ── Gripper geometry ───────────────────────────────────────────────────────────
 FINGER_LENGTH   = 0.085
@@ -345,6 +351,10 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
     shape_ls_geom  = None
     last_shape     = None
 
+    # ── Frame accumulation (same logic as pcd_visualizer.show_isolated_pcd) ──
+    _accum_buf       = deque(maxlen=_ACCUM_FRAMES)
+    _prev_centroid   = None
+
     RENDER_INTERVAL = 1.0 / 30.0
     _last_render    = 0.0
     frame_ready     = False
@@ -380,13 +390,36 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
             if preview_bgr is not None:
                 cv2.imshow(CV2_WIN, preview_bgr)
 
-            # Push to shape fitter (drop stale frame if worker is busy)
+            # ── Accumulate frames and push dense cloud to shape fitter ────────
             if len(obj_verts) > 0:
+                # Clear history if the object moved significantly
+                curr_centroid = obj_verts.mean(axis=0)
+                if _prev_centroid is not None:
+                    if np.linalg.norm(curr_centroid - _prev_centroid) > _MOVE_THRESH_M:
+                        _accum_buf.clear()
+                _prev_centroid = curr_centroid
+
+                _accum_buf.append((obj_verts.copy(), obj_colors.copy()))
+
+                # Merge, cluster-filter, and voxel-downsample accumulated cloud
+                all_pts  = np.concatenate([v for v, _ in _accum_buf])
+                all_cols = np.concatenate([c for _, c in _accum_buf])
+                all_pts, all_cols = keep_largest_cluster(all_pts, all_cols)
+                tmp = o3d.geometry.PointCloud()
+                tmp.points = o3d.utility.Vector3dVector(all_pts)
+                if _ACCUM_VOXEL_M > 0:
+                    tmp = tmp.voxel_down_sample(_ACCUM_VOXEL_M)
+                fit_pts = np.asarray(tmp.points)
+
+                # Push accumulated cloud to shape fitter (drop stale if busy)
                 try:
                     _fit_in.get_nowait()
                 except queue.Empty:
                     pass
-                _fit_in.put(obj_verts.copy())
+                _fit_in.put(fit_pts)
+            else:
+                _accum_buf.clear()
+                _prev_centroid = None
 
         except queue.Empty:
             pass

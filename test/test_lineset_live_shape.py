@@ -50,110 +50,15 @@ from capture.object_isolation import ObjectIsolator
 from capture.shape_fitter import ShapeTracker, fit_and_track
 from grasp_pipeline_graspnet import load_model, GraspInferenceThread
 from helper.pcd_visualizer import auto_zoom
+from test_shape_fit import detect_table_plane
 
 
 # ── Chessboard defaults ────────────────────────────────────────────────────────
 _BOARD_COLS = 10
 _BOARD_ROWS = 7
-_SQUARE_M   = 0.015
 
 # ── Sampling ───────────────────────────────────────────────────────────────────
 _SHAPE_SAMPLE_N = 2000   # surface points sampled from fitted geometry for GraspNet
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TABLE PLANE DETECTION  (same logic as test_shape_fit.py)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def detect_table_plane(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
-    """
-    Stream RealSense frames until a chessboard is found; fit plane via SVD.
-    Returns (table_normal, d)  or  (None, None) on ESC.
-    """
-    import pyrealsense2 as rs
-
-    board_shape = (board_cols, board_rows)
-    criteria    = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-
-    pipe  = rs.pipeline()
-    cfg   = rs.config()
-    cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-    cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16,  30)
-    align = rs.align(rs.stream.color)
-
-    profile     = pipe.start(cfg)
-    intr        = (profile.get_stream(rs.stream.color)
-                          .as_video_stream_profile().get_intrinsics())
-    depth_scale = (profile.get_device().first_depth_sensor().get_depth_scale())
-    fx, fy, cx, cy = intr.fx, intr.fy, intr.ppx, intr.ppy
-
-    print(f"\n[table]  Board inner corners {board_cols}×{board_rows}, "
-          f"square {_SQUARE_M*1000:.0f} mm")
-    print("[table]  Show chessboard to camera.  ESC to skip.\n")
-
-    try:
-        while True:
-            frames  = pipe.wait_for_frames()
-            aligned = align.process(frames)
-            cf, df  = aligned.get_color_frame(), aligned.get_depth_frame()
-            if not cf or not df:
-                continue
-
-            img   = np.asarray(cf.get_data())
-            depth = np.asarray(df.get_data()).astype(np.float32) * depth_scale
-
-            gray         = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            found, corners = cv2.findChessboardCorners(gray, board_shape, None)
-
-            disp = img.copy()
-            if found:
-                cv2.drawChessboardCorners(disp, board_shape, corners, True)
-            cv2.putText(disp,
-                        "FOUND — hold still" if found else "Searching …",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                        (0, 220, 0) if found else (0, 80, 255), 2)
-            cv2.imshow("Table plane detection  [ESC to skip]", disp)
-            if cv2.waitKey(1) == 27:
-                cv2.destroyAllWindows()
-                return None, None
-            if not found:
-                continue
-
-            corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
-
-            pts3 = []
-            for (u, v) in corners.reshape(-1, 2):
-                ui, vi = int(round(u)), int(round(v))
-                if not (0 <= ui < depth.shape[1] and 0 <= vi < depth.shape[0]):
-                    continue
-                z = float(depth[vi, ui])
-                if z < 0.05 or z > 3.0:
-                    continue
-                pts3.append([(u - cx)*z/fx, (v - cy)*z/fy, z])
-
-            if len(pts3) < 6:
-                continue
-
-            pts3     = np.array(pts3)
-            centroid = pts3.mean(axis=0)
-            _, _, Vt = np.linalg.svd(pts3 - centroid)
-            normal   = Vt[-1] / np.linalg.norm(Vt[-1])
-            d        = -float(normal @ centroid)
-            if float(normal @ centroid) < 0:
-                normal, d = -normal, -d
-
-            res = float(np.abs((pts3 - centroid) @ normal).mean())
-            if res > 0.005:
-                print(f"[table]  Residual {res*1000:.1f} mm — retry")
-                continue
-
-            print(f"[table]  ✓  normal={np.round(normal,3)}  "
-                  f"residual={res*1000:.2f} mm\n")
-            cv2.waitKey(400)
-            cv2.destroyAllWindows()
-            return normal, d
-    finally:
-        pipe.stop()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -241,7 +146,7 @@ GRIPPER_COLOR = [1.0, 0.4, 0.0]
 def _gripper_lineset(rot, trans, width):
     approach   = rot[:, 0]
     closing    = rot[:, 1]
-    half_w     = width / 2.0
+    half_w     = 0.06 / 2.0
 
     tip_center = trans + approach * FINGER_LENGTH
     palm_back  = trans - approach * PALM_DEPTH

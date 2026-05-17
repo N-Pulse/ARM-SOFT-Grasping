@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import math
 import queue
+from collections import deque
 from typing import TYPE_CHECKING
 
 import cv2
+import numpy as np
 import open3d as o3d
 
 if TYPE_CHECKING:
@@ -90,6 +92,8 @@ def show_isolated_pcd(
     on_new_frame=None,
     debug: bool = False,
     camera_up=(0, -1, 0),
+    accum_frames: int = 20,
+    accum_voxel_m: float = 0.003,
 ) -> None:
     """Spin up an Open3D window and stream frames from *isolator*.
 
@@ -112,14 +116,23 @@ def show_isolated_pcd(
     frame_timeout:
         Seconds to wait on the frame queue before polling the window again.
     on_new_frame : callable(obj_verts, vis) | None
-        Optional callback invoked every frame when isolated object points are
-        available.  Ignored when ``debug=True``.
+        Optional callback invoked every frame (even when obj_verts is empty)
+        so the callback can react to object loss and reset its state.
+        Ignored when ``debug=True``.
     debug : bool
         When True, always display the full scene point cloud (object in real
         colour, background grayed out) and auto-zoom on the first frame
         regardless of whether an object has been isolated.  The
         ``on_new_frame`` callback is skipped.  Useful for verifying camera
         coverage and depth filtering without needing a detected object.
+    accum_frames : int
+        Number of past isolated-object frames to accumulate into a dense
+        smoothed cloud shown alongside the live frame.  Set to 0 to disable.
+        Default: 20.
+    accum_voxel_m : float
+        Voxel size (metres) for downsampling the accumulated cloud before
+        display.  Keeps point count manageable even with many frames.
+        Default: 3 mm.  Set to 0 to skip downsampling.
     """
     CV2_WIN = "Camera Preview"
 
@@ -127,9 +140,16 @@ def show_isolated_pcd(
     vis.create_window(title, width=width, height=height)
     cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
 
-    pcd         = o3d.geometry.PointCloud()
-    geom_added  = False   # True after add_geometry; camera is set on that same frame
+    # ── Live frame geometry ────────────────────────────────────────────────
+    pcd        = o3d.geometry.PointCloud()
+    geom_added = False    # True after first add_geometry
     zoom_fitted = False   # True after auto_zoom fires on first isolated cloud
+
+    # ── Accumulated cloud geometry ─────────────────────────────────────────
+    _do_accum   = (not debug) and (accum_frames > 0)
+    _accum_buf  = deque(maxlen=accum_frames) if _do_accum else None
+    pcd_accum   = o3d.geometry.PointCloud() if _do_accum else None
+    accum_added = False
 
     print("[pcd_visualizer] Window open — close the Open3D window or press Ctrl+C to stop.")
     if debug:
@@ -137,19 +157,27 @@ def show_isolated_pcd(
 
     try:
         while True:
-            # --- pull the latest frame -----------------------------------------
+            # --- pull the latest frame ----------------------------------------
             try:
                 verts, raw_colors, full_colors, obj_verts, obj_colors, preview_bgr = \
                     isolator._frame_queue.get(timeout=frame_timeout)
 
-                # ── Choose which points/colours to display ──────────────────
+                has_obj = len(obj_verts) > 0
+
+                # ── Choose which points/colours to display ─────────────────
                 if debug:
-                    # Full scene with original, unmodified colours.
                     pts  = verts
                     cols = raw_colors
+                elif has_obj:
+                    pts  = obj_verts
+                    # Dim the live frame so the accumulated cloud reads as
+                    # the "truth" — accumulated stays at full brightness.
+                    cols = obj_colors * 0.45
                 else:
-                    pts  = obj_verts  if len(obj_verts)  > 0 else verts
-                    cols = obj_colors if len(obj_colors) > 0 else full_colors
+                    # No object detected: fall back to full scene at normal
+                    # brightness (no accumulation to compete with).
+                    pts  = verts
+                    cols = full_colors
 
                 pcd.points = o3d.utility.Vector3dVector(pts)
                 pcd.colors = o3d.utility.Vector3dVector(cols)
@@ -157,7 +185,6 @@ def show_isolated_pcd(
                 if not geom_added:
                     vis.add_geometry(pcd)
                     if debug:
-                        # Debug: fixed camera matching test_pointcloud_open3d.py
                         ctr = vis.get_view_control()
                         ctr.set_lookat([0, 0, 0.4])
                         ctr.set_front([0, 0, -1])
@@ -167,27 +194,64 @@ def show_isolated_pcd(
                 else:
                     vis.update_geometry(pcd)
 
-                # Auto-zoom once onto the first isolated object cloud (normal mode).
-                if not debug and not zoom_fitted and len(obj_verts) > 0:
+                # Auto-zoom once onto the first isolated object cloud.
+                if not debug and not zoom_fitted and has_obj:
                     iso_pcd = o3d.geometry.PointCloud()
                     iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
                     auto_zoom(vis, iso_pcd, camera_up=camera_up)
                     zoom_fitted = True
 
-                # Optional per-frame callback (skipped in debug mode).
-                # Always called — even when obj_verts is empty — so the
-                # callback can react to object loss (e.g. reset its tracker).
+                # ── Accumulated cloud ──────────────────────────────────────
+                if _do_accum:
+                    if has_obj:
+                        _accum_buf.append(
+                            (obj_verts.copy(), obj_colors.copy()))
+
+                        # Concatenate all buffered frames
+                        all_pts  = np.concatenate([v for v, _ in _accum_buf])
+                        all_cols = np.concatenate([c for _, c in _accum_buf])
+
+                        # Build temp cloud and voxel-downsample
+                        tmp = o3d.geometry.PointCloud()
+                        tmp.points = o3d.utility.Vector3dVector(all_pts)
+                        tmp.colors = o3d.utility.Vector3dVector(all_cols)
+                        if accum_voxel_m > 0:
+                            tmp = tmp.voxel_down_sample(accum_voxel_m)
+
+                        pcd_accum.points = tmp.points
+                        pcd_accum.colors = tmp.colors
+
+                        if not accum_added:
+                            # Don't reset bounding-box/camera when adding the
+                            # second geometry — preserves auto_zoom orientation.
+                            vis.add_geometry(pcd_accum,
+                                             reset_bounding_box=False)
+                            accum_added = True
+                        else:
+                            vis.update_geometry(pcd_accum)
+
+                    elif accum_added:
+                        # Object lost — clear the accumulated cloud.
+                        vis.remove_geometry(pcd_accum,
+                                            reset_bounding_box=False)
+                        accum_added = False
+                        _accum_buf.clear()
+
+                # ── Per-frame callback ─────────────────────────────────────
+                # Always called (even when obj_verts is empty) so the callback
+                # can react to object loss (e.g. full_reset tracker, remove
+                # wireframe).  Skipped in debug mode.
                 if not debug and on_new_frame is not None:
                     on_new_frame(obj_verts, vis)
 
-                # ── cv2 preview ─────────────────────────────────────────────
+                # ── cv2 preview ────────────────────────────────────────────
                 if preview_bgr is not None:
                     cv2.imshow(CV2_WIN, preview_bgr)
 
             except queue.Empty:
                 pass
 
-            # --- service both GUI event loops ----------------------------------
+            # --- service both GUI event loops ---------------------------------
             if not vis.poll_events():
                 break
             vis.update_renderer()

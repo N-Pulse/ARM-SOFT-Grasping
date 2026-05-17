@@ -54,6 +54,12 @@ from capture.shape_fitter import ShapeTracker, fit_and_track
 from helper.pcd_visualizer import auto_zoom
 from test_shape_fit import detect_table_plane
 
+import rclpy
+from rclpy.node import Node
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from std_msgs.msg import Int8
+from std_msgs.msg import Float64MultiArray
+from builtin_interfaces.msg import Duration
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Background fit thread
@@ -329,6 +335,9 @@ def _empty_lineset():
     return ls
 
 
+def ros_spin(node): # for continuous publishing
+    rclpy.spin(node)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
@@ -349,6 +358,16 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
     tracker  = ShapeTracker()
     smoother = GraspSmoother()
     fitter   = ShapeFitThread(table_normal, tracker)
+    
+    # ── ROS2 node start ────────────────────────────────────────────────────────
+    rclpy.init() # initialize ROS2
+    node = Node('CV_publisher_node')
+    object_publisher = node.create_publisher(Float64MultiArray, '/cv/model', 10)
+    trajectory_publisher = node.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
+    pose_publisher = node.create_publisher(Int8, 'pose_goals', 10)
+
+    ros_thread = threading.Thread(target=ros_spin, args=(node,), daemon=True)
+    ros_thread.start()
 
     # ── Clean-exit flag ────────────────────────────────────────────────────────
     _stop = threading.Event()
@@ -455,6 +474,11 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
                 rot, trans = smoother.update(new_rot, new_trans)
                 new_grasp = (rot, trans)
 
+                #send close hand command to simulation
+                pose = Int8()
+                pose.data = 1
+                pose_publisher.publish(pose)    
+
         if new_shape_ls is not None and geom_added:
             if new_shape != last_shape:
                 # Topology changed (cylinder ↔ cuboid) — must remove + re-add
@@ -507,10 +531,12 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
 
     # ── Teardown ──────────────────────────────────────────────────────────────
     print("\n[test_lineset_live_shape] shutting down...")
+    _stop.set()  # Signal stop
     fitter.stop()
     isolator.stop()
     cv2.destroyAllWindows()
     vis.destroy_window()
+    ros_thread.join(timeout=2)  # Wait for ROS thread to finish
     print("[test_lineset_live_shape] done.")
 
 

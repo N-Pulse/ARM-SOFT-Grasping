@@ -87,10 +87,20 @@ def _empty_lineset():
     ls.colors = o3d.utility.Vector3dVector([[0, 0, 0]])
     return ls
 
-
+def ros_spin(node): # for continuous publishing
+    rclpy.spin(node)
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run(checkpoint, device="cuda"):
+    rclpy.init() # initialize ROS2
+    node = Node('CV_publisher_node')
+    object_publisher = node.create_publisher(Float64MultiArray, '/cv/model', 10)
+    trajectory_publisher = node.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
+    pose_publisher = node.create_publisher(Int8, 'pose_goals', 10)
+
+    ros_thread = threading.Thread(target=ros_spin, args=(node,), daemon=True)
+    ros_thread.start()
+
     if device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA not available — pass --device cpu")
 
@@ -105,13 +115,6 @@ def run(checkpoint, device="cuda"):
     print("Running — close the Open3D window or Ctrl+C to stop.\n")
 
     grasp_thread = GraspInferenceThread(model, device=device, interval=0.5)
-
-    rclpy.init() # initialize ROS2
-    node = Node('CV_publisher_node')
-    object_publisher = node.create_publisher(Float64MultiArray, '/cv/model', 10)
-    trajectory_publisher = node.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
-    pose_publisher = node.create_publisher(Int8, 'pose_goals', 10)
-    rclpy.spin(node) # for continuous publishing
 
     # ── Clean-exit flag — set by Ctrl+C or window close ──────────────────────
     _stop = threading.Event()
@@ -196,10 +199,10 @@ def run(checkpoint, device="cuda"):
             rot, trans, width = grasp
             new_ls = _gripper_lineset(rot, trans, width)
 
-            #publish here ??
+            #ros publish
             pose = Int8()
             pose.data = 1
-            pose_publisher.publish(pose)
+            pose_publisher.publish(pose)    
 
             if not lineset_ready and geom_added:
                 # First real grasp: replace the empty placeholder with correct
@@ -236,11 +239,13 @@ def run(checkpoint, device="cuda"):
 
     # ── Ordered teardown ──────────────────────────────────────────────────────
     print("\n[test_lineset_live] shutting down...")
+    _stop.set()  # Signal stop
     rclpy.shutdown()
     grasp_thread.stop()
     isolator.stop()
     cv2.destroyAllWindows()
     vis.destroy_window()
+    ros_thread.join(timeout=2)  # Wait for ROS thread to finish
     print("[test_lineset_live] done.")
 
 

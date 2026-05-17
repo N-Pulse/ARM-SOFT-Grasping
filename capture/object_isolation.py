@@ -94,8 +94,8 @@ DBSCAN_SKIP_CENTER_PX  = 8     # skip if bbox centre moved < this many pixels
 DBSCAN_SKIP_SIZE_RATIO = 0.12  # skip if bbox area changed < this fraction
 
 
-def _keep_largest_cluster(verts: np.ndarray,
-                          colors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def keep_largest_cluster(verts: np.ndarray,
+                         colors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return only the points in the largest DBSCAN cluster.
 
     If no cluster is found or the input is too small, the original arrays are
@@ -394,7 +394,7 @@ class ObjectIsolator:
                         obj_verts_raw  = verts[inside]
                         obj_colors_raw = colors[inside]
                     else:
-                        obj_verts_raw, obj_colors_raw = _keep_largest_cluster(
+                        obj_verts_raw, obj_colors_raw = keep_largest_cluster(
                             verts[inside], colors[inside]
                         )
                         _cached_cluster = (obj_verts_raw, obj_colors_raw)

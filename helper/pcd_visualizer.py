@@ -25,6 +25,8 @@ import cv2
 import numpy as np
 import open3d as o3d
 
+from capture.object_isolation import keep_largest_cluster
+
 if TYPE_CHECKING:
     from capture.object_isolation import ObjectIsolator
 
@@ -204,6 +206,13 @@ def show_isolated_pcd(
                     zoom_fitted = True
 
                 # ── Accumulated cloud ──────────────────────────────────────
+                # _fit_pts: the point cloud passed to on_new_frame.
+                # When accumulation is on and an object is present, this is the
+                # DBSCAN-filtered union of the last accum_frames frames so the
+                # shape fitter sees dense, clean historical data rather than a
+                # single noisy frame.
+                _fit_pts = obj_verts   # default: current frame only
+
                 if _do_accum:
                     if has_obj:
                         # Detect object movement — clear history if it shifted.
@@ -226,7 +235,13 @@ def show_isolated_pcd(
                         all_pts  = np.concatenate([v for v, _ in _accum_buf])
                         all_cols = np.concatenate([c for _, c in _accum_buf])
 
-                        # Build temp cloud and voxel-downsample
+                        # Remove outliers from the merged historical cloud so
+                        # the shape fitter only receives the dominant cluster.
+                        all_pts, all_cols = keep_largest_cluster(
+                            all_pts, all_cols)
+                        _fit_pts = all_pts   # pass clean history to callback
+
+                        # Build temp cloud and voxel-downsample for display
                         tmp = o3d.geometry.PointCloud()
                         tmp.points = o3d.utility.Vector3dVector(all_pts)
                         tmp.colors = o3d.utility.Vector3dVector(all_cols)
@@ -258,8 +273,10 @@ def show_isolated_pcd(
                 # Always called (even when obj_verts is empty) so the callback
                 # can react to object loss (e.g. full_reset tracker, remove
                 # wireframe).  Skipped in debug mode.
+                # _fit_pts is the filtered accumulated cloud when accumulation
+                # is active, otherwise the raw current-frame obj_verts.
                 if not debug and on_new_frame is not None:
-                    on_new_frame(obj_verts, vis)
+                    on_new_frame(_fit_pts, vis)
 
                 # ── cv2 preview ────────────────────────────────────────────
                 if preview_bgr is not None:

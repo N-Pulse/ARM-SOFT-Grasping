@@ -24,8 +24,8 @@ try:
     import rclpy
     from rclpy.node import Node
 except:
-    print('Ros is not installed')
-
+    print('ROS is not installed')
+    
 def run(debug: bool = False):
     isolator = ObjectIsolator(min_points=50)
     isolator.start()

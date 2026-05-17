@@ -6,9 +6,6 @@ import open3d as o3d
 import pyrealsense2 as rs
 
 
-MIN_DEPTH = 0.07
-MAX_DEPTH = 0.70
-
 
 class PointcloudViewer:
     """
@@ -67,14 +64,7 @@ def _capture_loop(frame_queue: queue.Queue, stop_event: threading.Event):
     depth_sensor = profile.get_device().first_depth_sensor()
     depth_sensor.set_option(rs.option.visual_preset, 4)
 
-    align    = rs.align(rs.stream.color)
-    spatial  = rs.spatial_filter()
-    temporal = rs.temporal_filter()
-    holes    = rs.hole_filling_filter()
-    spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
-    spatial.set_option(rs.option.filter_smooth_delta, 20)
-    temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
-    temporal.set_option(rs.option.filter_smooth_delta, 20)
+    align   = rs.align(rs.stream.color)
     pc_util = rs.pointcloud()
 
     try:
@@ -86,19 +76,10 @@ def _capture_loop(frame_queue: queue.Queue, stop_event: threading.Event):
             if not depth_fr or not color_fr:
                 continue
 
-            depth_fr = spatial.process(depth_fr)
-            depth_fr = temporal.process(depth_fr)
-            depth_fr = holes.process(depth_fr)
-
             pc_util.map_to(color_fr)
             points    = pc_util.calculate(depth_fr)
             verts     = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
             texcoords = np.asanyarray(points.get_texture_coordinates()).view(np.float32).reshape(-1, 2)
-
-            depth  = np.linalg.norm(verts, axis=1)
-            valid  = (depth > MIN_DEPTH) & (depth < MAX_DEPTH)
-            verts     = verts[valid]
-            texcoords = texcoords[valid]
 
             bgr  = np.asanyarray(color_fr.get_data())
             h, w = bgr.shape[:2]

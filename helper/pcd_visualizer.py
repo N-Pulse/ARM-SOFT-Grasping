@@ -32,7 +32,8 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 def auto_zoom(vis: o3d.visualization.Visualizer,
-              pcd: o3d.geometry.PointCloud) -> None:
+              pcd: o3d.geometry.PointCloud,
+              camera_up=(0, -1, 0)) -> None:
     """Point the camera at the true centroid of the isolated cloud and zoom
     so its bounding box fills ~80 % of the window height.
 
@@ -69,10 +70,10 @@ def auto_zoom(vis: o3d.visualization.Visualizer,
     zoom = max(0.05, min(zoom, 1.5))
 
     ctr = vis.get_view_control()
-    ctr.set_lookat(centroid)    # centre on the point-cloud mean
-    ctr.set_front([0, 0, -1])  # look along -Z (into the scene)
-    ctr.set_up([0, -1, 0])     # -Y is up in RealSense camera space
-    ctr.set_zoom(zoom)          # fill 80 % of the window
+    ctr.set_lookat(centroid)      # centre on the point-cloud mean
+    ctr.set_front([0, 0, -1])    # look along -Z (into the scene)
+    ctr.set_up(list(camera_up))  # caller chooses the "up" convention
+    ctr.set_zoom(zoom)            # fill 80 % of the window
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,7 @@ def show_isolated_pcd(
     frame_timeout: float = 0.1,
     on_new_frame=None,
     debug: bool = False,
+    camera_up=(0, -1, 0),
 ) -> None:
     """Spin up an Open3D window and stream frames from *isolator*.
 
@@ -159,7 +161,7 @@ def show_isolated_pcd(
                         ctr = vis.get_view_control()
                         ctr.set_lookat([0, 0, 0.4])
                         ctr.set_front([0, 0, -1])
-                        ctr.set_up([0, -1, 0])
+                        ctr.set_up(list(camera_up))
                         ctr.set_zoom(0.2)
                     geom_added = True
                 else:
@@ -169,7 +171,7 @@ def show_isolated_pcd(
                 if not debug and not zoom_fitted and len(obj_verts) > 0:
                     iso_pcd = o3d.geometry.PointCloud()
                     iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
-                    auto_zoom(vis, iso_pcd)
+                    auto_zoom(vis, iso_pcd, camera_up=camera_up)
                     zoom_fitted = True
 
                 # Optional per-frame callback (skipped in debug mode)

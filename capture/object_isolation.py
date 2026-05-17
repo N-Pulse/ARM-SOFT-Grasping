@@ -87,6 +87,12 @@ RED_MIN_AREA  = 500   # minimum contour area in pixels (rejects noise specks)
 CLUSTER_EPS        = 0.02   # 2 cm — max neighbour distance within a cluster
 CLUSTER_MIN_POINTS = 10     # fragments smaller than this are discarded
 
+# ─── DBSCAN skip thresholds ───────────────────────────────────────────────────
+# DBSCAN is expensive; skip it when the detected bounding box hasn't moved or
+# grown/shrunk noticeably since the last frame.
+DBSCAN_SKIP_CENTER_PX  = 8     # skip if bbox centre moved < this many pixels
+DBSCAN_SKIP_SIZE_RATIO = 0.12  # skip if bbox area changed < this fraction
+
 
 def _keep_largest_cluster(verts: np.ndarray,
                           colors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -311,9 +317,11 @@ class ObjectIsolator:
         print("[ObjectIsolator] camera ready — colour-based (red) detection active.")
         self.ready.set()
 
-        last_mask  = None
-        last_box   = None
-        _last_log  = 0.0
+        last_mask    = None
+        last_box     = None
+        _last_log    = 0.0
+        _prev_box    = None          # bbox from previous frame, for DBSCAN skip check
+        _cached_cluster: tuple | None = None  # (obj_verts_raw, obj_colors_raw)
 
         try:
             while not self._stop_event.is_set():
@@ -362,13 +370,38 @@ class ObjectIsolator:
                     inside         = last_mask[v, u]
                     full_colors    = np.full_like(colors, 0.35)
                     full_colors[inside] = colors[inside]
-                    obj_verts_raw, obj_colors_raw = _keep_largest_cluster(
-                        verts[inside], colors[inside]
-                    )
+
+                    # Skip DBSCAN when the bounding box hasn't changed much.
+                    skip_dbscan = False
+                    if _prev_box is not None and last_box is not None and _cached_cluster is not None:
+                        prev_cx = (_prev_box[0] + _prev_box[2]) / 2.0
+                        prev_cy = (_prev_box[1] + _prev_box[3]) / 2.0
+                        curr_cx = (last_box[0]  + last_box[2])  / 2.0
+                        curr_cy = (last_box[1]  + last_box[3])  / 2.0
+                        center_moved = np.hypot(curr_cx - prev_cx, curr_cy - prev_cy)
+
+                        prev_area = (_prev_box[2] - _prev_box[0]) * (_prev_box[3] - _prev_box[1])
+                        curr_area = (last_box[2]  - last_box[0])  * (last_box[3]  - last_box[1])
+                        size_change = abs(curr_area - prev_area) / max(float(prev_area), 1.0)
+
+                        skip_dbscan = (center_moved < DBSCAN_SKIP_CENTER_PX and
+                                       size_change  < DBSCAN_SKIP_SIZE_RATIO)
+
+                    if skip_dbscan:
+                        obj_verts_raw, obj_colors_raw = _cached_cluster
+                    else:
+                        obj_verts_raw, obj_colors_raw = _keep_largest_cluster(
+                            verts[inside], colors[inside]
+                        )
+                        _cached_cluster = (obj_verts_raw, obj_colors_raw)
+
+                    _prev_box = last_box
                 else:
                     full_colors    = colors
                     obj_verts_raw  = np.zeros((0, 3), np.float32)
                     obj_colors_raw = np.zeros((0, 3), np.float32)
+                    _prev_box       = None   # force fresh DBSCAN on next detection
+                    _cached_cluster = None
 
                 # ── 6. cv2 preview ────────────────────────────────────────
                 preview_bgr = bgr.copy()

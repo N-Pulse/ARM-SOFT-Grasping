@@ -41,6 +41,12 @@ from capture.object_isolation import ObjectIsolator
 from grasp_pipeline_graspnet import load_model, GraspInferenceThread
 from helper.pcd_visualizer import auto_zoom
 
+import rclpy
+from rclpy.node import Node
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from std_msgs.msg import Int8
+from std_msgs.msg import Float64MultiArray
+from builtin_interfaces.msg import Duration
 
 # ── Gripper geometry ──────────────────────────────────────────────────────────
 
@@ -99,6 +105,13 @@ def run(checkpoint, device="cuda"):
     print("Running — close the Open3D window or Ctrl+C to stop.\n")
 
     grasp_thread = GraspInferenceThread(model, device=device, interval=0.5)
+
+    rclpy.init() # initialize ROS2
+    node = Node('CV_publisher_node')
+    object_publisher = node.create_publisher(Float64MultiArray, '/cv/model', 10)
+    trajectory_publisher = node.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
+    pose_publisher = node.create_publisher(Int8, 'pose_goals', 10)
+    rclpy.spin(node) # for continuous publishing
 
     # ── Clean-exit flag — set by Ctrl+C or window close ──────────────────────
     _stop = threading.Event()
@@ -182,6 +195,12 @@ def run(checkpoint, device="cuda"):
             last_grasp = grasp
             rot, trans, width = grasp
             new_ls = _gripper_lineset(rot, trans, width)
+
+            #publish here ??
+            pose = Int8()
+            pose.data = 1
+            pose_publisher.publish(pose)
+
             if not lineset_ready and geom_added:
                 # First real grasp: replace the empty placeholder with correct
                 # topology (different point/line count) — remove then re-add.
@@ -217,6 +236,7 @@ def run(checkpoint, device="cuda"):
 
     # ── Ordered teardown ──────────────────────────────────────────────────────
     print("\n[test_lineset_live] shutting down...")
+    rclpy.shutdown()
     grasp_thread.stop()
     isolator.stop()
     cv2.destroyAllWindows()

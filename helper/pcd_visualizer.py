@@ -174,8 +174,10 @@ def show_isolated_pcd(
                     auto_zoom(vis, iso_pcd, camera_up=camera_up)
                     zoom_fitted = True
 
-                # Optional per-frame callback (skipped in debug mode)
-                if not debug and on_new_frame is not None and len(obj_verts) > 0:
+                # Optional per-frame callback (skipped in debug mode).
+                # Always called — even when obj_verts is empty — so the
+                # callback can react to object loss (e.g. reset its tracker).
+                if not debug and on_new_frame is not None:
                     on_new_frame(obj_verts, vis)
 
                 # ── cv2 preview ─────────────────────────────────────────────

@@ -183,6 +183,17 @@ def _make_overlay_callback(table_normal):
     _thread.start()
 
     def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer):
+        # ── Object lost — full reset so next object starts fresh ──────────────
+        if len(obj_verts) == 0:
+            tracker.full_reset()
+            # Remove stale wireframe from the scene
+            if state["ls"] is not None:
+                vis.remove_geometry(state["ls"], reset_bounding_box=False)
+                state["ls"]    = None
+                state["label"] = None
+                vis.update_renderer()
+            return
+
         # Push latest frame (drop the previous queued one if worker is busy)
         try:
             _fit_in.get_nowait()
@@ -236,7 +247,7 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS, debug=False):
             isolator,
             on_new_frame=_make_overlay_callback(table_normal),
             debug=debug,
-            camera_up=(0, 1, 0),   # flip to standard up convention (not RealSense Y-down)
+            camera_up=(0, -1, 0),  # RealSense Y-down convention — same as test_obj_iso
         )
     finally:
         isolator.stop()

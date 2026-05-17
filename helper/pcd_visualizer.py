@@ -170,9 +170,7 @@ def show_isolated_pcd(
                     cols = raw_colors
                 elif has_obj:
                     pts  = obj_verts
-                    # Dim the live frame so the accumulated cloud reads as
-                    # the "truth" — accumulated stays at full brightness.
-                    cols = obj_colors * 0.45
+                    cols = obj_colors
                 else:
                     # No object detected: fall back to full scene at normal
                     # brightness (no accumulation to compete with).

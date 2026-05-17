@@ -214,7 +214,10 @@ def _make_overlay_callback(table_normal):
 
         # Update Open3D geometry (must stay on main/render thread)
         if state["ls"] is None:
-            vis.add_geometry(new_ls)
+            # reset_bounding_box=False preserves the camera orientation set by
+            # auto_zoom — without it, add_geometry calls reset_view_point which
+            # overrides the camera_up convention and flips the point cloud.
+            vis.add_geometry(new_ls, reset_bounding_box=False)
             state["ls"] = new_ls
             vis.get_view_control().set_lookat(obj_verts.mean(axis=0).tolist())
         else:

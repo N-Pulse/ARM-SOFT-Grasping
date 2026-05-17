@@ -77,7 +77,7 @@ _EDGE_KNN              = 12    # kNN for normal-coherence edge scoring
 _EDGE_COHERENCE_THRESH = 0.60  # normal coherence below this → edge/corner point
 _EDGE_FRAC_CUBOID      = 0.06  # > 6 % edge points → strong cuboid signal
 _CORNER_ANGLE_MAX      = 120.0 # convex-hull vertex interior angle ≤ this → rigid corner
-_MIN_CORNERS_CUBOID    = 1     # even a single detected corner is strong cuboid evidence
+_MIN_CORNERS_CUBOID    = 2     # at least two rigid hull corners required → strong cuboid evidence
 
 # ── Normal-distribution classifier ────────────────────────────────────────────
 # A cylinder's lateral normals fan out uniformly in all azimuths around the axis
@@ -85,6 +85,10 @@ _MIN_CORNERS_CUBOID    = 1     # even a single detected corner is strong cuboid 
 # (one per visible flat face), leaving large empty sectors and low entropy.
 _NORMAL_HIST_BINS      = 36    # 10 ° per bin
 _NORMAL_CLUSTER_THRESH = 0.35  # normalised entropy below this → clustered → cuboid
+
+# ── Statistical outlier removal ───────────────────────────────────────────────
+_SOR_NEIGHBORS = 20         # kNN radius for mean-distance statistics
+_SOR_STD_RATIO = 2.0        # points > this many σ above the mean are removed
 
 # ── Tracker ────────────────────────────────────────────────────────────────────
 _ALPHA     = 0.20           # EMA base learning rate
@@ -217,6 +221,42 @@ def _complete_rectangle_2d(corners: np.ndarray,
     pts_f = pts_2d.astype(np.float32).reshape(-1, 1, 2)
     box   = cv2.boxPoints(cv2.minAreaRect(pts_f)).astype(float)
     return _ccw(box)
+
+
+def _fit_rect_percentile(pts_2d: np.ndarray,
+                         lo: float = 1.0,
+                         hi: float = 99.0) -> np.ndarray:
+    """
+    Fit a tight rectangle to a 2-D point set.
+
+    Uses cv2.minAreaRect for orientation (robust to partial visibility), then
+    projects all points onto each axis and uses (lo, hi) percentile bounds for
+    the extents.  This keeps the wireframe edges aligned with the visible
+    surface rather than extending to the most extreme — often noisy — points.
+
+    Returns (4, 2) corners in CCW angular order.
+    """
+    pts_f = pts_2d.astype(np.float32).reshape(-1, 1, 2)
+    _, _, angle = cv2.minAreaRect(pts_f)
+
+    rad = np.deg2rad(angle)
+    ax1 = np.array([ np.cos(rad), np.sin(rad)])
+    ax2 = np.array([-np.sin(rad), np.cos(rad)])
+
+    p1 = pts_2d @ ax1
+    p2 = pts_2d @ ax2
+    mn1, mx1 = float(np.percentile(p1, lo)), float(np.percentile(p1, hi))
+    mn2, mx2 = float(np.percentile(p2, lo)), float(np.percentile(p2, hi))
+
+    corners = np.array([
+        mn1 * ax1 + mn2 * ax2,
+        mx1 * ax1 + mn2 * ax2,
+        mx1 * ax1 + mx2 * ax2,
+        mn1 * ax1 + mx2 * ax2,
+    ])
+    ctr    = corners.mean(axis=0)
+    angles = np.arctan2(corners[:, 1] - ctr[1], corners[:, 0] - ctr[0])
+    return corners[np.argsort(angles)]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -589,14 +629,14 @@ def _build_cylinder(axis, axis_pt, r, h_min, h_max):
 
 def _build_cuboid(pts: np.ndarray, axis: np.ndarray) -> o3d.geometry.LineSet:
     """
-    Build a tight cuboid wireframe using the known axis and visible vertices
-    detected from the point cloud, then mirror to complete the rectangle.
+    Build a cuboid wireframe whose faces align with the point-cloud surface.
 
     Algorithm
     ---------
     1. Project pts onto the plane ⊥ axis (the horizontal footprint).
-    2. Find convex-hull vertices whose interior angle ≤ _CORNER_ANGLE_MAX.
-    3. Complete the rectangle (4 found → use directly; else minAreaRect).
+    2. Use _fit_rect_percentile to determine orientation (minAreaRect) and
+       extents (percentile projections) — avoids outlier-driven expansion.
+    3. Use percentile bounds for height as well.
     4. Reconstruct 8 3D vertices and build the 12-edge LineSet.
     """
     n   = axis.copy()
@@ -615,14 +655,8 @@ def _build_cuboid(pts: np.ndarray, axis: np.ndarray) -> o3d.geometry.LineSet:
     h_max = float(np.percentile(w, 99))
     h_min = h_min if h_max - h_min > 0.005 else h_min - 0.0025
 
-    if len(pts) > 500:
-        idx    = np.random.choice(len(pts), 500, replace=False)
-        sub_2d = pts_2d[idx]
-    else:
-        sub_2d = pts_2d
-
-    corners_2d   = _detect_2d_corners(sub_2d)
-    rect_corners = _complete_rectangle_2d(corners_2d, pts_2d)  # (4, 2) CCW
+    # Percentile-based 2-D rectangle — tight surface alignment
+    rect_corners = _fit_rect_percentile(pts_2d)   # (4, 2) CCW
 
     mean_horiz = mean_pt - (mean_pt @ n) * n
 
@@ -676,6 +710,19 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
       locked cylinder→ skip curvature/classify  → normals + circle fit only
                        (~15 ms vs ~80 ms unlocked)
     """
+    if len(pts) < 50:
+        return None, None
+
+    # ── Statistical outlier removal ────────────────────────────────────────
+    # Removes stray points (edge leakage, reflections) that distort normals,
+    # curvature, entropy, and the fitted geometry.  Runs before every path,
+    # including the fast cuboid rebuild, so the wireframe stays tight even
+    # after the shape is locked.
+    _tmp = o3d.geometry.PointCloud()
+    _tmp.points = o3d.utility.Vector3dVector(pts)
+    _tmp, _ = _tmp.remove_statistical_outlier(
+        nb_neighbors=_SOR_NEIGHBORS, std_ratio=_SOR_STD_RATIO)
+    pts = np.asarray(_tmp.points)
     if len(pts) < 50:
         return None, None
 

@@ -335,6 +335,59 @@ def _empty_lineset():
     return ls
 
 
+def _object_params(rot, trans):
+    """
+    Compute distance and wrist orientation from the grasp pose.
+
+    Camera frame convention (RealSense): X right, Y down, Z forward.
+
+    Parameters
+    ----------
+    rot   : (3, 3) ndarray
+              rot[:, 0]  approach — palm → fingertips (toward object)
+              rot[:, 1]  closing  — axis between the two fingers
+              rot[:, 2]  cross(approach, closing)
+    trans : (3,) ndarray — object centroid in camera frame (metres)
+
+    Returns
+    -------
+    distance_m    : float
+        Euclidean distance from the camera origin to the object centroid (m).
+
+    elevation_deg : float  — UP / DOWN wrist rotation
+        Elevation of the approach axis (palm → fingertips) from horizontal.
+        Describes how much the wrist is tilted upward or downward.
+          0°   → wrist level, hand approaches horizontally
+        +90°   → wrist tilted fully up, hand approaches from below aiming up
+        -90°   → wrist tilted fully down, hand approaches from above aiming down
+
+    bearing_deg   : float  — LEFT / RIGHT wrist rotation
+        Bearing of the approach axis in the horizontal (XZ) plane.
+        Describes how much the wrist has rotated left or right from straight ahead.
+          0°   → wrist straight forward (neutral)
+        +90°   → wrist rotated 90° to the right
+        -90°   → wrist rotated 90° to the left
+
+    Neutral reference — palm flat down, arm pointing forward along camera Z:
+        approach = [0, 0, 1]  →  elevation = 0°,  bearing = 0°
+    """
+    distance_m = float(np.linalg.norm(trans))
+    approach   = rot[:, 0]
+
+    # UP / DOWN — elevation of the approach axis from horizontal
+    # Camera Y is down, so the "up" component of approach is -approach[1]
+    # Positive = wrist tilted upward (hand aims above horizontal)
+    # Negative = wrist tilted downward (hand aims below horizontal)
+    elevation_deg = float(np.degrees(np.arcsin(np.clip(-approach[1], -1.0, 1.0))))
+
+    # LEFT / RIGHT — bearing of the approach axis in the horizontal (XZ) plane
+    # arctan2(X-component, Z-component): 0° = straight forward, +90° = right, -90° = left
+    # Positive = wrist rotated to the right, negative = rotated to the left
+    bearing_deg = float(np.degrees(np.arctan2(approach[0], approach[2])))
+
+    return distance_m, elevation_deg, bearing_deg
+
+
 def ros_spin(node): # for continuous publishing
     rclpy.spin(node)
 
@@ -473,6 +526,11 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
             if new_rot is not None:
                 rot, trans = smoother.update(new_rot, new_trans)
                 new_grasp = (rot, trans)
+
+                distance_m, elevation_deg, bearing_deg = _object_params(rot, trans)
+                msg = Float64MultiArray()
+                msg.data = [distance_m, elevation_deg, bearing_deg]
+                object_publisher.publish(msg)
 
                 #send close hand command to simulation
                 pose = Int8()

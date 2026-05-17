@@ -388,7 +388,11 @@ class ObjectIsolator:
                                        size_change  < DBSCAN_SKIP_SIZE_RATIO)
 
                     if skip_dbscan:
-                        obj_verts_raw, obj_colors_raw = _cached_cluster
+                        # Use fresh points from the current frame so the
+                        # visualiser updates in real time; skip the expensive
+                        # DBSCAN clustering step only.
+                        obj_verts_raw  = verts[inside]
+                        obj_colors_raw = colors[inside]
                     else:
                         obj_verts_raw, obj_colors_raw = _keep_largest_cluster(
                             verts[inside], colors[inside]

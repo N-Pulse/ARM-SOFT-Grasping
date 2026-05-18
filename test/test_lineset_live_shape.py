@@ -3,23 +3,37 @@ test/test_lineset_live_shape.py
 ===============================
 Live gripper-lineset overlay derived from the FITTED SHAPE geometry.
 
-The grasp pose is a deterministic function of the cylinder / cuboid
-parameters produced by shape_fitter.  Those parameters are already
-EMA-smoothed and lock-tracked inside ShapeTracker — so the grasp pose
-converges and locks on EXACTLY the same clock as the shape, with no
-extra smoothing layer.
+Threading model
+---------------
+  Background worker thread   FitWorker
+    · fit_and_track         (shape fitting + EMA + lock voting)
+    · _grasp_from_shape     (pose from smoothed shape params)
+    · _fill_gripper_pts     (6-point gripper skeleton)
+    · _object_params        (only on lock rising edge)
+    · ROS2 publish          (only on lock rising edge)
+    → writes a result dict into a single shared slot under a lock
 
-Pipeline (identical to test_shape_fit.py, with grasp drawing layered on top)
-----------------------------------------------------------------------------
-  1. Detect table plane via chessboard          (detect_table_plane)
-  2. Start ObjectIsolator                       (capture.object_isolation)
-  3. show_isolated_pcd(isolator, on_new_frame)  (helper.pcd_visualizer)
-  4. Per-frame callback `_make_grasp_callback`:
-        a. ShapeFitThread → fit_and_track → shape + smoothed parameters
-        b. Update shape wireframe
-        c. _grasp_from_shape → approach / closing vectors from smoothed params
-        d. Update persistent gripper lineset in place
-        e. Publish ROS2 messages on the shape-lock rising edge ONLY
+  Main / render thread       _on_frame callback (via show_isolated_pcd)
+    · pulls latest result from the worker
+    · applies geometry updates to the Open3D Visualizer
+    → does NO computation: only add_geometry / update_geometry / remove_geometry
+
+Because all the heavy work lives on the worker, the render loop stays
+responsive and the display no longer lags behind the camera.
+
+Convergence clock
+-----------------
+ShapeTracker EMA-smooths the shape parameters and toggles ``_shape_locked``
+after _N_LOCK consistent votes.  ``_grasp_from_shape`` is a deterministic
+function of those smoothed parameters, so the grasp pose converges and
+locks on exactly the same clock as the shape — no second smoother.
+
+Pipeline (identical to test_shape_fit.py)
+-----------------------------------------
+  1. Detect table plane via chessboard         (detect_table_plane)
+  2. Start ObjectIsolator                      (capture.object_isolation)
+  3. show_isolated_pcd(isolator, on_new_frame) (helper.pcd_visualizer)
+  4. Per-frame callback handles geometry only.
 
 Usage
 -----
@@ -72,71 +86,18 @@ FINGER_DISTANCE = 0.06
 GRIPPER_COLOR   = [1.0, 0.4, 0.0]
 _GRIPPER_LINES  = [[0, 1], [1, 2], [1, 3], [2, 4], [3, 5]]
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Background fit thread
-# ══════════════════════════════════════════════════════════════════════════════
-
-class ShapeFitThread:
-    """
-    Run fit_and_track on a worker thread; never block the render loop.
-
-    Single-slot input queue — the worker always processes the most recent
-    frame and silently drops stale ones.
-    """
-
-    def __init__(self, table_normal, tracker):
-        self._table_normal = table_normal
-        self._tracker      = tracker
-        self._in           = queue.Queue(maxsize=1)
-        self._out          = {"shape": None, "ls": None}
-        self._lock         = threading.Lock()
-        self._thread       = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def _run(self):
-        while True:
-            try:
-                verts = self._in.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            if verts is None:
-                break
-            shape, ls = fit_and_track(verts, self._table_normal, self._tracker)
-            if ls is not None:
-                with self._lock:
-                    self._out["shape"] = shape
-                    self._out["ls"]    = ls
-
-    def push(self, verts: np.ndarray):
-        try:
-            self._in.get_nowait()
-        except queue.Empty:
-            pass
-        self._in.put(verts.copy())
-
-    def pop(self):
-        with self._lock:
-            shape           = self._out["shape"]
-            ls              = self._out["ls"]
-            self._out["ls"] = None
-        return shape, ls
-
-    def stop(self):
-        self._in.put(None)
+# ── ROS joint trajectory ───────────────────────────────────────────────────────
+_JOINT_NAMES = ['joint_base_x', 'joint_base_y', 'joint_base_z',
+                'joint_wrist_x', 'joint_wrist_y']
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Grasp geometry derived from the (already-smoothed) shape parameters
+# Pure-math helpers (run on the worker thread)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _grasp_from_shape(shape, tracker, shape_ls):
     """
-    Compute (rot, trans) from the fitted shape.
-
-    All inputs (tracker.axis / axis_pt / radius / h_ctr / height; cuboid
-    wireframe vertices) are already EMA-smoothed by ShapeTracker, so the
-    output pose converges and locks on the tracker's clock.
+    Compute (rot, trans) from the smoothed shape parameters.
 
       rot[:, 0]  approach  — palm → fingertips
       rot[:, 1]  closing   — between the two fingers
@@ -148,9 +109,8 @@ def _grasp_from_shape(shape, tracker, shape_ls):
         if axis is None or axis_pt is None or tracker.h_ctr is None:
             return None, None
 
-        trans = axis_pt + axis * tracker.h_ctr   # cylinder centroid
+        trans = axis_pt + axis * tracker.h_ctr
 
-        # Approach: camera → centre, projected ⊥ axis (horizontal grip)
         to_obj   = trans / (np.linalg.norm(trans) + 1e-9)
         approach = to_obj - (to_obj @ axis) * axis
         nrm      = np.linalg.norm(approach)
@@ -174,7 +134,6 @@ def _grasp_from_shape(shape, tracker, shape_ls):
         trans    = verts.mean(axis=0)
         approach = trans / (np.linalg.norm(trans) + 1e-9)
 
-        # Bottom corners — pick footprint edge most ⊥ to approach for closing
         bot = verts[::2]
         e1  = bot[1] - bot[0];  e1 /= (np.linalg.norm(e1) + 1e-9)
         e2  = bot[2] - bot[1];  e2 /= (np.linalg.norm(e2) + 1e-9)
@@ -215,11 +174,8 @@ def _fill_gripper_pts(pts: np.ndarray, rot, trans):
 
 def _object_params(rot, trans, shape, tracker, shape_ls):
     """
-    From the grasp pose, return (distance_m, elevation_deg, bearing_deg,
-    hand_pos) in the simulation frame.
-
-    Camera frame: X right, Y down, Z forward.
-    Sim frame:    X forward, Y left, Z down.
+    Returns (distance_m, elevation_deg, bearing_deg, hand_pos) in the
+    simulation frame (X forward, Y left, Z down).
     """
     distance_m = float(np.linalg.norm(trans))
     approach   = rot[:, 0]
@@ -245,27 +201,144 @@ def _object_params(rot, trans, shape, tracker, shape_ls):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ON-NEW-FRAME CALLBACK
+# FitWorker — all calculation lives here, off the render thread
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _make_grasp_callback(table_normal,
-                         object_publisher,
-                         trajectory_publisher,
-                         pose_publisher):
+class FitWorker:
     """
-    Build a callback compatible with show_isolated_pcd that:
-      · runs shape fitting on a background thread,
-      · updates the shape wireframe,
-      · updates the gripper lineset (in place, persistent geometry),
-      · publishes the grasp to ROS once on the shape-lock rising edge.
+    Background pipeline runner.
 
-    Convergence clock — the only EMA in play is ShapeTracker's, which
-    governs both the shape parameters and the derived grasp pose.
+    Input  : point clouds pushed via .push(verts)  (drops stale frames)
+    Output : latest result dict polled via .pop()  (consumed once)
+
+    The result dict, when present, contains:
+        shape       : "cylinder" | "cuboid"
+        shape_ls    : o3d.geometry.LineSet (fresh each fit)
+        grasp_pts   : (6, 3) np.ndarray (gripper skeleton, valid iff has_grasp)
+        has_grasp   : bool
+        centroid    : (3,) np.ndarray  — used for one-shot lookat
     """
-    tracker = ShapeTracker()
-    fitter  = ShapeFitThread(table_normal, tracker)
 
-    # Persistent gripper geometry — 6 pts × 5 lines, never re-topologised.
+    def __init__(self, table_normal, object_pub, traj_pub, pose_pub):
+        self._table_normal = table_normal
+        self._object_pub   = object_pub
+        self._traj_pub     = traj_pub
+        self._pose_pub     = pose_pub
+
+        self._tracker      = ShapeTracker()
+        self._was_locked   = False
+
+        self._in           = queue.Queue(maxsize=1)
+        self._out          = None
+        self._lock         = threading.Lock()
+        self._thread       = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    # ── Public API (called from main thread) ──────────────────────────────────
+
+    def push(self, verts: np.ndarray):
+        try:
+            self._in.get_nowait()
+        except queue.Empty:
+            pass
+        self._in.put(verts.copy())
+
+    def pop(self):
+        with self._lock:
+            r = self._out
+            self._out = None
+        return r
+
+    def reset(self):
+        """Object lost — clear tracker + any pending result."""
+        self._tracker.full_reset()
+        self._was_locked = False
+        with self._lock:
+            self._out = None
+
+    def stop(self):
+        self._in.put(None)
+
+    # ── Worker loop ───────────────────────────────────────────────────────────
+
+    def _run(self):
+        while True:
+            try:
+                verts = self._in.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if verts is None:
+                break
+
+            # 1. Shape fit (already EMA-smoothed inside the tracker)
+            shape, shape_ls = fit_and_track(
+                verts, self._table_normal, self._tracker)
+            if shape_ls is None:
+                continue
+
+            # 2. Grasp pose from smoothed parameters (same clock as the shape)
+            rot, trans = _grasp_from_shape(shape, self._tracker, shape_ls)
+            has_grasp  = rot is not None
+
+            grasp_pts = np.zeros((6, 3))
+            if has_grasp:
+                _fill_gripper_pts(grasp_pts, rot, trans)
+
+            # 3. ROS publish on the shape-lock rising edge
+            is_locked = bool(self._tracker._shape_locked)
+            if has_grasp and is_locked and not self._was_locked:
+                self._publish(shape, rot, trans, shape_ls)
+            self._was_locked = is_locked
+
+            # 4. Hand the result to the render thread
+            with self._lock:
+                self._out = {
+                    "shape":     shape,
+                    "shape_ls":  shape_ls,
+                    "grasp_pts": grasp_pts,
+                    "has_grasp": has_grasp,
+                    "centroid":  verts.mean(axis=0),
+                }
+
+    # ── ROS publish (worker thread; rclpy publishers are thread-safe) ─────────
+
+    def _publish(self, shape, rot, trans, shape_ls):
+        d_m, elev, bear, hand = _object_params(
+            rot, trans, shape, self._tracker, shape_ls)
+
+        obj = Float64MultiArray()
+        obj.data = [1. if shape == "cylinder" else 0.,
+                    d_m, 0., 0., 0., 0., 0.]
+        self._object_pub.publish(obj)
+
+        traj = JointTrajectory()
+        traj.joint_names = _JOINT_NAMES
+        pt = JointTrajectoryPoint()
+        pt.time_from_start = Duration(sec=5, nanosec=0)
+        pt.positions = [hand[0] - 0.12, hand[1], hand[2],
+                        np.deg2rad(bear), np.deg2rad(elev)]
+        traj.points.append(pt)
+        self._traj_pub.publish(traj)
+
+        pose = Int8()
+        pose.data = 1
+        self._pose_pub.publish(pose)
+
+        print(f"[grasp]  *** LOCKED & PUBLISHED  trans={np.round(trans, 3)}  "
+              f"elev={elev:+.1f}°  bear={bear:+.1f}° ***")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ON-NEW-FRAME CALLBACK (main thread — render only)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _make_grasp_callback(worker: FitWorker):
+    """
+    Build a render-thread callback that does nothing but apply the worker's
+    latest result to the Open3D scene.
+    """
+
+    # Persistent gripper LineSet — 6 pts × 5 lines, never re-topologised.
     grasp_pts = np.zeros((6, 3))
     grasp_ls  = o3d.geometry.LineSet()
     grasp_ls.points = o3d.utility.Vector3dVector(grasp_pts)
@@ -273,41 +346,11 @@ def _make_grasp_callback(table_normal,
     grasp_ls.colors = o3d.utility.Vector3dVector([GRIPPER_COLOR] * len(_GRIPPER_LINES))
 
     state = {
-        "shape_ls":    None,
-        "label":       None,
+        "shape_ls":    None,    # current shape wireframe handle in the scene
+        "label":       None,    # last shape type drawn
         "grasp_added": False,
         "lookat_set":  False,
-        "was_locked":  False,
     }
-
-    # Reusable ROS message templates — joint_names never change.
-    _joint_names = ['joint_base_x', 'joint_base_y', 'joint_base_z',
-                    'joint_wrist_x', 'joint_wrist_y']
-
-    def _publish(new_shape, rot, trans):
-        d_m, elev, bear, hand = _object_params(
-            rot, trans, new_shape, tracker, state["shape_ls"])
-
-        obj = Float64MultiArray()
-        obj.data = [1. if new_shape == "cylinder" else 0.,
-                    d_m, 0., 0., 0., 0., 0.]
-        object_publisher.publish(obj)
-
-        traj = JointTrajectory()
-        traj.joint_names = _joint_names
-        pt = JointTrajectoryPoint()
-        pt.time_from_start = Duration(sec=5, nanosec=0)
-        pt.positions = [hand[0] - 0.12, hand[1], hand[2],
-                        np.deg2rad(bear), np.deg2rad(elev)]
-        traj.points.append(pt)
-        trajectory_publisher.publish(traj)
-
-        pose = Int8()
-        pose.data = 1
-        pose_publisher.publish(pose)
-
-        print(f"[grasp]  *** LOCKED & PUBLISHED  trans={np.round(trans, 3)}  "
-              f"elev={elev:+.1f}°  bear={bear:+.1f}° ***")
 
     def _remove_overlays(vis):
         if state["shape_ls"] is not None:
@@ -316,23 +359,24 @@ def _make_grasp_callback(table_normal,
         if state["grasp_added"]:
             vis.remove_geometry(grasp_ls, reset_bounding_box=False)
             state["grasp_added"] = False
-        state["label"]      = None
-        state["was_locked"] = False
+        state["label"] = None
 
     def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer):
-        # ── Object lost — reset everything ───────────────────────────────────
+        # ── Object lost — reset worker + drop overlays ───────────────────────
         if len(obj_verts) == 0:
-            tracker.full_reset()
+            worker.reset()
             _remove_overlays(vis)
             return
 
-        # Feed the background fitter; pop the most recent result (if any)
-        fitter.push(obj_verts)
-        new_shape, new_shape_ls = fitter.pop()
-        if new_shape_ls is None:
-            return                          # no new fit → no work this tick
+        # ── Hand off to worker; pull latest result if any ────────────────────
+        worker.push(obj_verts)
+        result = worker.pop()
+        if result is None:
+            return
 
         # ── Update / add shape wireframe ─────────────────────────────────────
+        new_shape    = result["shape"]
+        new_shape_ls = result["shape_ls"]
         if new_shape != state["label"]:
             print(f"[shape_fit]  *** shape → {new_shape} ***")
             if state["shape_ls"] is not None:
@@ -348,30 +392,19 @@ def _make_grasp_callback(table_normal,
             vis.update_geometry(sls)
 
         if not state["lookat_set"]:
-            vis.get_view_control().set_lookat(obj_verts.mean(axis=0).tolist())
+            vis.get_view_control().set_lookat(result["centroid"].tolist())
             state["lookat_set"] = True
 
-        # ── Derive grasp pose from the tracker's smoothed parameters ─────────
-        rot, trans = _grasp_from_shape(new_shape, tracker, state["shape_ls"])
-        if rot is None:
-            return
+        # ── Update gripper lineset in place ──────────────────────────────────
+        if result["has_grasp"]:
+            grasp_pts[:] = result["grasp_pts"]
+            grasp_ls.points = o3d.utility.Vector3dVector(grasp_pts)
+            if not state["grasp_added"]:
+                vis.add_geometry(grasp_ls, reset_bounding_box=False)
+                state["grasp_added"] = True
+            else:
+                vis.update_geometry(grasp_ls)
 
-        # ── Update persistent gripper lineset in place ───────────────────────
-        _fill_gripper_pts(grasp_pts, rot, trans)
-        grasp_ls.points = o3d.utility.Vector3dVector(grasp_pts)
-        if not state["grasp_added"]:
-            vis.add_geometry(grasp_ls, reset_bounding_box=False)
-            state["grasp_added"] = True
-        else:
-            vis.update_geometry(grasp_ls)
-
-        # ── Publish ROS only on the shape-lock rising edge ───────────────────
-        is_locked = bool(tracker._shape_locked)
-        if is_locked and not state["was_locked"]:
-            _publish(new_shape, rot, trans)
-        state["was_locked"] = is_locked
-
-    _on_frame.fitter = fitter
     return _on_frame
 
 
@@ -394,16 +427,16 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
 
     rclpy.init()
     node = Node('CV_publisher_node')
-    object_pub     = node.create_publisher(Float64MultiArray, '/cv/model', 10)
-    trajectory_pub = node.create_publisher(
+    object_pub = node.create_publisher(Float64MultiArray, '/cv/model', 10)
+    traj_pub   = node.create_publisher(
         JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
-    pose_pub       = node.create_publisher(Int8, '/pose_goals', 10)
+    pose_pub   = node.create_publisher(Int8, '/pose_goals', 10)
 
     ros_thread = threading.Thread(target=_ros_spin, args=(node,), daemon=True)
     ros_thread.start()
 
-    on_frame = _make_grasp_callback(table_normal,
-                                    object_pub, trajectory_pub, pose_pub)
+    worker   = FitWorker(table_normal, object_pub, traj_pub, pose_pub)
+    on_frame = _make_grasp_callback(worker)
 
     try:
         show_isolated_pcd(
@@ -414,7 +447,7 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
         )
     finally:
         print("\n[test_lineset_live_shape] shutting down...")
-        on_frame.fitter.stop()
+        worker.stop()
         isolator.stop()
         try:
             rclpy.shutdown()

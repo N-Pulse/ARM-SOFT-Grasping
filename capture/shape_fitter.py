@@ -1,7 +1,7 @@
 """
 capture/shape_fitter.py
 =======================
-Reusable curvature-based primitive-fitting module.
+Reusable primitive-fitting module.
 
 Exports
 -------
@@ -9,29 +9,29 @@ ShapeTracker          — temporal-convergence tracker (EMA + streak/lock)
 fit_and_track(pts, table_normal, tracker)
                       — one-frame entry point; returns (shape_str, LineSet)
 
-All heavy geometry helpers are kept private (leading underscore).
-
 Pipeline (per frame)
 --------------------
-  ① Normals + curvature  →  κ₁, κ₂, raw_axis
-  ② Classify             →  "cylinder" | "cuboid"
-        Primary  : lateral-normal azimuth entropy
-        Secondary: 2-D rigid-angle corner detection
-        Fallback : κ₂ curvature signal
-  ③ Confirm orientation  →  aspect-ratio primary, curvature-angle fallback
-  ④ Best fit             →  2D circle in cross-section plane
-                             → axis_pt, radius, mean_err
-  ⑤ Height               →  percentile extents + end-cap refinement
-  ⑥ Tracker.update()     →  EMA blend of all params into running estimate
-  ⑦ Build wireframe      →  cylinder : smoothed tracker params → TriangleMesh
-                             cuboid   : detected hull corners + mirroring
-                                        → 8 vertices, 12-edge LineSet
+  ① SOR                →  remove stray / background points
+  ② Normals            →  per-point surface normals, oriented toward camera
+  ③ Classify           →  "cylinder" | "cuboid"
+        Primary  : top-face 2-D shape (points whose normals ≈ table_normal)
+                   → rect_score (hull/MAR area)  +  right-angle corner count
+                   Square top face  → cuboid
+                   Circular top face → cylinder
+        Fallback : lateral-normal azimuth entropy  +  full-cloud rect_score
+                   (used when too few top-face points are visible)
+  ④ Best fit           →  2D circle in cross-section plane (cylinder only)
+                           axis_pt, radius, mean_err
+  ⑤ Height             →  percentile extents + end-cap refinement
+  ⑥ Tracker.update()   →  EMA blend into running estimate
+  ⑦ Build wireframe    →  cylinder : TriangleMesh → LineSet
+                           cuboid   : percentile-rect footprint → 12-edge LineSet
 
-Tracker tuning
+Tracker tuning  (do not change without user approval)
 --------------
-  ALPHA      EMA base learning rate  (0.2)
-  N_LOCK     Consecutive frames before orientation / shape locks (6)
-  N_UNLOCK   Consecutive opposing frames needed to break the lock (20)
+  ALPHA      EMA base learning rate          (0.20)
+  N_LOCK     Frames before shape locks       (6)
+  N_UNLOCK   Opposing frames to break lock   (20)
 
 Wireframe colours
 -----------------
@@ -44,7 +44,6 @@ from __future__ import annotations
 import cv2
 import numpy as np
 import open3d as o3d
-from scipy.spatial import cKDTree
 
 
 # ── Colours ────────────────────────────────────────────────────────────────────
@@ -53,132 +52,59 @@ _COLOR = {
     "cuboid":   [0.8, 0.6, 1.0],
 }
 
-# ── Curvature ──────────────────────────────────────────────────────────────────
-_KNN_NORMAL   = 15          # reduced from 30 — still accurate, ~2× faster
-_KNN_CURV     = 20          # reduced from 25
-_SUBSAMPLE    = 300         # reduced from 600 — curvature is a coarse signal
-_FLAT_THRESH  = 2.0         # |κ| < this (m⁻¹) → zero curvature
-_ANISO_RATIO  = 5.0
+# ── Normal estimation ──────────────────────────────────────────────────────────
+_KNN_NORMAL = 15
 
 # ── Geometry ───────────────────────────────────────────────────────────────────
-_R_MIN            = 0.005
-_R_MAX            = 2.0
-_CAP_NORMAL_DOT   = 0.7
-_CAP_MIN_PTS      = 10
-_MAX_RADIAL_ERR   = 0.020   # m — raw fits with error > this are downweighted
+_R_MIN          = 0.005
+_R_MAX          = 2.0
+_CAP_NORMAL_DOT = 0.7    # normal·axis above this → end-cap / top-face point
+_CAP_MIN_PTS    = 10     # minimum cap points for height refinement
 
-# ── Orientation decision ────────────────────────────────────────────────────────
-_ASPECT_VERTICAL   = 1.5    # extent_up / extent_wide > this → vertical
-_ASPECT_HORIZONTAL = 0.85   # extent_up / extent_wide < this → horizontal
-_SNAP_THRESH_DEG   = 45.0   # curvature-angle fallback threshold
+# ── 2-D corner detection ──────────────────────────────────────────────────────
+_CORNER_ANGLE_MAX   = 120.0   # hull vertex interior angle ≤ this → rigid corner
+_MIN_CORNERS_CUBOID = 2       # ≥ this many rigid corners → cuboid evidence
 
-# ── Edge / vertex detection ───────────────────────────────────────────────────
-_EDGE_KNN              = 12    # kNN for normal-coherence edge scoring
-_EDGE_COHERENCE_THRESH = 0.60  # normal coherence below this → edge/corner point
-_EDGE_FRAC_CUBOID      = 0.06  # > 6 % edge points → strong cuboid signal
-_CORNER_ANGLE_MAX      = 120.0 # convex-hull vertex interior angle ≤ this → rigid corner
-_MIN_CORNERS_CUBOID    = 2     # at least two rigid hull corners required → strong cuboid evidence
+# ── Top-face classifier (primary) ────────────────────────────────────────────
+# Split the cloud into:
+#   top-face  — normals nearly parallel to the table (dot > _CAP_NORMAL_DOT)
+#   lateral   — normals nearly perpendicular to the table
+# Project the top-face subset onto the horizontal plane and measure its shape:
+#   rect_score = convex-hull area / minAreaRect area
+#     square  → ~1.00,   circle → ~π/4 ≈ 0.785
+_TOP_FACE_MIN_PTS    = 30     # minimum top-face points to trust the primary path
+_RECT_SCORE_CUBOID   = 0.88   # rect_score ≥ this → rectangular  → cuboid
+_RECT_SCORE_CYLINDER = 0.83   # rect_score ≤ this → circular     → cylinder
+                               # gap 0.83–0.88 → fall through to fallback
 
-# ── Silhouette rectangularity ─────────────────────────────────────────────────
-# 2-D convex-hull area / minAreaRect area:
-#   square  → 1.00   (hull fills the bounding rectangle almost completely)
-#   circle  → π/4 ≈ 0.785   (circle wastes the corners of its bounding square)
-# Threshold sits in the gap between the two; reliable from any viewing angle.
-_RECT_SCORE_CUBOID = 0.88
-
-# ── Normal-distribution classifier ────────────────────────────────────────────
-# A cylinder's lateral normals fan out uniformly in all azimuths around the axis
-# (entropy ≈ max).  A cuboid's lateral normals collapse into 2–4 tight clusters
-# (one per visible flat face), leaving large empty sectors and low entropy.
-_NORMAL_HIST_BINS      = 36    # 10 ° per bin
-_NORMAL_CLUSTER_THRESH = 0.35  # normalised entropy below this → clustered → cuboid
+# ── Lateral-normal entropy (fallback classifier) ──────────────────────────────
+_NORMAL_HIST_BINS      = 36    # 10° per bin
+_NORMAL_CLUSTER_THRESH = 0.35  # normalised entropy < this → clustered → cuboid
 
 # ── Statistical outlier removal ───────────────────────────────────────────────
-_SOR_NEIGHBORS = 20         # kNN radius for mean-distance statistics
-_SOR_STD_RATIO = 2.5        # points > this many σ above the mean are removed
-                             # (2.5 rather than 2.0 so edge/corner points are kept)
+_SOR_NEIGHBORS = 20    # neighbours used for mean-distance statistics
+_SOR_STD_RATIO = 2.5   # remove points > this many σ above the mean
+                        # (2.5 keeps edge/corner points; 2.0 was too aggressive)
 
 # ── Tracker ────────────────────────────────────────────────────────────────────
-_ALPHA     = 0.20           # EMA base learning rate
-_N_LOCK    = 6              # frames before orientation / shape locks
-_N_UNLOCK  = 20             # opposing frames needed to break the lock
+_ALPHA    = 0.20   # EMA base learning rate
+_N_LOCK   = 6      # consecutive agreeing frames to lock shape
+_N_UNLOCK = 20     # consecutive opposing frames to break the lock
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE ① — Local curvature
+# 2-D geometry helpers
 # ══════════════════════════════════════════════════════════════════════════════
-
-def _fit_local_curvature(p, n, neighbours):
-    ref = np.array([0., 0., 1.]) if abs(n[2]) < 0.9 else np.array([1., 0., 0.])
-    t1  = np.cross(n, ref); t1 /= np.linalg.norm(t1)
-    t2  = np.cross(n, t1);  t2 /= np.linalg.norm(t2)
-    d   = neighbours - p
-    u, v, h = d @ t1, d @ t2, d @ n
-    A   = np.column_stack([u**2, u*v, v**2])
-    if np.linalg.matrix_rank(A) < 3:
-        return None
-    (a, b, c), *_ = np.linalg.lstsq(A, h, rcond=None)
-    II            = np.array([[2*a, b], [b, 2*c]])
-    evals, evecs  = np.linalg.eigh(II)
-    ev            = evecs[:, 0]
-    return float(evals[0]), float(evals[1]), ev[0]*t1 + ev[1]*t2
-
-
-def _aggregate_curvatures(pts, normals):
-    tree = cKDTree(pts)
-    # One batched query is ~3× faster than N individual queries
-    _, all_idx = tree.query(pts, k=_KNN_CURV + 1)
-    k1s, k2s, axs = [], [], []
-    for i in range(len(pts)):
-        r = _fit_local_curvature(pts[i], normals[i], pts[all_idx[i, 1:]])
-        if r is None:
-            continue
-        k1s.append(r[0]); k2s.append(r[1]); axs.append(r[2])
-    if not k1s:
-        return 0., 0., None
-    k1, k2 = float(np.median(k1s)), float(np.median(k2s))
-    axes   = np.array(axs)
-    signs  = np.sign(axes @ axes[0]); signs[signs == 0] = 1
-    axes  *= signs[:, None]
-    m      = axes.mean(axis=0); nrm = np.linalg.norm(m)
-    return k1, k2, m/nrm if nrm > 1e-6 else None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Edge / vertex detection helpers
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _edge_mask(pts: np.ndarray, normals: np.ndarray,
-               k: int = _EDGE_KNN) -> np.ndarray:
-    """
-    Return bool mask (N,) where True = edge or corner point.
-
-    Normal coherence = |mean of k unit normals|  ∈ [0, 1].
-      · Interior of a flat face   : normals nearly identical  → coherence ≈ 1
-      · Edge between two faces    : normals split two ways    → coherence < 1
-      · Corner (three faces meet) : normals spread three ways → coherence ≪ 1
-
-    Points whose coherence < _EDGE_COHERENCE_THRESH are flagged as edges.
-    """
-    tree  = cKDTree(pts)
-    score = np.zeros(len(pts))
-    for i in range(len(pts)):
-        _, idx   = tree.query(pts[i], k=k + 1)
-        mean_n   = normals[idx[1:]].mean(axis=0)
-        score[i] = 1.0 - np.linalg.norm(mean_n)   # 0 = flat-face, 1 = random
-    return score > (1.0 - _EDGE_COHERENCE_THRESH)
-
 
 def _detect_2d_corners(pts_2d: np.ndarray,
-                       angle_max: float = _CORNER_ANGLE_MAX) -> np.ndarray:
+                        angle_max: float = _CORNER_ANGLE_MAX) -> np.ndarray:
     """
     Find rigid-corner vertices on the convex hull of a 2-D point set.
 
     A vertex is a rigid corner if its interior angle ≤ angle_max degrees.
-    For a perfect rectangle every hull corner is ≈ 90°; noise may push it to
-    ~100°.  A cylinder's convex hull has no such sharp interior angles.
+    A perfect rectangle has corners ≈ 90°; a cylinder's convex hull has none.
 
-    Returns (M, 2) array of detected corner positions, or empty array.
+    Returns (M, 2) array of corner positions, or empty (0, 2) array.
     """
     if len(pts_2d) < 4:
         return np.empty((0, 2))
@@ -203,44 +129,23 @@ def _detect_2d_corners(pts_2d: np.ndarray,
     return np.array(corners) if corners else np.empty((0, 2))
 
 
-def _complete_rectangle_2d(corners: np.ndarray,
-                            pts_2d: np.ndarray) -> np.ndarray:
-    """
-    Return exactly 4 rectangle corners in CCW angular order.
-
-    M == 4  → the four detected corners are already known; order and return.
-    M other → fall back to cv2.minAreaRect of the full projected cloud.
-
-    Note: partial-completion heuristics (parallelogram rule for M==3, edge
-    extension for M==2) were removed because they require the detected corners
-    to be exactly consecutive rectangle vertices — an assumption that breaks
-    silently with noisy point clouds and produces skewed wireframes.
-    minAreaRect is more robust when fewer than 4 clean corners are found.
-    """
-    def _ccw(c: np.ndarray) -> np.ndarray:
-        ctr    = c.mean(axis=0)
-        angles = np.arctan2(c[:, 1] - ctr[1], c[:, 0] - ctr[0])
-        return c[np.argsort(angles)]
-
-    if len(corners) == 4:
-        return _ccw(corners)
-
-    # Fallback: minimum-area bounding rectangle of the full point cloud
-    pts_f = pts_2d.astype(np.float32).reshape(-1, 1, 2)
-    box   = cv2.boxPoints(cv2.minAreaRect(pts_f)).astype(float)
-    return _ccw(box)
+def _rect_score_2d(pts_2d: np.ndarray) -> float:
+    """convex-hull area / minAreaRect area.  ~1.0 for square, ~0.785 for circle."""
+    pts_f     = pts_2d.astype(np.float32).reshape(-1, 1, 2)
+    hull_area = float(cv2.contourArea(cv2.convexHull(pts_f)))
+    _, (wm, hm), _ = cv2.minAreaRect(pts_f)
+    return hull_area / (wm * hm + 1e-6)
 
 
 def _fit_rect_percentile(pts_2d: np.ndarray,
-                         lo: float = 1.0,
-                         hi: float = 99.0) -> np.ndarray:
+                          lo: float = 1.0,
+                          hi: float = 99.0) -> np.ndarray:
     """
-    Fit a tight rectangle to a 2-D point set.
+    Fit a tight rectangle to pts_2d.
 
     Uses cv2.minAreaRect for orientation (robust to partial visibility), then
-    projects all points onto each axis and uses (lo, hi) percentile bounds for
-    the extents.  This keeps the wireframe edges aligned with the visible
-    surface rather than extending to the most extreme — often noisy — points.
+    percentile projections for extents so the wireframe aligns with the
+    surface rather than the most extreme — often noisy — points.
 
     Returns (4, 2) corners in CCW angular order.
     """
@@ -268,165 +173,116 @@ def _fit_rect_percentile(pts_2d: np.ndarray,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE ② — Classification
+# Classifier
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _normal_cluster_score(normals: np.ndarray, axis: np.ndarray) -> float:
     """
-    Measure how clustered the lateral surface normals are around the axis.
-
-    Returns a normalised-entropy score in [0, 1]:
-      · ≈ 1.0  uniform / smoothly varying  →  cylinder
-      · ≈ 0.0  collapsed into discrete bins →  cuboid
-
-    Algorithm
-    ---------
-    1. Discard cap normals (those nearly parallel to the axis).
-    2. Project each remaining normal onto the plane ⊥ axis and normalise.
-    3. Compute the azimuth angle of each projected normal.
-    4. Build a histogram over [−π, π) with _NORMAL_HIST_BINS bins.
-    5. Return the normalised Shannon entropy of that histogram.
+    Normalised Shannon entropy of the lateral-normal azimuth distribution.
+      · ≈ 1.0  →  uniform azimuth distribution  →  cylinder
+      · ≈ 0.0  →  normals cluster in 2–4 bins    →  cuboid
+    Returns 1.0 (inconclusive → assume cylinder) when too few lateral
+    normals are visible (e.g. top-down view of the end cap).
     """
     axial    = np.abs(normals @ axis)
     lat_mask = axial < 0.70
     if lat_mask.sum() < 10:
-        return 1.0   # too few lateral normals → inconclusive → assume cylinder
+        return 1.0
 
-    lat_n  = normals[lat_mask]
-    horiz  = lat_n - np.outer(lat_n @ axis, axis)
-    norms  = np.linalg.norm(horiz, axis=1)
-    good   = norms > 0.30
+    lat_n = normals[lat_mask]
+    horiz = lat_n - np.outer(lat_n @ axis, axis)
+    norms = np.linalg.norm(horiz, axis=1)
+    good  = norms > 0.30
     if good.sum() < 10:
         return 1.0
 
     horiz_n = horiz[good] / norms[good, None]
-
     ref = np.array([1., 0., 0.]) if abs(axis[0]) < 0.9 else np.array([0., 1., 0.])
     e1  = np.cross(axis, ref);  e1 /= np.linalg.norm(e1)
     e2  = np.cross(axis, e1)
-    angles = np.arctan2(horiz_n @ e2, horiz_n @ e1)   # (M,) in [−π, π)
+    angles = np.arctan2(horiz_n @ e2, horiz_n @ e1)
 
     hist, _ = np.histogram(angles, bins=_NORMAL_HIST_BINS, range=(-np.pi, np.pi))
     p       = hist.astype(float) / (hist.sum() + 1e-8)
     entropy = -float(np.sum(p * np.log(p + 1e-10)))
-    return entropy / np.log(_NORMAL_HIST_BINS)         # normalise to [0, 1]
+    return entropy / np.log(_NORMAL_HIST_BINS)
 
 
-def _classify(k1: float, k2: float,
-              pts: np.ndarray, normals: np.ndarray,
-              axis: np.ndarray) -> str:
+def _classify(pts: np.ndarray, normals: np.ndarray, axis: np.ndarray) -> str:
     """
     Classify the isolated object as 'cylinder' or 'cuboid'.
 
-    Four independent signals are computed.  "cylinder" is returned only when
-    every signal agrees there is no cuboid evidence; a single positive cuboid
-    signal is sufficient to return "cuboid".
+    Primary path — top-face 2-D shape
+    ----------------------------------
+    Separate points whose normals are nearly parallel to the table axis
+    (the face parallel to the chessboard).  From directly above this is the
+    top face — the cleanest view for circle vs. square discrimination:
 
-    Signals
-    -------
-    1. Normal-distribution entropy    (primary, robust for side views)
-    2. 2-D rigid-corner detection     (geometric, axis-projected)
-    3. Curvature anisotropy           (fallback, noisy for edge regions)
-    4. 2-D silhouette rectangularity  (primary for top-down views)
-         hull_area / minAreaRect_area  ≈ 1.0 for square, ≈ 0.785 for circle
+      rect_score = convex-hull area / minAreaRect area
+        ≥ _RECT_SCORE_CUBOID   → square footprint → cuboid
+        ≤ _RECT_SCORE_CYLINDER → circular footprint → cylinder
+      right-angle hull corners (≥ _MIN_CORNERS_CUBOID) → cuboid
 
-    Decision
-    --------
-    → "cylinder"  only when ALL four say "not cuboid"
-    → "cuboid"    if ANY signal fires
+    If there are too few top-face points the result is ambiguous and the
+    fallback runs.
+
+    Fallback — lateral-normal entropy + full-cloud silhouette
+    ---------------------------------------------------------
+    Entropy of the lateral surface normals (cylinder → uniform azimuth;
+    cuboid → 2–4 tight clusters) combined with the full silhouette
+    rect_score and corner count.
     """
-    # Signal 1: normal-distribution entropy
-    norm_entropy = _normal_cluster_score(normals, axis)
-    is_clustered = norm_entropy < _NORMAL_CLUSTER_THRESH
-
-    # Signal 2: 2-D rigid corners
     ref = np.array([1., 0., 0.]) if abs(axis[0]) < 0.9 else np.array([0., 1., 0.])
     e1  = np.cross(axis, ref);  e1 /= np.linalg.norm(e1)
     e2  = np.cross(axis, e1)
-    d   = pts - pts.mean(axis=0)
-    pts_2d     = np.column_stack([d @ e1, d @ e2])
-    corners_2d = _detect_2d_corners(pts_2d)
-    has_corners = len(corners_2d) >= _MIN_CORNERS_CUBOID
 
-    # Signal 3: curvature
-    curv_cylinder = abs(k2) >= _FLAT_THRESH
+    # ── Primary: top-face slice ────────────────────────────────────────────
+    top_mask = np.abs(normals @ axis) > _CAP_NORMAL_DOT
+    if top_mask.sum() >= _TOP_FACE_MIN_PTS:
+        top_pts = pts[top_mask]
+        d       = top_pts - top_pts.mean(axis=0)
+        top_2d  = np.column_stack([d @ e1, d @ e2])
 
-    # Signal 4: silhouette rectangularity
-    # Computed on the same axis-perpendicular 2-D projection.  Reliable even
-    # when viewing from directly above (where entropy has no lateral normals
-    # to work with and corner subsampling may miss the actual hull corners).
-    pts_f      = pts_2d.astype(np.float32).reshape(-1, 1, 2)
-    hull_area  = float(cv2.contourArea(cv2.convexHull(pts_f)))
-    _, (wm, hm), _ = cv2.minAreaRect(pts_f)
-    rect_score     = hull_area / (wm * hm + 1e-6)
-    is_rectangular = rect_score >= _RECT_SCORE_CUBOID
+        rs          = _rect_score_2d(top_2d)
+        corners_2d  = _detect_2d_corners(top_2d)
+        has_corners = len(corners_2d) >= _MIN_CORNERS_CUBOID
 
-    print(f"[shape_fitter]  norm_entropy={norm_entropy:.3f}  "
-          f"corners={len(corners_2d)}  curv_cyl={curv_cylinder}  "
-          f"rect={rect_score:.3f}")
+        print(f"[shape_fitter]  top_pts={top_mask.sum()}  "
+              f"rect={rs:.3f}  corners={len(corners_2d)}")
 
-    # Cylinder only when no cuboid signal fires at all
-    if curv_cylinder and not is_clustered and not has_corners and not is_rectangular:
-        return "cylinder"
-    return "cuboid"
+        if rs >= _RECT_SCORE_CUBOID or has_corners:
+            return "cuboid"
+        if rs <= _RECT_SCORE_CYLINDER:
+            return "cylinder"
+        # Ambiguous — fall through to lateral-normal fallback
+
+    # ── Fallback: lateral-normal entropy + full silhouette ─────────────────
+    d      = pts - pts.mean(axis=0)
+    pts_2d = np.column_stack([d @ e1, d @ e2])
+
+    entropy      = _normal_cluster_score(normals, axis)
+    is_clustered = entropy < _NORMAL_CLUSTER_THRESH
+    rs_full      = _rect_score_2d(pts_2d)
+    corners_2d   = _detect_2d_corners(pts_2d)
+    has_corners  = len(corners_2d) >= _MIN_CORNERS_CUBOID
+
+    print(f"[shape_fitter]  (fallback) entropy={entropy:.3f}  "
+          f"rect={rs_full:.3f}  corners={len(corners_2d)}")
+
+    if is_clustered or has_corners or rs_full >= _RECT_SCORE_CUBOID:
+        return "cuboid"
+    return "cylinder"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE ③ — Confirm orientation (aspect ratio primary, curvature fallback)
+# Cylinder geometry helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _confirm_orientation(pts, raw_axis, table_normal):
+def _best_fit_cylinder(pts: np.ndarray,
+                        normals: np.ndarray,
+                        axis: np.ndarray):
     """
-    Returns ("vertical" | "horizontal", snapped_axis).
-
-    PRIMARY — PCD bounding-box aspect ratio (robust to curvature noise):
-      aspect = extent_along_table_normal / max_extent_in_table_plane
-      > _ASPECT_VERTICAL   → vertical
-      < _ASPECT_HORIZONTAL → horizontal
-
-    FALLBACK — curvature axis angle (only when aspect is ambiguous).
-    """
-    d   = pts - pts.mean(axis=0)
-    up  = float((d @ table_normal).ptp())
-
-    ref = np.array([1., 0., 0.]) if abs(table_normal[0]) < 0.9 else np.array([0., 1., 0.])
-    p1  = np.cross(table_normal, ref); p1 /= np.linalg.norm(p1)
-    p2  = np.cross(table_normal, p1);  p2 /= np.linalg.norm(p2)
-    wide = float(max((d @ p1).ptp(), (d @ p2).ptp()))
-
-    aspect = up / (wide + 1e-6)
-    print(f"[shape_fitter]  up={up*1e3:.0f}mm  wide={wide*1e3:.0f}mm  "
-          f"aspect={aspect:.2f}", end="")
-
-    if aspect > _ASPECT_VERTICAL:
-        orient = "vertical";    print("  → vertical (aspect)")
-    elif aspect < _ASPECT_HORIZONTAL:
-        orient = "horizontal";  print("  → horizontal (aspect)")
-    else:
-        cos_a  = abs(float(raw_axis @ table_normal))
-        orient = "vertical" if cos_a >= np.cos(np.radians(_SNAP_THRESH_DEG)) \
-                 else "horizontal"
-        print(f"  → {orient} (curvature fallback)")
-
-    if orient == "vertical":
-        axis = table_normal.copy()
-    else:
-        axis = raw_axis - (raw_axis @ table_normal) * table_normal
-        nrm  = np.linalg.norm(axis)
-        axis = raw_axis if nrm < 1e-6 else axis / nrm
-
-    if axis @ raw_axis < 0:
-        axis = -axis
-    return orient, axis
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STAGE ④ — Best fit (2D circle) + height
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _best_fit_cylinder(pts, normals, axis):
-    """
-    Least-squares 2D circle fit in the plane ⊥ to axis.
+    Least-squares 2-D circle fit in the plane ⊥ to axis.
     Returns (axis_pt, radius, mean_radial_err) or (None, None, inf).
     """
     centroid = pts.mean(axis=0)
@@ -450,25 +306,28 @@ def _best_fit_cylinder(pts, normals, axis):
     return axis_pt, r, err
 
 
-def _estimate_height(pts, normals, axis, centroid):
+def _estimate_height(pts: np.ndarray,
+                      normals: np.ndarray,
+                      axis: np.ndarray,
+                      centroid: np.ndarray):
     proj  = (pts - centroid) @ axis
     h_min = float(np.percentile(proj, 1))
     h_max = float(np.percentile(proj, 99))
     cap   = np.abs(normals @ axis) > _CAP_NORMAL_DOT
     if cap.sum() >= _CAP_MIN_PTS:
-        cp = proj[cap]; span = h_max - h_min
+        cp   = proj[cap];  span = h_max - h_min
         cm, cx = float(cp.min()), float(cp.max())
-        if cm < h_min + 0.3*span:
+        if cm < h_min + 0.3 * span:
             h_min = cm
             print(f"[shape_fitter]  bottom cap {h_min*1e3:.0f}mm")
-        if cx > h_max - 0.3*span:
+        if cx > h_max - 0.3 * span:
             h_max = cx
             print(f"[shape_fitter]  top cap    {h_max*1e3:.0f}mm")
     return h_min, h_max
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE ⑤ — Temporal convergence tracker
+# Temporal convergence tracker  — DO NOT modify convergence constants
 # ══════════════════════════════════════════════════════════════════════════════
 
 class ShapeTracker:
@@ -492,32 +351,26 @@ class ShapeTracker:
     via EMA.  reset() clears only these cylinder parameters; shape voting state
     is intentionally preserved so a transient cuboid frame doesn't erase the
     accumulated streak.
-
-    Orientation locking
-    -------------------
-    After N_LOCK consecutive frames agree on "vertical" or "horizontal", the
-    orientation is locked.  Unlocking requires N_UNLOCK consecutive opposing
-    frames.
     """
 
     def __init__(self):
-        self.orient    = None      # "vertical" | "horizontal" | None
+        self.orient    = None
         self._streak   = 0
         self._locked   = False
         self._flip_str = 0
 
         # Smoothed cylinder parameters
-        self.axis    = None        # (3,) unit vector
-        self.axis_pt = None        # (3,) point on axis
-        self.radius  = None        # float (m)
-        self.h_ctr   = None        # (h_min+h_max)/2
-        self.height  = None        # h_max-h_min
+        self.axis    = None   # (3,) unit vector
+        self.axis_pt = None   # (3,) point on axis
+        self.radius  = None   # float (m)
+        self.h_ctr   = None   # (h_min + h_max) / 2
+        self.height  = None   # h_max - h_min
 
         # Shape voting — separate state so reset() does not clear it
-        self.shape          = None  # "cylinder" | "cuboid" | None
-        self._shape_streak  = 0
-        self._shape_locked  = False
-        self._shape_flip    = 0
+        self.shape         = None   # "cylinder" | "cuboid" | None
+        self._shape_streak = 0
+        self._shape_locked = False
+        self._shape_flip   = 0
 
     # ── Shape voting ──────────────────────────────────────────────────────────
 
@@ -566,15 +419,9 @@ class ShapeTracker:
     def update(self, raw_orient, raw_axis, raw_axis_pt, raw_r,
                raw_h_min, raw_h_max, raw_err, table_normal):
         """
-        Parameters
-        ----------
-        raw_*        : estimates from the current frame
-        raw_err      : mean radial error (m) — scales learning rate
-        table_normal : used to force axis when orientation is locked vertical
+        Blend one frame's raw cylinder fit into the running EMA estimate.
 
-        Returns
-        -------
-        (axis, axis_pt, radius, h_min, h_max)  — smoothed
+        Returns (axis, axis_pt, radius, h_min, h_max) — smoothed.
         """
         alpha = float(np.clip(_ALPHA / (1.0 + raw_err * 30), 0.04, 0.35))
 
@@ -588,12 +435,12 @@ class ShapeTracker:
             self.h_ctr   = raw_h_ctr
             self.height  = raw_h
         else:
-            self.h_ctr   = (1 - alpha)*self.h_ctr  + alpha*raw_h_ctr
-            self.height  = (1 - alpha)*self.height + alpha*raw_h
+            self.h_ctr   = (1 - alpha) * self.h_ctr  + alpha * raw_h_ctr
+            self.height  = (1 - alpha) * self.height + alpha * raw_h
             self.axis_pt = raw_axis_pt.copy()
             self.radius  = raw_r
 
-        # Axis is ALWAYS the chessboard table normal — no convergence drift
+        # Axis is always the chessboard table normal — no convergence drift
         self.axis = table_normal.copy()
 
         h_min = self.h_ctr - self.height / 2.0
@@ -619,10 +466,10 @@ class ShapeTracker:
         switching objects starts completely fresh with no residual commitment.
         """
         self.reset()
-        self.shape          = None
-        self._shape_streak  = 0
-        self._shape_locked  = False
-        self._shape_flip    = 0
+        self.shape         = None
+        self._shape_streak = 0
+        self._shape_locked = False
+        self._shape_flip   = 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -642,7 +489,8 @@ def _build_cylinder(axis, axis_pt, r, h_min, h_max):
         vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
         R  = np.eye(3) + vx + vx @ vx * (1.0 - c) / (s**2)
 
-    mesh = o3d.geometry.TriangleMesh.create_cylinder(radius=r, height=height, resolution=20)
+    mesh = o3d.geometry.TriangleMesh.create_cylinder(
+        radius=r, height=height, resolution=20)
     mesh.rotate(R, center=np.zeros(3))
     mesh.translate(center)
     ls = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
@@ -654,13 +502,11 @@ def _build_cuboid(pts: np.ndarray, axis: np.ndarray) -> o3d.geometry.LineSet:
     """
     Build a cuboid wireframe whose faces align with the point-cloud surface.
 
-    Algorithm
-    ---------
-    1. Project pts onto the plane ⊥ axis (the horizontal footprint).
-    2. Use _fit_rect_percentile to determine orientation (minAreaRect) and
-       extents (percentile projections) — avoids outlier-driven expansion.
-    3. Use percentile bounds for height as well.
-    4. Reconstruct 8 3D vertices and build the 12-edge LineSet.
+    1. Project pts onto the plane ⊥ axis (horizontal footprint).
+    2. _fit_rect_percentile → orientation from minAreaRect, extents from
+       percentile projections — avoids outlier-driven expansion.
+    3. Percentile bounds for height.
+    4. Reconstruct 8 3-D vertices → 12-edge LineSet.
     """
     n   = axis.copy()
     ref = np.array([1., 0., 0.]) if abs(n[0]) < 0.9 else np.array([0., 1., 0.])
@@ -671,33 +517,29 @@ def _build_cuboid(pts: np.ndarray, axis: np.ndarray) -> o3d.geometry.LineSet:
     d       = pts - mean_pt
     u       = (d @ e1).astype(np.float32)
     v       = (d @ e2).astype(np.float32)
-    w       = pts @ n                          # absolute height along axis
-    pts_2d  = np.column_stack([u, v])          # (N, 2), centred
+    w       = pts @ n
+    pts_2d  = np.column_stack([u, v])
 
     h_min = float(np.percentile(w, 1))
     h_max = float(np.percentile(w, 99))
     h_min = h_min if h_max - h_min > 0.005 else h_min - 0.0025
 
-    # Percentile-based 2-D rectangle — tight surface alignment
     rect_corners = _fit_rect_percentile(pts_2d)   # (4, 2) CCW
-
-    mean_horiz = mean_pt - (mean_pt @ n) * n
+    mean_horiz   = mean_pt - (mean_pt @ n) * n
 
     verts = []
     for (cu, cv) in rect_corners:
         horiz = mean_horiz + cu * e1 + cv * e2
-        verts.append(horiz + h_min * n)   # bottom corner
-        verts.append(horiz + h_max * n)   # top corner
-    # Layout: [bot_0, top_0, bot_1, top_1, bot_2, top_2, bot_3, top_3]
-    verts = np.array(verts)               # (8, 3)
+        verts.append(horiz + h_min * n)
+        verts.append(horiz + h_max * n)
+    verts = np.array(verts)   # (8, 3)  layout: [bot0,top0, bot1,top1, ...]
 
     lines = []
     for i in range(4):
         j = (i + 1) % 4
-        lines.append([2 * i,     2 * j    ])   # bottom ring edge i → j
-        lines.append([2 * i + 1, 2 * j + 1])   # top    ring edge i → j
-        lines.append([2 * i,     2 * i + 1])   # vertical pillar at corner i
-
+        lines.append([2*i,     2*j    ])   # bottom ring
+        lines.append([2*i + 1, 2*j + 1])  # top ring
+        lines.append([2*i,     2*i + 1])  # vertical pillar
     ls = o3d.geometry.LineSet()
     ls.points = o3d.utility.Vector3dVector(verts)
     ls.lines  = o3d.utility.Vector2iVector(lines)
@@ -725,22 +567,15 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
 
     Performance fast-paths
     ----------------------
-    Once the shape is locked (after _N_LOCK consecutive agreeing frames), the
-    expensive curvature + classification block is skipped entirely:
-
-      locked cuboid  → skip normals + curvature → just rebuild cuboid wireframe
-                       (~1 ms vs ~80 ms unlocked)
-      locked cylinder→ skip curvature/classify  → normals + circle fit only
-                       (~15 ms vs ~80 ms unlocked)
+    locked cuboid   → SOR only, skip normals entirely  (~5 ms)
+    locked cylinder → SOR + normals, skip classify     (~15 ms)
+    unlocked        → SOR + normals + classify          (~25 ms)
+    (Previous pipeline included curvature estimation: ~80 ms unlocked)
     """
     if len(pts) < 50:
         return None, None
 
     # ── Statistical outlier removal ────────────────────────────────────────
-    # Removes stray points (edge leakage, reflections) that distort normals,
-    # curvature, entropy, and the fitted geometry.  Runs before every path,
-    # including the fast cuboid rebuild, so the wireframe stays tight even
-    # after the shape is locked.
     _tmp = o3d.geometry.PointCloud()
     _tmp.points = o3d.utility.Vector3dVector(pts)
     _tmp, _ = _tmp.remove_statistical_outlier(
@@ -752,11 +587,11 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
     _fallback_axis = table_normal if table_normal is not None \
                      else np.array([0., 0., 1.])
 
-    # ── Fast path A: locked cuboid — no normals needed at all ─────────────
+    # ── Fast path A: locked cuboid — no normals needed ─────────────────────
     if tracker._shape_locked and tracker.shape == "cuboid":
         return "cuboid", _build_cuboid(pts, _fallback_axis)
 
-    # ── Normals (needed for cylinder fit and unlock-phase classification) ──
+    # ── Normals ────────────────────────────────────────────────────────────
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     pcd.estimate_normals(
@@ -765,31 +600,13 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
         camera_location=np.array([0., 0., 0.]))
     normals = np.asarray(pcd.normals)
 
-    # ── Fast path B: locked cylinder — skip curvature + classification ─────
+    # ── Fast path B: locked cylinder — skip classify ───────────────────────
     if tracker._shape_locked and tracker.shape == "cylinder":
         shape = "cylinder"
     else:
-        # ── Full classification (unlocked only) ────────────────────────────
-        N = len(pts)
-        if N > _SUBSAMPLE:
-            idx    = np.random.choice(N, _SUBSAMPLE, replace=False)
-            sp, sn = pts[idx], normals[idx]
-        else:
-            sp, sn = pts, normals
-
-        k1, k2, raw_axis = _aggregate_curvatures(sp, sn)
-        _cls_axis = (table_normal.copy() if table_normal is not None
-                     else (raw_axis if raw_axis is not None
-                           else np.array([0., 0., 1.])))
-        raw_shape = _classify(k1, k2, sp, sn, _cls_axis)
-
-        if raw_axis is None:
-            shape = "cuboid"
-        else:
-            shape = tracker.vote_shape(raw_shape)
-
-        print(f"[shape_fitter]  κ₁={k1:+.2f}  κ₂={k2:+.2f}  "
-              f"raw={raw_shape}  committed={shape}  "
+        raw_shape = _classify(pts, normals, _fallback_axis)
+        shape     = tracker.vote_shape(raw_shape)
+        print(f"[shape_fitter]  raw={raw_shape}  committed={shape}  "
               f"streak={tracker._shape_streak}  locked={tracker._shape_locked}")
 
     # ── Cuboid branch ──────────────────────────────────────────────────────
@@ -798,9 +615,8 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
         return "cuboid", _build_cuboid(pts, _fallback_axis)
 
     # ── Cylinder branch ────────────────────────────────────────────────────
-    axis   = _fallback_axis.copy() if hasattr(_fallback_axis, 'copy') \
-             else np.array(_fallback_axis)
-    orient = "vertical"
+    axis = _fallback_axis.copy() if hasattr(_fallback_axis, "copy") \
+           else np.array(_fallback_axis)
 
     axis_pt, r, err = _best_fit_cylinder(pts, normals, axis)
     if axis_pt is None:
@@ -818,10 +634,8 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
 
     if table_normal is not None:
         s_axis, s_pt, s_r, s_hmin, s_hmax = tracker.update(
-            orient, axis, axis_pt, r, h_min, h_max, err, table_normal
-        )
+            "vertical", axis, axis_pt, r, h_min, h_max, err, table_normal)
     else:
         s_axis, s_pt, s_r, s_hmin, s_hmax = axis, axis_pt, r, h_min, h_max
 
-    ls = _build_cylinder(s_axis, s_pt, s_r, s_hmin, s_hmax)
-    return "cylinder", ls
+    return "cylinder", _build_cylinder(s_axis, s_pt, s_r, s_hmin, s_hmax)

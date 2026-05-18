@@ -578,9 +578,9 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
                     trajectory_msg.joint_names.append('joint_wrist_y')
                     point = JointTrajectoryPoint()
                     point.time_from_start = Duration(sec=5, nanosec=0)
-                    point.positions.append(distance_m-0.12) # x base position, offfset of 12cm bc origin is at wrist's base
-                    point.positions.append(0) # y base position
-                    point.positions.append(0) # z base position
+                    point.positions.append(hand_pos[0]-0.12) # x base position, offfset of 12cm bc origin is at wrist's base
+                    point.positions.append(hand_pos[1]) # y base position
+                    point.positions.append(hand_pos[2]) # z base position
                     point.positions.append(bearing_rad) # wrist rotation (right/left)
                     point.positions.append(elevation_rad) # wrist rotation (up/down)
                     trajectory_msg.points.append(point)

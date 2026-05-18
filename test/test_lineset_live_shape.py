@@ -93,24 +93,48 @@ _JOINT_NAMES = ['joint_base_x', 'joint_base_y', 'joint_base_z',
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Pure-math helpers (run on the worker thread)
+#
+# Every helper below derives its result purely from the FITTED SHAPE — i.e.
+# the EMA-smoothed cylinder parameters held by ShapeTracker, or the 8
+# wireframe vertices of the fitted cuboid in shape_ls.points.  None of them
+# read the raw point cloud directly.
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _shape_centroid(shape, tracker, shape_ls):
+    """
+    Geometric centroid of the FITTED shape (not of the point cloud).
+
+    Cylinder : axis_pt + axis * h_ctr           (uses smoothed tracker params)
+    Cuboid   : mean of the 8 fitted corners     (uses shape_ls wireframe)
+    """
+    if shape == "cylinder":
+        if tracker.axis is None or tracker.axis_pt is None or tracker.h_ctr is None:
+            return None
+        return tracker.axis_pt + tracker.axis * tracker.h_ctr
+
+    if shape == "cuboid" and shape_ls is not None:
+        verts = np.asarray(shape_ls.points)
+        if len(verts) >= 8:
+            return verts.mean(axis=0)
+    return None
+
 
 def _grasp_from_shape(shape, tracker, shape_ls):
     """
-    Compute (rot, trans) from the smoothed shape parameters.
+    Compute (rot, trans) from the fitted shape.
 
       rot[:, 0]  approach  — palm → fingertips
       rot[:, 1]  closing   — between the two fingers
-      trans      palm centre
+      trans      palm centre (= fitted-shape centroid)
     """
+    trans = _shape_centroid(shape, tracker, shape_ls)
+    if trans is None:
+        return None, None
+
     if shape == "cylinder":
-        axis    = tracker.axis
-        axis_pt = tracker.axis_pt
-        if axis is None or axis_pt is None or tracker.h_ctr is None:
-            return None, None
+        axis = tracker.axis
 
-        trans = axis_pt + axis * tracker.h_ctr
-
+        # Approach: camera → centre, projected ⊥ axis (horizontal grip)
         to_obj   = trans / (np.linalg.norm(trans) + 1e-9)
         approach = to_obj - (to_obj @ axis) * axis
         nrm      = np.linalg.norm(approach)
@@ -122,21 +146,19 @@ def _grasp_from_shape(shape, tracker, shape_ls):
         else:
             approach /= nrm
 
+        # Closing: along cylinder axis so fingers span the height
         closing = np.cross(axis, approach)
         closing /= np.linalg.norm(closing)
-        third   = np.cross(approach, closing)
 
     elif shape == "cuboid":
-        verts = np.asarray(shape_ls.points)
-        if len(verts) < 8:
-            return None, None
-
-        trans    = verts.mean(axis=0)
+        verts    = np.asarray(shape_ls.points)         # 8 fitted corners
         approach = trans / (np.linalg.norm(trans) + 1e-9)
 
+        # Footprint edges of the fitted cuboid (bottom ring corners)
         bot = verts[::2]
         e1  = bot[1] - bot[0];  e1 /= (np.linalg.norm(e1) + 1e-9)
         e2  = bot[2] - bot[1];  e2 /= (np.linalg.norm(e2) + 1e-9)
+        # Closing: footprint edge most perpendicular to approach
         closing = e2 if abs(approach @ e1) < abs(approach @ e2) else e1
         closing = closing - (closing @ approach) * approach
         nrm     = np.linalg.norm(closing)
@@ -146,12 +168,11 @@ def _grasp_from_shape(shape, tracker, shape_ls):
         else:
             closing /= nrm
 
-        third = np.cross(approach, closing)
-
     else:
         return None, None
 
-    rot = np.column_stack([approach, closing, third])
+    third = np.cross(approach, closing)
+    rot   = np.column_stack([approach, closing, third])
     if np.linalg.det(rot) < 0:
         rot[:, 2] = -rot[:, 2]
     return rot, trans
@@ -270,13 +291,15 @@ class FitWorker:
             if verts is None:
                 break
 
-            # 1. Shape fit (already EMA-smoothed inside the tracker)
+            # 1. Shape fit — the raw point cloud is consumed HERE and never
+            #    looked at again downstream.  All subsequent geometry comes
+            #    from the fitted shape (tracker params + shape_ls vertices).
             shape, shape_ls = fit_and_track(
                 verts, self._table_normal, self._tracker)
             if shape_ls is None:
                 continue
 
-            # 2. Grasp pose from smoothed parameters (same clock as the shape)
+            # 2. Grasp pose from the fitted shape (same clock as the shape)
             rot, trans = _grasp_from_shape(shape, self._tracker, shape_ls)
             has_grasp  = rot is not None
 
@@ -290,14 +313,18 @@ class FitWorker:
                 self._publish(shape, rot, trans, shape_ls)
             self._was_locked = is_locked
 
-            # 4. Hand the result to the render thread
+            # 4. Hand the result to the render thread.  The centroid for the
+            #    one-shot set_lookat is also taken from the fitted shape, not
+            #    from the raw point cloud.
+            centroid = trans if has_grasp \
+                       else _shape_centroid(shape, self._tracker, shape_ls)
             with self._lock:
                 self._out = {
                     "shape":     shape,
                     "shape_ls":  shape_ls,
                     "grasp_pts": grasp_pts,
                     "has_grasp": has_grasp,
-                    "centroid":  verts.mean(axis=0),
+                    "centroid":  centroid,
                 }
 
     # ── ROS publish (worker thread; rclpy publishers are thread-safe) ─────────
@@ -391,7 +418,7 @@ def _make_grasp_callback(worker: FitWorker):
             sls.colors = new_shape_ls.colors
             vis.update_geometry(sls)
 
-        if not state["lookat_set"]:
+        if not state["lookat_set"] and result["centroid"] is not None:
             vis.get_view_control().set_lookat(result["centroid"].tolist())
             state["lookat_set"] = True
 

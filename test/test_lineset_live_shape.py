@@ -335,19 +335,23 @@ def _empty_lineset():
     return ls
 
 
-def _object_params(rot, trans):
+def _object_params(rot, trans, shape, tracker, shape_ls):
     """
-    Compute distance and wrist orientation from the grasp pose.
+    Compute distance, wrist orientation, and required hand position from the
+    grasp pose.
 
     Camera frame convention (RealSense): X right, Y down, Z forward.
 
     Parameters
     ----------
-    rot   : (3, 3) ndarray
-              rot[:, 0]  approach — palm → fingertips (toward object)
-              rot[:, 1]  closing  — axis between the two fingers
-              rot[:, 2]  cross(approach, closing)
-    trans : (3,) ndarray — object centroid in camera frame (metres)
+    rot      : (3, 3) ndarray
+                 rot[:, 0]  approach — palm → fingertips (toward object)
+                 rot[:, 1]  closing  — axis between the two fingers
+                 rot[:, 2]  cross(approach, closing)
+    trans    : (3,) ndarray — object centroid in camera frame (metres)
+    shape    : str  — "cylinder" | "cuboid"
+    tracker  : ShapeTracker — provides tracker.radius for cylinder
+    shape_ls : o3d.geometry.LineSet — cuboid wireframe vertices for cuboid
 
     Returns
     -------
@@ -356,17 +360,25 @@ def _object_params(rot, trans):
 
     elevation_deg : float  — UP / DOWN wrist rotation
         Elevation of the approach axis (palm → fingertips) from horizontal.
-        Describes how much the wrist is tilted upward or downward.
           0°   → wrist level, hand approaches horizontally
         +90°   → wrist tilted fully up, hand approaches from below aiming up
         -90°   → wrist tilted fully down, hand approaches from above aiming down
 
     bearing_deg   : float  — LEFT / RIGHT wrist rotation
         Bearing of the approach axis in the horizontal (XZ) plane.
-        Describes how much the wrist has rotated left or right from straight ahead.
           0°   → wrist straight forward (neutral)
         +90°   → wrist rotated 90° to the right
         -90°   → wrist rotated 90° to the left
+
+    hand_pos : (3,) ndarray — palm centre in simulation frame (metres)
+        XYZ position [X-forward, Y-left, Z-down] the palm must move to so
+        that the fingertips just reach the near surface of the object.
+        Computed as:
+            cam_pos  = object_centroid - approach * (FINGER_LENGTH + obj_half_depth)
+            hand_pos = [cam_z, -cam_x, cam_y]   (camera → simulation frame)
+        where obj_half_depth is the object's extent from its centroid toward
+        the camera along the approach direction (radius for a cylinder, face
+        half-depth for a cuboid).
 
     Neutral reference — palm flat down, arm pointing forward along camera Z:
         approach = [0, 0, 1]  →  elevation = 0°,  bearing = 0°
@@ -376,16 +388,35 @@ def _object_params(rot, trans):
 
     # UP / DOWN — elevation of the approach axis from horizontal
     # Camera Y is down, so the "up" component of approach is -approach[1]
-    # Positive = wrist tilted upward (hand aims above horizontal)
-    # Negative = wrist tilted downward (hand aims below horizontal)
     elevation_deg = float(np.degrees(np.arcsin(np.clip(-approach[1], -1.0, 1.0))))
 
     # LEFT / RIGHT — bearing of the approach axis in the horizontal (XZ) plane
     # arctan2(X-component, Z-component): 0° = straight forward, +90° = right, -90° = left
-    # Positive = wrist rotated to the right, negative = rotated to the left
     bearing_deg = float(np.degrees(np.arctan2(approach[0], approach[2])))
 
-    return distance_m, elevation_deg, bearing_deg
+    # How far the object surface is from its centroid along the approach direction
+    if shape == "cylinder" and tracker.radius is not None:
+        obj_half_depth = float(tracker.radius)
+    elif shape == "cuboid" and shape_ls is not None:
+        verts = np.asarray(shape_ls.points)
+        if len(verts) >= 4:
+            # Extent of the cuboid along the approach axis; near face is the
+            # minimum projection (closest to the camera / palm side)
+            proj           = verts @ approach
+            obj_half_depth = float((proj.max() - proj.min()) / 2.0)
+        else:
+            obj_half_depth = 0.0
+    else:
+        obj_half_depth = 0.0
+
+    # Pull palm back so fingertips reach the object surface (camera frame)
+    cam_pos = trans - approach * (FINGER_LENGTH + obj_half_depth)
+
+    # Convert camera frame (X-right, Y-down, Z-forward)
+    #         → simulation frame (X-forward, Y-left, Z-down)
+    hand_pos = np.array([cam_pos[2], -cam_pos[0], cam_pos[1]])
+
+    return distance_m, elevation_deg, bearing_deg, hand_pos
 
 
 def ros_spin(node): # for continuous publishing
@@ -522,7 +553,7 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
             if new_rot is not None:
                 rot, trans = smoother.update(new_rot, new_trans)
                 new_grasp = (rot, trans)
-                distance_m, elevation_deg, bearing_deg = _object_params(rot, trans)
+                distance_m, elevation_deg, bearing_deg, hand_pos = _object_params(rot, trans, new_shape, tracker, new_shape_ls)
                 
                 send_ros_data = False
                 if not send_ros_data :
@@ -533,7 +564,8 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
 
                     # Send object type and position
                     object_msg = Float64MultiArray()
-                    shape = 1. # 0 for cube, 1 for cylinder
+                    #shape = 1. # 0 for cube, 1 for cylinder
+                    shape = 1. if new_shape == "cylinder" else 0.
                     object_msg.data = [shape, distance_m, 0., 0., 0., 0., 0.] #[object_type, x, y, z, roll, pitch, yaw]
                     object_publisher.publish(object_msg)
 

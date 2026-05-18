@@ -524,27 +524,40 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
                 new_grasp = (rot, trans)
                 distance_m, elevation_deg, bearing_deg = _object_params(rot, trans)
                 
-                # Send object type and position
-                object_msg = Float64MultiArray()
-                shape = 1. # 0 for cube, 1 for cylinder
-                object_msg.data = [shape, distance_m, 0., 0., 0., 0., 0.] #[object_type, x, y, z, roll, pitch, yaw]
-                object_publisher.publish(object_msg)
+                send_ros_data = False
+                if not send_ros_data :
+                    
+                    send_ros_data = True
+                    elevation_rad = np.deg2rad(elevation_deg)
+                    bearing_rad = np.deg2rad(bearing_deg)
 
-                # Send wrist rotation
-                trajectory_msg = JointTrajectory()
-                trajectory_msg.joint_names.append('joint_wrist_x')
-                trajectory_msg.joint_names.append('joint_wrist_y')
-                point = JointTrajectoryPoint()
-                point.time_from_start = Duration(sec=5, nanosec=0)
-                point.positions.append(bearing_deg)
-                point.positions.append(elevation_deg)
-                trajectory_msg.points.append(point)
-                trajectory_publisher.publish(trajectory_msg)
+                    # Send object type and position
+                    object_msg = Float64MultiArray()
+                    shape = 1. # 0 for cube, 1 for cylinder
+                    object_msg.data = [shape, distance_m, 0., 0., 0., 0., 0.] #[object_type, x, y, z, roll, pitch, yaw]
+                    object_publisher.publish(object_msg)
 
-                # Send close hand command to simulation
-                pose_msg = Int8()
-                pose_msg.data = 1
-                pose_publisher.publish(pose_msg)    
+                    # Send prosthesis trajectory (arm base movement, wrist rotation)
+                    trajectory_msg = JointTrajectory()
+                    trajectory_msg.joint_names.append('joint_base_x')
+                    trajectory_msg.joint_names.append('joint_base_y')
+                    trajectory_msg.joint_names.append('joint_base_z')
+                    trajectory_msg.joint_names.append('joint_wrist_x')
+                    trajectory_msg.joint_names.append('joint_wrist_y')
+                    point = JointTrajectoryPoint()
+                    point.time_from_start = Duration(sec=5, nanosec=0)
+                    point.positions.append(distance_m-0.12) # x base position, offfset of 12cm bc origin is at wrist's base
+                    point.positions.append(0) # y base position
+                    point.positions.append(0) # z base position
+                    point.positions.append(bearing_rad) # wrist rotation (right/left)
+                    point.positions.append(elevation_rad) # wrist rotation (up/down)
+                    trajectory_msg.points.append(point)
+                    trajectory_publisher.publish(trajectory_msg)
+
+                    # Send close hand command to simulation
+                    pose_msg = Int8()
+                    pose_msg.data = 1
+                    pose_publisher.publish(pose_msg)    
 
         if new_shape_ls is not None and geom_added:
             if new_shape != last_shape:

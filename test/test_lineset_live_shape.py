@@ -448,7 +448,7 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
     node = Node('CV_publisher_node')
     object_publisher = node.create_publisher(Float64MultiArray, '/cv/model', 10)
     trajectory_publisher = node.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
-    pose_publisher = node.create_publisher(Int8, 'pose_goals', 10)
+    pose_publisher = node.create_publisher(Int8, '/pose_goals', 10)
 
     ros_thread = threading.Thread(target=ros_spin, args=(node,), daemon=True)
     ros_thread.start()

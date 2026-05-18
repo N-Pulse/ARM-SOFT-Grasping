@@ -14,12 +14,26 @@ Pipeline (per frame)
   ① SOR                →  remove stray / background points
   ② Normals            →  per-point surface normals, oriented toward camera
   ③ Classify           →  "cylinder" | "cuboid"
-        Primary  : top-face 2-D shape (points whose normals ≈ table_normal)
-                   → rect_score (hull/MAR area)  +  right-angle corner count
-                   Square top face  → cuboid
-                   Circular top face → cylinder
+        Two-cluster split by surface-normal orientation vs. table axis:
+
+        Cluster A (parallel to chessboard)
+          Points whose normals are nearly aligned with the table normal
+          (|n · axis| > _CAP_NORMAL_DOT) — the top/bottom face.
+          Project onto the horizontal plane:
+            rect_score ≥ _RECT_SCORE_CUBOID or right-angle corners → cuboid
+            rect_score ≤ _RECT_SCORE_CYLINDER                       → cylinder
+
+        Cluster B (perpendicular to chessboard)
+          Points whose normals are nearly perpendicular to the table normal
+          (|n · axis| < _PERP_DOT_THRESH) — the lateral / side walls.
+          Project onto the horizontal plane (footprint):
+            rect_score ≥ _RECT_SCORE_CUBOID or right-angle corners → cuboid evidence
+
+        Decision: any cuboid evidence (A or B) → cuboid
+                  cylinder evidence from A, no cuboid evidence   → cylinder
+                  neither conclusive → fallback
+
         Fallback : lateral-normal azimuth entropy  +  full-cloud rect_score
-                   (used when too few top-face points are visible)
   ④ Best fit           →  2D circle in cross-section plane (cylinder only)
                            axis_pt, radius, mean_err
   ⑤ Height             →  percentile extents + end-cap refinement
@@ -65,17 +79,21 @@ _CAP_MIN_PTS    = 10     # minimum cap points for height refinement
 _CORNER_ANGLE_MAX   = 120.0   # hull vertex interior angle ≤ this → rigid corner
 _MIN_CORNERS_CUBOID = 2       # ≥ this many rigid corners → cuboid evidence
 
-# ── Top-face classifier (primary) ────────────────────────────────────────────
-# Split the cloud into:
-#   top-face  — normals nearly parallel to the table (dot > _CAP_NORMAL_DOT)
-#   lateral   — normals nearly perpendicular to the table
-# Project the top-face subset onto the horizontal plane and measure its shape:
-#   rect_score = convex-hull area / minAreaRect area
+# ── Two-cluster classifier ────────────────────────────────────────────────────
+# Cluster A — normals parallel to table axis (|n·axis| > _CAP_NORMAL_DOT)
+#             → top / bottom face points
+#   rect_score = convex-hull area / minAreaRect area  (bird's-eye projection)
 #     square  → ~1.00,   circle → ~π/4 ≈ 0.785
-_TOP_FACE_MIN_PTS    = 30     # minimum top-face points to trust the primary path
+_TOP_FACE_MIN_PTS    = 30     # minimum top-face points to trust cluster A
 _RECT_SCORE_CUBOID   = 0.88   # rect_score ≥ this → rectangular  → cuboid
 _RECT_SCORE_CYLINDER = 0.83   # rect_score ≤ this → circular     → cylinder
-                               # gap 0.83–0.88 → fall through to fallback
+                               # gap 0.83–0.88 → ambiguous in cluster A
+
+# Cluster B — normals perpendicular to table axis (|n·axis| < _PERP_DOT_THRESH)
+#             → lateral / side-wall points
+#   Project onto horizontal plane; right-angle corners or high rect_score → cuboid
+_PERP_DOT_THRESH     = 0.50   # |n·axis| below this → side-wall cluster
+_PERP_MIN_PTS        = 20     # minimum side-wall points to use cluster B
 
 # ── Lateral-normal entropy (fallback classifier) ──────────────────────────────
 _NORMAL_HIST_BINS      = 36    # 10° per bin
@@ -212,19 +230,27 @@ def _classify(pts: np.ndarray, normals: np.ndarray, axis: np.ndarray) -> str:
     """
     Classify the isolated object as 'cylinder' or 'cuboid'.
 
-    Primary path — top-face 2-D shape
-    ----------------------------------
-    Separate points whose normals are nearly parallel to the table axis
-    (the face parallel to the chessboard).  From directly above this is the
-    top face — the cleanest view for circle vs. square discrimination:
+    Two-cluster approach
+    --------------------
+    The point cloud is split by surface-normal orientation relative to the
+    table axis into two groups, each projected onto the horizontal plane
+    (bird's-eye view) for 2-D shape analysis.
 
-      rect_score = convex-hull area / minAreaRect area
-        ≥ _RECT_SCORE_CUBOID   → square footprint → cuboid
-        ≤ _RECT_SCORE_CYLINDER → circular footprint → cylinder
-      right-angle hull corners (≥ _MIN_CORNERS_CUBOID) → cuboid
+    Cluster A — normals parallel to chessboard (|n·axis| > _CAP_NORMAL_DOT)
+        Top / bottom face points.
+          • rect_score ≥ _RECT_SCORE_CUBOID or right-angle corners → cuboid vote
+          • rect_score ≤ _RECT_SCORE_CYLINDER                       → cylinder vote
 
-    If there are too few top-face points the result is ambiguous and the
-    fallback runs.
+    Cluster B — normals perpendicular to chessboard (|n·axis| < _PERP_DOT_THRESH)
+        Lateral / side-wall points.  Their horizontal footprint is rectangular
+        for a cuboid and circular for a cylinder.
+          • rect_score ≥ _RECT_SCORE_CUBOID or right-angle corners → cuboid vote
+
+    Decision
+    --------
+      Any cuboid vote                          → "cuboid"
+      Cylinder vote from A, no cuboid votes   → "cylinder"
+      Neither cluster conclusive              → fallback
 
     Fallback — lateral-normal entropy + full-cloud silhouette
     ---------------------------------------------------------
@@ -236,38 +262,67 @@ def _classify(pts: np.ndarray, normals: np.ndarray, axis: np.ndarray) -> str:
     e1  = np.cross(axis, ref);  e1 /= np.linalg.norm(e1)
     e2  = np.cross(axis, e1)
 
-    # ── Primary: top-face slice ────────────────────────────────────────────
+    cuboid_votes   = 0
+    cylinder_votes = 0
+
+    # ── Cluster A: top-face (normals ≈ parallel to table axis) ────────────
     top_mask = np.abs(normals @ axis) > _CAP_NORMAL_DOT
     if top_mask.sum() >= _TOP_FACE_MIN_PTS:
         top_pts = pts[top_mask]
         d       = top_pts - top_pts.mean(axis=0)
         top_2d  = np.column_stack([d @ e1, d @ e2])
 
-        rs          = _rect_score_2d(top_2d)
-        corners_2d  = _detect_2d_corners(top_2d)
-        has_corners = len(corners_2d) >= _MIN_CORNERS_CUBOID
+        rs_a        = _rect_score_2d(top_2d)
+        corners_a   = _detect_2d_corners(top_2d)
+        n_corners_a = len(corners_a)
 
-        print(f"[shape_fitter]  top_pts={top_mask.sum()}  "
-              f"rect={rs:.3f}  corners={len(corners_2d)}")
+        print(f"[shape_fitter]  [A] top_pts={top_mask.sum():3d}  "
+              f"rect={rs_a:.3f}  corners={n_corners_a}")
 
-        if rs >= _RECT_SCORE_CUBOID or has_corners:
-            return "cuboid"
-        if rs <= _RECT_SCORE_CYLINDER:
-            return "cylinder"
-        # Ambiguous — fall through to lateral-normal fallback
+        if rs_a >= _RECT_SCORE_CUBOID or n_corners_a >= _MIN_CORNERS_CUBOID:
+            cuboid_votes += 1
+        elif rs_a <= _RECT_SCORE_CYLINDER:
+            cylinder_votes += 1
+        # else: ambiguous in A — let cluster B or fallback decide
 
-    # ── Fallback: lateral-normal entropy + full silhouette ─────────────────
+    # ── Cluster B: side-wall (normals ≈ perpendicular to table axis) ───────
+    side_mask = np.abs(normals @ axis) < _PERP_DOT_THRESH
+    if side_mask.sum() >= _PERP_MIN_PTS:
+        side_pts = pts[side_mask]
+        d        = side_pts - side_pts.mean(axis=0)
+        side_2d  = np.column_stack([d @ e1, d @ e2])
+
+        rs_b        = _rect_score_2d(side_2d)
+        corners_b   = _detect_2d_corners(side_2d)
+        n_corners_b = len(corners_b)
+
+        print(f"[shape_fitter]  [B] side_pts={side_mask.sum():3d}  "
+              f"rect={rs_b:.3f}  corners={n_corners_b}")
+
+        if rs_b >= _RECT_SCORE_CUBOID or n_corners_b >= _MIN_CORNERS_CUBOID:
+            cuboid_votes += 1
+        # Note: cylinder votes are NOT added from cluster B — the side-wall
+        # footprint of a cylinder also projects as a somewhat circular ring,
+        # so its negative signal is weak.  Cylinder verdict comes from A only.
+
+    # ── Early decision ─────────────────────────────────────────────────────
+    if cuboid_votes > 0:
+        return "cuboid"
+    if cylinder_votes > 0:
+        return "cylinder"
+
+    # ── Fallback: lateral-normal entropy + full-cloud silhouette ───────────
     d      = pts - pts.mean(axis=0)
     pts_2d = np.column_stack([d @ e1, d @ e2])
 
     entropy      = _normal_cluster_score(normals, axis)
     is_clustered = entropy < _NORMAL_CLUSTER_THRESH
     rs_full      = _rect_score_2d(pts_2d)
-    corners_2d   = _detect_2d_corners(pts_2d)
-    has_corners  = len(corners_2d) >= _MIN_CORNERS_CUBOID
+    corners_full = _detect_2d_corners(pts_2d)
+    has_corners  = len(corners_full) >= _MIN_CORNERS_CUBOID
 
-    print(f"[shape_fitter]  (fallback) entropy={entropy:.3f}  "
-          f"rect={rs_full:.3f}  corners={len(corners_2d)}")
+    print(f"[shape_fitter]  [fallback] entropy={entropy:.3f}  "
+          f"rect={rs_full:.3f}  corners={len(corners_full)}")
 
     if is_clustered or has_corners or rs_full >= _RECT_SCORE_CUBOID:
         return "cuboid"
@@ -470,6 +525,8 @@ class ShapeTracker:
         self._shape_streak = 0
         self._shape_locked = False
         self._shape_flip   = 0
+        print("[shape_fitter]  *** full_reset() — shape vote cleared, "
+              "ready for new object ***")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

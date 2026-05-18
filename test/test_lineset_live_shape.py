@@ -121,55 +121,76 @@ def _shape_centroid(shape, tracker, shape_ls):
 
 def _grasp_from_shape(shape, tracker, shape_ls):
     """
-    Compute (rot, trans) from the fitted shape.
+    Compute (rot, trans) from the fitted shape, GraspNet convention.
 
-      rot[:, 0]  approach  — palm → fingertips
-      rot[:, 1]  closing   — between the two fingers
-      trans      palm centre (= fitted-shape centroid)
+      rot[:, 0]  approach  — gripper-frame +X, palm → fingertips
+      rot[:, 1]  closing   — gripper-frame +Y, between the two fingertips
+      rot[:, 2]  cross(approach, closing)
+      trans      tool centre point (TCP) = object centroid
+
+    Both grippers approach the object HORIZONTALLY (in the table plane).
+    The approach axis is the camera→centroid direction projected onto the
+    table plane; the closing axis is perpendicular to approach within that
+    plane.  This matches GraspNet's MIN_APPROACH_Z filter, which rejects
+    grasps coming from above/below the table.
     """
     trans = _shape_centroid(shape, tracker, shape_ls)
     if trans is None:
         return None, None
 
+    # ── Vertical (table) axis ────────────────────────────────────────────────
+    # Cylinder: tracker.axis is the EMA-smoothed table normal.
+    # Cuboid : tracker.axis is None (tracker.reset()'d) — recover it from the
+    #          fitted wireframe's vertical pillars instead.
     if shape == "cylinder":
         axis = tracker.axis
-
-        # Approach: camera → centre, projected ⊥ axis (horizontal grip)
-        to_obj   = trans / (np.linalg.norm(trans) + 1e-9)
-        approach = to_obj - (to_obj @ axis) * axis
-        nrm      = np.linalg.norm(approach)
-        if nrm < 1e-6:
-            ref      = np.array([1., 0., 0.]) if abs(axis[0]) < 0.9 \
-                       else np.array([0., 1., 0.])
-            approach = np.cross(axis, ref)
-            approach /= np.linalg.norm(approach)
-        else:
-            approach /= nrm
-
-        # Closing: along cylinder axis so fingers span the height
-        closing = np.cross(axis, approach)
-        closing /= np.linalg.norm(closing)
-
     elif shape == "cuboid":
-        verts    = np.asarray(shape_ls.points)         # 8 fitted corners
-        approach = trans / (np.linalg.norm(trans) + 1e-9)
+        verts = np.asarray(shape_ls.points)
+        if len(verts) < 8:
+            return None, None
+        axis = (verts[1::2] - verts[::2]).mean(axis=0)   # mean vertical pillar
+        n    = np.linalg.norm(axis)
+        if n < 1e-9:
+            return None, None
+        axis = axis / n
+    else:
+        return None, None
+    if axis is None:
+        return None, None
 
-        # Footprint edges of the fitted cuboid (bottom ring corners)
+    # ── Approach: (camera → centroid) projected onto the table plane ─────────
+    to_obj   = trans / (np.linalg.norm(trans) + 1e-9)
+    approach = to_obj - (to_obj @ axis) * axis
+    nrm      = np.linalg.norm(approach)
+    if nrm < 1e-6:
+        # Object straight above/below camera — pick an arbitrary horizontal
+        ref      = np.array([1., 0., 0.]) if abs(axis[0]) < 0.9 \
+                   else np.array([0., 1., 0.])
+        approach = np.cross(axis, ref)
+        approach /= np.linalg.norm(approach)
+    else:
+        approach /= nrm
+
+    # ── Closing: in the table plane, perpendicular to approach ───────────────
+    if shape == "cylinder":
+        # Perpendicular to both the cylinder axis and approach
+        closing  = np.cross(axis, approach)
+        closing /= np.linalg.norm(closing)
+    else:  # cuboid
+        # Pick the bottom-face edge most perpendicular to approach so the
+        # fingers grip the shorter cross-section.
         bot = verts[::2]
         e1  = bot[1] - bot[0];  e1 /= (np.linalg.norm(e1) + 1e-9)
         e2  = bot[2] - bot[1];  e2 /= (np.linalg.norm(e2) + 1e-9)
-        # Closing: footprint edge most perpendicular to approach
         closing = e2 if abs(approach @ e1) < abs(approach @ e2) else e1
+        # Orthogonalise against approach
         closing = closing - (closing @ approach) * approach
         nrm     = np.linalg.norm(closing)
         if nrm < 1e-6:
-            closing = np.cross(approach, np.array([0., -1., 0.]))
+            closing  = np.cross(axis, approach)
             closing /= np.linalg.norm(closing)
         else:
             closing /= nrm
-
-    else:
-        return None, None
 
     third = np.cross(approach, closing)
     rot   = np.column_stack([approach, closing, third])
@@ -179,18 +200,38 @@ def _grasp_from_shape(shape, tracker, shape_ls):
 
 
 def _fill_gripper_pts(pts: np.ndarray, rot, trans):
-    """Write the 6 gripper-skeleton points into the preallocated buffer."""
+    """
+    Write a 6-point gripper skeleton into the preallocated buffer.
+
+    GraspNet convention — `trans` is the TCP (between the fingertips) and
+    `approach` points FROM the gripper INTO the object.  The palm sits
+    BEHIND the TCP along -approach by FINGER_LENGTH; palm_back extends one
+    further PALM_DEPTH back.
+
+        palm_back ─── palm ─┬─── left_root ──── left_tip
+                            └─── right_root ─── right_tip
+
+    Lines (see _GRIPPER_LINES):
+        [palm_back→palm], [palm→l_root], [palm→r_root],
+        [l_root→l_tip],   [r_root→r_tip]
+    """
     approach = rot[:, 0]
     closing  = rot[:, 1]
     half_w   = FINGER_DISTANCE / 2.0
-    tip_c    = trans + approach * FINGER_LENGTH
 
-    pts[0] = trans - approach * PALM_DEPTH
-    pts[1] = trans
-    pts[2] = trans + closing * half_w
-    pts[3] = trans - closing * half_w
-    pts[4] = tip_c + closing * half_w
-    pts[5] = tip_c - closing * half_w
+    palm       = trans - approach * FINGER_LENGTH
+    palm_back  = palm  - approach * PALM_DEPTH
+    left_root  = palm  + closing * half_w
+    right_root = palm  - closing * half_w
+    left_tip   = trans + closing * half_w     # fingertips at the TCP
+    right_tip  = trans - closing * half_w
+
+    pts[0] = palm_back
+    pts[1] = palm
+    pts[2] = left_root
+    pts[3] = right_root
+    pts[4] = left_tip
+    pts[5] = right_tip
 
 
 def _object_params(rot, trans, shape, tracker, shape_ls):

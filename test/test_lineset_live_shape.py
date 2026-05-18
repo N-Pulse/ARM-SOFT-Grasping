@@ -8,14 +8,19 @@ cylinder / cuboid parameters produced by shape_fitter.  Because those parameters
 are already EMA-smoothed by ShapeTracker, the lineset converges smoothly and
 then locks in place once stable.
 
-Pipeline
---------
-  1. Detect table plane via chessboard (reused from test_shape_fit.py)
-  2. ObjectIsolator  →  isolated object point cloud per frame
-  3. ShapeFitThread  →  fit_and_track → shape type + smoothed parameters
-  4. _grasp_from_shape  →  approach / closing vectors from shape geometry
-  5. GraspSmoother  →  EMA blend + convergence lock
-  6. Open3D window shows: raw point cloud + shape wireframe + gripper lineset
+Pipeline (mirrors test_shape_fit.py exactly, with grasp drawing layered on top)
+------------------------------------------------------------------------------
+  1. Detect table plane via chessboard               (detect_table_plane)
+  2. Start ObjectIsolator                            (capture.object_isolation)
+  3. show_isolated_pcd(isolator, on_new_frame=cb)    (helper.pcd_visualizer)
+        → handles window, point-cloud display, frame accumulation, auto-zoom
+  4. Per-frame callback `_make_grasp_callback`:
+        a. ShapeFitThread → fit_and_track → shape type + smoothed parameters
+        b. Update shape wireframe in the scene
+        c. _grasp_from_shape → approach / closing vectors from shape geometry
+        d. GraspSmoother → EMA blend + convergence lock
+        e. Publish ROS2 messages (object pose, joint trajectory, hand pose)
+        f. Update gripper lineset in the scene
 
 Usage
 -----
@@ -34,24 +39,20 @@ Chessboard
 import sys
 import os
 import queue
-import signal
 import threading
-import time
 import argparse
-from collections import deque
 
 _HERE = os.path.dirname(__file__)
 _ROOT = os.path.abspath(os.path.join(_HERE, ".."))
 sys.path.insert(0, os.path.join(_ROOT, "capture"))
 sys.path.insert(0, _ROOT)
 
-import cv2
 import numpy as np
 import open3d as o3d
 
-from capture.object_isolation import ObjectIsolator, keep_largest_cluster
+from capture.object_isolation import ObjectIsolator
 from capture.shape_fitter import ShapeTracker, fit_and_track
-from helper.pcd_visualizer import auto_zoom
+from helper.pcd_visualizer import show_isolated_pcd
 from test_shape_fit import detect_table_plane
 
 import rclpy
@@ -121,11 +122,6 @@ class ShapeFitThread:
 # ── Chessboard defaults ────────────────────────────────────────────────────────
 _BOARD_COLS = 10
 _BOARD_ROWS = 7
-
-# ── Frame accumulation (mirrors pcd_visualizer.show_isolated_pcd) ─────────────
-_ACCUM_FRAMES  = 20      # number of past frames merged into the shape-fit cloud
-_ACCUM_VOXEL_M = 0.003   # voxel size (m) for downsampling the accumulated cloud
-_MOVE_THRESH_M = 0.015   # clear history when object moves more than this (m)
 
 # ── Gripper geometry ───────────────────────────────────────────────────────────
 FINGER_LENGTH   = 0.085
@@ -293,6 +289,13 @@ class GraspSmoother:
 
         return self._rot, self._trans
 
+    def reset(self):
+        """Forget the current pose — used when the object leaves the scene."""
+        self._rot    = None
+        self._trans  = None
+        self._locked = False
+        self._streak = 0
+
     @property
     def result(self):
         if self._trans is None:
@@ -324,14 +327,6 @@ def _gripper_lineset(rot, trans):
     ls.points = o3d.utility.Vector3dVector(pts)
     ls.lines  = o3d.utility.Vector2iVector(lines)
     ls.colors = o3d.utility.Vector3dVector([GRIPPER_COLOR] * len(lines))
-    return ls
-
-
-def _empty_lineset():
-    ls        = o3d.geometry.LineSet()
-    ls.points = o3d.utility.Vector3dVector(np.zeros((2, 3)))
-    ls.lines  = o3d.utility.Vector2iVector([[0, 1]])
-    ls.colors = o3d.utility.Vector3dVector([[0, 0, 0]])
     return ls
 
 
@@ -419,8 +414,148 @@ def _object_params(rot, trans, shape, tracker, shape_ls):
     return distance_m, elevation_deg, bearing_deg, hand_pos
 
 
-def ros_spin(node): # for continuous publishing
+def ros_spin(node):
+    """Background ROS2 spinner so publishers stay responsive."""
     rclpy.spin(node)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ON-NEW-FRAME CALLBACK  (drop-in replacement for test_shape_fit overlay)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _make_grasp_callback(table_normal,
+                         object_publisher,
+                         trajectory_publisher,
+                         pose_publisher):
+    """
+    Build a callback compatible with show_isolated_pcd that:
+      · Runs shape fitting in a background thread (ShapeFitThread)
+      · Draws the cylinder / cuboid wireframe
+      · Derives a grasp pose from the fitted shape
+      · Smooths the pose (GraspSmoother) and draws the gripper lineset
+      · Publishes the corresponding object / trajectory / pose ROS2 messages
+
+    Mirrors the structure of test_shape_fit._make_overlay_callback so the
+    high-level pipeline (table → isolator → show_isolated_pcd → callback)
+    stays identical to test_shape_fit.py.
+    """
+    tracker  = ShapeTracker()
+    smoother = GraspSmoother()
+    fitter   = ShapeFitThread(table_normal, tracker)
+
+    # Persistent geometry handles + last-known labels
+    state = {
+        "shape_ls":   None,    # o3d.geometry.LineSet  — cylinder / cuboid wireframe
+        "grasp_ls":   None,    # o3d.geometry.LineSet  — gripper lineset
+        "label":      None,    # last shape label drawn
+        "lookat_set": False,   # one-shot re-centre, same as test_shape_fit
+    }
+
+    def _remove_overlays(vis):
+        """Drop both shape and grasp geometries from the scene."""
+        if state["shape_ls"] is not None:
+            vis.remove_geometry(state["shape_ls"], reset_bounding_box=False)
+            state["shape_ls"] = None
+        if state["grasp_ls"] is not None:
+            vis.remove_geometry(state["grasp_ls"], reset_bounding_box=False)
+            state["grasp_ls"] = None
+        state["label"] = None
+
+    def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer):
+        # ── Object lost — full reset so the next object starts fresh ────────
+        if len(obj_verts) == 0:
+            tracker.full_reset()
+            smoother.reset()
+            _remove_overlays(vis)
+            vis.update_renderer()
+            return
+
+        # ── Hand frame off to background fitter ──────────────────────────────
+        fitter.push(obj_verts)
+
+        # ── Pull latest fit result (non-blocking) ────────────────────────────
+        new_shape, new_shape_ls = fitter.pop()
+        if new_shape_ls is None:
+            return                        # fitter hasn't produced anything yet
+
+        # ── Update / add the shape wireframe ─────────────────────────────────
+        if new_shape != state["label"]:
+            print(f"[shape_fit]  *** shape → {new_shape} ***")
+            # Topology changed (cylinder ↔ cuboid) — remove + re-add
+            if state["shape_ls"] is not None:
+                vis.remove_geometry(state["shape_ls"], reset_bounding_box=False)
+            vis.add_geometry(new_shape_ls, reset_bounding_box=False)
+            state["shape_ls"] = new_shape_ls
+            state["label"]    = new_shape
+        else:
+            ls = state["shape_ls"]
+            ls.points = new_shape_ls.points
+            ls.lines  = new_shape_ls.lines
+            ls.colors = new_shape_ls.colors
+            vis.update_geometry(ls)
+
+        # Re-centre once on the first successful fit (same trick as test_shape_fit)
+        if not state["lookat_set"]:
+            vis.get_view_control().set_lookat(obj_verts.mean(axis=0).tolist())
+            state["lookat_set"] = True
+
+        # ── Derive grasp pose from the fitted shape ──────────────────────────
+        new_rot, new_trans = _grasp_from_shape(new_shape, tracker, new_shape_ls)
+        if new_rot is None:
+            return
+
+        rot, trans = smoother.update(new_rot, new_trans)
+        distance_m, elevation_deg, bearing_deg, hand_pos = \
+            _object_params(rot, trans, new_shape, tracker, new_shape_ls)
+
+        # ── Publish ROS2 messages ────────────────────────────────────────────
+        elevation_rad = np.deg2rad(elevation_deg)
+        bearing_rad   = np.deg2rad(bearing_deg)
+
+        # Send object type and position
+        object_msg = Float64MultiArray()
+        shape_id   = 1. if new_shape == "cylinder" else 0.
+        object_msg.data = [shape_id, distance_m, 0., 0., 0., 0., 0.]
+        object_publisher.publish(object_msg)
+
+        # Send prosthesis trajectory (arm base movement, wrist rotation)
+        trajectory_msg = JointTrajectory()
+        trajectory_msg.joint_names.append('joint_base_x')
+        trajectory_msg.joint_names.append('joint_base_y')
+        trajectory_msg.joint_names.append('joint_base_z')
+        trajectory_msg.joint_names.append('joint_wrist_x')
+        trajectory_msg.joint_names.append('joint_wrist_y')
+        point = JointTrajectoryPoint()
+        point.time_from_start = Duration(sec=5, nanosec=0)
+        point.positions.append(hand_pos[0] - 0.12)  # 12 cm offset (wrist base origin)
+        point.positions.append(hand_pos[1])
+        point.positions.append(hand_pos[2])
+        point.positions.append(bearing_rad)
+        point.positions.append(elevation_rad)
+        trajectory_msg.points.append(point)
+        trajectory_publisher.publish(trajectory_msg)
+
+        # Send close-hand command to simulation
+        pose_msg = Int8()
+        pose_msg.data = 1
+        pose_publisher.publish(pose_msg)
+
+        # ── Update / add the gripper lineset ─────────────────────────────────
+        new_ls = _gripper_lineset(rot, trans)
+        if state["grasp_ls"] is None:
+            vis.add_geometry(new_ls, reset_bounding_box=False)
+            state["grasp_ls"] = new_ls
+        else:
+            gls = state["grasp_ls"]
+            gls.points = new_ls.points
+            gls.lines  = new_ls.lines
+            gls.colors = new_ls.colors
+            vis.update_geometry(gls)
+
+    # Expose the fitter so the caller can cleanly shut down the worker thread.
+    _on_frame.fitter = fitter
+    return _on_frame
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -438,218 +573,41 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
     print("YOLO ready — opening viewer.\n")
     print("Running — close the Open3D window or Ctrl+C to stop.\n")
 
-    # ── Shape-fit background thread ────────────────────────────────────────────
-    tracker  = ShapeTracker()
-    smoother = GraspSmoother()
-    fitter   = ShapeFitThread(table_normal, tracker)
-    
     # ── ROS2 node start ────────────────────────────────────────────────────────
-    rclpy.init() # initialize ROS2
+    rclpy.init()
     node = Node('CV_publisher_node')
-    object_publisher = node.create_publisher(Float64MultiArray, '/cv/model', 10)
-    trajectory_publisher = node.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
-    pose_publisher = node.create_publisher(Int8, '/pose_goals', 10)
+    object_publisher     = node.create_publisher(Float64MultiArray, '/cv/model', 10)
+    trajectory_publisher = node.create_publisher(
+        JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
+    pose_publisher       = node.create_publisher(Int8, '/pose_goals', 10)
 
     ros_thread = threading.Thread(target=ros_spin, args=(node,), daemon=True)
     ros_thread.start()
 
-    # ── Clean-exit flag ────────────────────────────────────────────────────────
-    _stop = threading.Event()
-    signal.signal(signal.SIGINT, lambda *_: _stop.set())
+    # ── Build the per-frame callback that fits shape + draws lineset ──────────
+    on_frame = _make_grasp_callback(table_normal,
+                                    object_publisher,
+                                    trajectory_publisher,
+                                    pose_publisher)
 
-    # ── Open3D window ──────────────────────────────────────────────────────────
-    CV2_WIN = "YOLO Detection"
-    cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
-
-    vis = o3d.visualization.Visualizer()
-    vis.create_window("Shape-based Grasp — Live", width=1280, height=720)
-    opt = vis.get_render_option()
-    opt.point_size       = 2.0
-    opt.line_width       = 3.0
-    opt.background_color = np.array([1.0, 1.0, 1.0])
-
-    pcd      = o3d.geometry.PointCloud()
-    grasp_ls = _empty_lineset()
-
-    geom_added     = False
-    zoom_fitted    = False
-    last_grasp     = None
-    grasp_ls_ready = False
-    shape_ls_geom  = None
-    last_shape     = None
-
-    # ── Frame accumulation (same logic as pcd_visualizer.show_isolated_pcd) ──
-    _accum_buf       = deque(maxlen=_ACCUM_FRAMES)
-    _prev_centroid   = None
-
-    RENDER_INTERVAL = 1.0 / 30.0
-    _last_render    = 0.0
-    frame_ready     = False
-
-    while not _stop.is_set():
-        # ── Pull latest frame ────────────────────────────────────────────────
-        frame_ready = False
+    try:
+        # Same pipeline call as test_shape_fit.run — no custom render loop here
+        show_isolated_pcd(
+            isolator,
+            title="Shape-based Grasp — Live",
+            on_new_frame=on_frame,
+            camera_up=(0, -1, 0),   # RealSense Y-down convention
+        )
+    finally:
+        print("\n[test_lineset_live_shape] shutting down...")
+        on_frame.fitter.stop()
+        isolator.stop()
         try:
-            verts, _, full_colors, obj_verts, obj_colors, preview_bgr = \
-                isolator._frame_queue.get_nowait()
-            frame_ready = True
-
-            pts  = obj_verts  if len(obj_verts)  > 0 else verts
-            cols = obj_colors if len(obj_colors) > 0 else full_colors
-
-            pcd.points = o3d.utility.Vector3dVector(pts)
-            pcd.colors = o3d.utility.Vector3dVector(cols)
-
-            if not geom_added:
-                vis.add_geometry(pcd)
-                vis.add_geometry(grasp_ls)
-                geom_added = True
-            else:
-                vis.update_geometry(pcd)
-
-            if not zoom_fitted and len(obj_verts) > 0:
-                iso_pcd = o3d.geometry.PointCloud()
-                iso_pcd.points = o3d.utility.Vector3dVector(obj_verts)
-                auto_zoom(vis, iso_pcd)
-                zoom_fitted = True
-
-            if preview_bgr is not None:
-                cv2.imshow(CV2_WIN, preview_bgr)
-
-            # ── Accumulate frames and push dense cloud to shape fitter ────────
-            if len(obj_verts) > 0:
-                # Clear history if the object moved significantly
-                curr_centroid = obj_verts.mean(axis=0)
-                if _prev_centroid is not None:
-                    if np.linalg.norm(curr_centroid - _prev_centroid) > _MOVE_THRESH_M:
-                        _accum_buf.clear()
-                _prev_centroid = curr_centroid
-
-                _accum_buf.append((obj_verts.copy(), obj_colors.copy()))
-
-                # Merge, cluster-filter, and voxel-downsample accumulated cloud
-                all_pts  = np.concatenate([v for v, _ in _accum_buf])
-                all_cols = np.concatenate([c for _, c in _accum_buf])
-                all_pts, all_cols = keep_largest_cluster(all_pts, all_cols)
-                tmp = o3d.geometry.PointCloud()
-                tmp.points = o3d.utility.Vector3dVector(all_pts)
-                if _ACCUM_VOXEL_M > 0:
-                    tmp = tmp.voxel_down_sample(_ACCUM_VOXEL_M)
-                fit_pts = np.asarray(tmp.points)
-
-                fitter.push(fit_pts)
-            else:
-                _accum_buf.clear()
-                _prev_centroid = None
-
-        except queue.Empty:
+            rclpy.shutdown()
+        except Exception:
             pass
-
-        # ── Pull latest shape wireframe + compute grasp ───────────────────────
-        new_shape, new_shape_ls = fitter.pop()
-        new_grasp = None
-        if new_shape_ls is not None:
-            new_rot, new_trans = _grasp_from_shape(new_shape, tracker, new_shape_ls)
-            if new_rot is not None:
-                rot, trans = smoother.update(new_rot, new_trans)
-                new_grasp = (rot, trans)
-                distance_m, elevation_deg, bearing_deg, hand_pos = _object_params(rot, trans, new_shape, tracker, new_shape_ls)
-                
-                send_ros_data = False
-                if not send_ros_data :
-                    
-                    send_ros_data = True
-                    elevation_rad = np.deg2rad(elevation_deg)
-                    bearing_rad = np.deg2rad(bearing_deg)
-
-                    # Send object type and position
-                    object_msg = Float64MultiArray()
-                    #shape = 1. # 0 for cube, 1 for cylinder
-                    shape = 1. if new_shape == "cylinder" else 0.
-                    object_msg.data = [shape, distance_m, 0., 0., 0., 0., 0.] #[object_type, x, y, z, roll, pitch, yaw]
-                    object_publisher.publish(object_msg)
-
-                    # Send prosthesis trajectory (arm base movement, wrist rotation)
-                    trajectory_msg = JointTrajectory()
-                    trajectory_msg.joint_names.append('joint_base_x')
-                    trajectory_msg.joint_names.append('joint_base_y')
-                    trajectory_msg.joint_names.append('joint_base_z')
-                    trajectory_msg.joint_names.append('joint_wrist_x')
-                    trajectory_msg.joint_names.append('joint_wrist_y')
-                    point = JointTrajectoryPoint()
-                    point.time_from_start = Duration(sec=5, nanosec=0)
-                    point.positions.append(hand_pos[0]-0.12) # x base position, offfset of 12cm bc origin is at wrist's base
-                    point.positions.append(hand_pos[1]) # y base position
-                    point.positions.append(hand_pos[2]) # z base position
-                    point.positions.append(bearing_rad) # wrist rotation (right/left)
-                    point.positions.append(elevation_rad) # wrist rotation (up/down)
-                    trajectory_msg.points.append(point)
-                    trajectory_publisher.publish(trajectory_msg)
-
-                    # Send close hand command to simulation
-                    pose_msg = Int8()
-                    pose_msg.data = 1
-                    pose_publisher.publish(pose_msg)    
-
-        if new_shape_ls is not None and geom_added:
-            if new_shape != last_shape:
-                # Topology changed (cylinder ↔ cuboid) — must remove + re-add
-                print(f"[shape]  *** {new_shape} ***")
-                if shape_ls_geom is not None:
-                    vis.remove_geometry(shape_ls_geom, reset_bounding_box=False)
-                vis.add_geometry(new_shape_ls, reset_bounding_box=False)
-                shape_ls_geom = new_shape_ls
-                last_shape    = new_shape
-            else:
-                shape_ls_geom.points = new_shape_ls.points
-                shape_ls_geom.lines  = new_shape_ls.lines
-                shape_ls_geom.colors = new_shape_ls.colors
-                vis.update_geometry(shape_ls_geom)
-
-        # ── Update gripper lineset from smoothed shape-based grasp ───────────
-        if new_grasp is not None and new_grasp is not last_grasp:
-            last_grasp = new_grasp
-            rot, trans = new_grasp
-            new_ls = _gripper_lineset(rot, trans)
-            if not grasp_ls_ready and geom_added:
-                vis.remove_geometry(grasp_ls, reset_bounding_box=False)
-                grasp_ls.points = new_ls.points
-                grasp_ls.lines  = new_ls.lines
-                grasp_ls.colors = new_ls.colors
-                vis.add_geometry(grasp_ls, reset_bounding_box=False)
-                grasp_ls_ready = True
-            elif grasp_ls_ready:
-                grasp_ls.points = new_ls.points
-                grasp_ls.lines  = new_ls.lines
-                grasp_ls.colors = new_ls.colors
-                vis.update_geometry(grasp_ls)
-
-        # ── Render (capped at 30 fps) ────────────────────────────────────────
-        now = time.monotonic()
-        if now - _last_render >= RENDER_INTERVAL:
-            if not vis.poll_events():
-                _stop.set()
-                break
-            vis.update_renderer()
-            _last_render = now
-
-        key = cv2.waitKey(1) & 0xFF
-        if key in (27, ord("q")):
-            _stop.set()
-            break
-
-        if not frame_ready:
-            time.sleep(0.005)
-
-    # ── Teardown ──────────────────────────────────────────────────────────────
-    print("\n[test_lineset_live_shape] shutting down...")
-    _stop.set()  # Signal stop
-    fitter.stop()
-    isolator.stop()
-    cv2.destroyAllWindows()
-    vis.destroy_window()
-    ros_thread.join(timeout=2)  # Wait for ROS thread to finish
-    print("[test_lineset_live_shape] done.")
+        ros_thread.join(timeout=2)
+        print("[test_lineset_live_shape] done.")
 
 
 if __name__ == "__main__":

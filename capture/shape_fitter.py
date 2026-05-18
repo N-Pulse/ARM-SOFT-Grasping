@@ -79,6 +79,13 @@ _EDGE_FRAC_CUBOID      = 0.06  # > 6 % edge points → strong cuboid signal
 _CORNER_ANGLE_MAX      = 120.0 # convex-hull vertex interior angle ≤ this → rigid corner
 _MIN_CORNERS_CUBOID    = 2     # at least two rigid hull corners required → strong cuboid evidence
 
+# ── Silhouette rectangularity ─────────────────────────────────────────────────
+# 2-D convex-hull area / minAreaRect area:
+#   square  → 1.00   (hull fills the bounding rectangle almost completely)
+#   circle  → π/4 ≈ 0.785   (circle wastes the corners of its bounding square)
+# Threshold sits in the gap between the two; reliable from any viewing angle.
+_RECT_SCORE_CUBOID = 0.88
+
 # ── Normal-distribution classifier ────────────────────────────────────────────
 # A cylinder's lateral normals fan out uniformly in all azimuths around the axis
 # (entropy ≈ max).  A cuboid's lateral normals collapse into 2–4 tight clusters
@@ -88,7 +95,8 @@ _NORMAL_CLUSTER_THRESH = 0.35  # normalised entropy below this → clustered →
 
 # ── Statistical outlier removal ───────────────────────────────────────────────
 _SOR_NEIGHBORS = 20         # kNN radius for mean-distance statistics
-_SOR_STD_RATIO = 2.0        # points > this many σ above the mean are removed
+_SOR_STD_RATIO = 2.5        # points > this many σ above the mean are removed
+                             # (2.5 rather than 2.0 so edge/corner points are kept)
 
 # ── Tracker ────────────────────────────────────────────────────────────────────
 _ALPHA     = 0.20           # EMA base learning rate
@@ -310,18 +318,21 @@ def _classify(k1: float, k2: float,
     """
     Classify the isolated object as 'cylinder' or 'cuboid'.
 
-    Three independent signals are computed; the decision is conservative —
-    "cylinder" requires ALL signals to agree, so a cube is hard to miss.
+    Four independent signals are computed.  "cylinder" is returned only when
+    every signal agrees there is no cuboid evidence; a single positive cuboid
+    signal is sufficient to return "cuboid".
 
     Signals
     -------
-    1. Normal-distribution entropy  (primary, most robust)
-    2. 2-D rigid-corner detection   (geometric, axis-projected)
-    3. Curvature anisotropy         (fallback, noisy for edge-heavy regions)
+    1. Normal-distribution entropy    (primary, robust for side views)
+    2. 2-D rigid-corner detection     (geometric, axis-projected)
+    3. Curvature anisotropy           (fallback, noisy for edge regions)
+    4. 2-D silhouette rectangularity  (primary for top-down views)
+         hull_area / minAreaRect_area  ≈ 1.0 for square, ≈ 0.785 for circle
 
     Decision
     --------
-    → "cylinder"  only when ALL three say "not cuboid"
+    → "cylinder"  only when ALL four say "not cuboid"
     → "cuboid"    if ANY signal fires
     """
     # Signal 1: normal-distribution entropy
@@ -340,10 +351,22 @@ def _classify(k1: float, k2: float,
     # Signal 3: curvature
     curv_cylinder = abs(k2) >= _FLAT_THRESH
 
-    print(f"[shape_fitter]  norm_entropy={norm_entropy:.3f}  "
-          f"corners={len(corners_2d)}  curv_cyl={curv_cylinder}")
+    # Signal 4: silhouette rectangularity
+    # Computed on the same axis-perpendicular 2-D projection.  Reliable even
+    # when viewing from directly above (where entropy has no lateral normals
+    # to work with and corner subsampling may miss the actual hull corners).
+    pts_f      = pts_2d.astype(np.float32).reshape(-1, 1, 2)
+    hull_area  = float(cv2.contourArea(cv2.convexHull(pts_f)))
+    _, (wm, hm), _ = cv2.minAreaRect(pts_f)
+    rect_score     = hull_area / (wm * hm + 1e-6)
+    is_rectangular = rect_score >= _RECT_SCORE_CUBOID
 
-    if curv_cylinder and not is_clustered and not has_corners:
+    print(f"[shape_fitter]  norm_entropy={norm_entropy:.3f}  "
+          f"corners={len(corners_2d)}  curv_cyl={curv_cylinder}  "
+          f"rect={rect_score:.3f}")
+
+    # Cylinder only when no cuboid signal fires at all
+    if curv_cylinder and not is_clustered and not has_corners and not is_rectangular:
         return "cylinder"
     return "cuboid"
 

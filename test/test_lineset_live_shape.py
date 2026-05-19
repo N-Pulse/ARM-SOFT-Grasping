@@ -270,7 +270,7 @@ class CVPublisherNode(Node):
     def __init__(self):
         super().__init__('CV_publisher_node')
         self.object_spawn_feedback = 0
-        self.object_pub = self.create_publisher(Float64MultiArray, '/cv/model', 10)
+        self.object_pub = self.create_publisher(Float64MultiArray, '/cv/model/pose', 10)
         self.traj_pub   = self.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
         self.pose_pub   = self.create_publisher(Int8, '/pose_goals', 10)
         self.create_subscription(Int8, '/cv/model/pose/feedback', self.object_feedback, 10)
@@ -388,11 +388,7 @@ class FitWorker:
     def _publish(self, shape, rot, trans, shape_ls):
         d_m, elev, bear, hand = _object_params(
             rot, trans, shape, self._tracker, shape_ls)
-        #-----------FOR COMMUNICATION TEST ONLY
-        pose = Int8()
-        pose.data = 1
-        self._node.pose_pub.publish(pose)
-        #-----------
+        
         obj = Float64MultiArray()
         obj.data = [1. if shape == "cylinder" else 0.,
                     d_m, 0., 0., 0., 0., 0.]

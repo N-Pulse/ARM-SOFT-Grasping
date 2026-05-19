@@ -263,6 +263,23 @@ def _object_params(rot, trans, shape, tracker, shape_ls):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ROS2 NODE
+# ══════════════════════════════════════════════════════════════════════════════
+
+class CVPublisherNode(Node):
+    def __init__(self):
+        super().__init__('CV_publisher_node')
+        self.object_spawn_feedback = 0
+        self.object_pub = self.create_publisher(Float64MultiArray, '/cv/model', 10)
+        self.traj_pub   = self.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
+        self.pose_pub   = self.create_publisher(Int8, '/pose_goals', 10)
+        self.create_subscription(Int8, '/cv/model/pose/feedback', self.object_feedback, 10)
+
+        def object_feedback(self, msg):
+            self.object_spawn_feedback = msg.data
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # FitWorker — all calculation lives here, off the render thread
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -281,11 +298,9 @@ class FitWorker:
         centroid    : (3,) np.ndarray  — used for one-shot lookat
     """
 
-    def __init__(self, table_normal, object_pub, traj_pub, pose_pub):
+    def __init__(self, table_normal, node):
         self._table_normal = table_normal
-        self._object_pub   = object_pub
-        self._traj_pub     = traj_pub
-        self._pose_pub     = pose_pub
+        self._node         = node
 
         self._tracker      = ShapeTracker()
         self._was_locked   = False
@@ -373,24 +388,30 @@ class FitWorker:
     def _publish(self, shape, rot, trans, shape_ls):
         d_m, elev, bear, hand = _object_params(
             rot, trans, shape, self._tracker, shape_ls)
-
+        #-----------FOR COMMUNICATION TEST ONLY
+        pose = Int8()
+        pose.data = 1
+        self._node.pose_pub.publish(pose)
+        #-----------
         obj = Float64MultiArray()
         obj.data = [1. if shape == "cylinder" else 0.,
                     d_m, 0., 0., 0., 0., 0.]
-        self._object_pub.publish(obj)
+        self._node.object_pub.publish(obj)
 
-        traj = JointTrajectory()
-        traj.joint_names = _JOINT_NAMES
-        pt = JointTrajectoryPoint()
-        pt.time_from_start = Duration(sec=5, nanosec=0)
-        pt.positions = [hand[0] - 0.12, hand[1], hand[2],
-                        np.deg2rad(bear), np.deg2rad(elev)]
-        traj.points.append(pt)
-        self._traj_pub.publish(traj)
+        if self._node.object_spawn_feedback == 1 :
 
-        pose = Int8()
-        pose.data = 1
-        self._pose_pub.publish(pose)
+            traj = JointTrajectory()
+            traj.joint_names = _JOINT_NAMES
+            pt = JointTrajectoryPoint()
+            pt.time_from_start = Duration(sec=5, nanosec=0)
+            pt.positions = [hand[0] - 0.12, hand[1], hand[2],
+                            np.deg2rad(bear), np.deg2rad(elev)]
+            traj.points.append(pt)
+            self._node.traj_pub.publish(traj)
+
+            pose = Int8()
+            pose.data = 1
+            self._node.pose_pub.publish(pose)
 
         print(f"[grasp]  *** LOCKED & PUBLISHED  trans={np.round(trans, 3)}  "
               f"elev={elev:+.1f}°  bear={bear:+.1f}° ***")
@@ -489,21 +510,17 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
 
     isolator = ObjectIsolator(min_points=50)
     isolator.start()
-    print("Waiting for YOLO to load...")
+    print("isolator started...")
     isolator.ready.wait()
-    print("YOLO ready — opening viewer.\n")
+    print("opening viewer.\n")
 
     rclpy.init()
-    node = Node('CV_publisher_node')
-    object_pub = node.create_publisher(Float64MultiArray, '/cv/model', 10)
-    traj_pub   = node.create_publisher(
-        JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
-    pose_pub   = node.create_publisher(Int8, '/pose_goals', 10)
+    node = CVPublisherNode()
 
     ros_thread = threading.Thread(target=_ros_spin, args=(node,), daemon=True)
     ros_thread.start()
 
-    worker   = FitWorker(table_normal, object_pub, traj_pub, pose_pub)
+    worker   = FitWorker(table_normal, node)
     on_frame = _make_grasp_callback(worker)
 
     try:

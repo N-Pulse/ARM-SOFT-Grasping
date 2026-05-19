@@ -67,7 +67,7 @@ _COLOR = {
 }
 
 # ── Normal estimation ──────────────────────────────────────────────────────────
-_KNN_NORMAL = 15
+_KNN_NORMAL = 10   # reduced from 15 — sufficient after voxel downsampling
 
 # ── Geometry ───────────────────────────────────────────────────────────────────
 _R_MIN          = 0.005
@@ -99,6 +99,11 @@ _PERP_MIN_PTS        = 20     # minimum side-wall points to use cluster B
 _NORMAL_HIST_BINS      = 36    # 10° per bin
 _NORMAL_CLUSTER_THRESH = 0.35  # normalised entropy < this → clustered → cuboid
 
+# ── Voxel downsampling  (FIRST step — runs before everything else) ────────────
+_VOXEL_SIZE = 0.005   # 5 mm grid — keeps shape detail, reduces N by ~5-10×
+                       # Raise to 0.008 for faster but coarser fit;
+                       # Lower to 0.003 for denser clouds / larger objects.
+
 # ── Statistical outlier removal ───────────────────────────────────────────────
 _SOR_NEIGHBORS = 20    # neighbours used for mean-distance statistics
 _SOR_STD_RATIO = 2.5   # remove points > this many σ above the mean
@@ -107,7 +112,7 @@ _SOR_STD_RATIO = 2.5   # remove points > this many σ above the mean
 # ── DBSCAN clustering ─────────────────────────────────────────────────────────
 _DBSCAN_EPS        = 0.012   # neighbourhood radius (m) — ~12 mm covers typical
                               # point spacing while bridging small surface gaps
-_DBSCAN_MIN_PTS    = 10      # minimum cluster size
+_DBSCAN_MIN_PTS    = 5       # minimum cluster size (smaller after downsampling)
 
 # ── Tracker ────────────────────────────────────────────────────────────────────
 _ALPHA    = 0.20   # EMA base learning rate
@@ -819,18 +824,24 @@ def fit_once(pts: np.ndarray,
     if len(pts) < 50:
         return None, None
 
-    # ── SOR ────────────────────────────────────────────────────────────────
-    _tmp = o3d.geometry.PointCloud()
-    _tmp.points = o3d.utility.Vector3dVector(pts)
-    _tmp, _ = _tmp.remove_statistical_outlier(
-        nb_neighbors=_SOR_NEIGHBORS, std_ratio=_SOR_STD_RATIO)
-    pts = np.asarray(_tmp.points)
-    if len(pts) < 50:
+    # ── ① Voxel downsample  (fast — reduces N before all expensive ops) ────
+    _pcd = o3d.geometry.PointCloud()
+    _pcd.points = o3d.utility.Vector3dVector(pts)
+    _pcd = _pcd.voxel_down_sample(_VOXEL_SIZE)
+    pts = np.asarray(_pcd.points)
+    if len(pts) < 20:
         return None, None
 
-    # ── Keep only the dominant cluster ─────────────────────────────────────
+    # ── ② SOR on the downsampled cloud ────────────────────────────────────
+    _pcd, _ = _pcd.remove_statistical_outlier(
+        nb_neighbors=_SOR_NEIGHBORS, std_ratio=_SOR_STD_RATIO)
+    pts = np.asarray(_pcd.points)
+    if len(pts) < 20:
+        return None, None
+
+    # ── ③ Keep only the dominant cluster ──────────────────────────────────
     pts = _largest_cluster(pts)
-    if len(pts) < 50:
+    if len(pts) < 20:
         return None, None
 
     axis = table_normal if table_normal is not None \
@@ -840,7 +851,7 @@ def fit_once(pts: np.ndarray,
     if shape_hint is None:
         return None, None   # no YOLO result → do not fit
     shape = shape_hint
-    print(f"[shape_fitter]  YOLO → {shape}")
+    print(f"[shape_fitter]  YOLO → {shape}  pts={len(pts)}")
 
     # ── Surface normals (used by both cuboid face-plane fitting and cylinder) ─
     pcd = o3d.geometry.PointCloud()
@@ -913,26 +924,32 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker,
     if len(pts) < 50:
         return None, None
 
-    # ── Statistical outlier removal ────────────────────────────────────────
-    _tmp = o3d.geometry.PointCloud()
-    _tmp.points = o3d.utility.Vector3dVector(pts)
-    _tmp, _ = _tmp.remove_statistical_outlier(
-        nb_neighbors=_SOR_NEIGHBORS, std_ratio=_SOR_STD_RATIO)
-    pts = np.asarray(_tmp.points)
-    if len(pts) < 50:
+    # ── ① Voxel downsample ────────────────────────────────────────────────
+    _pcd = o3d.geometry.PointCloud()
+    _pcd.points = o3d.utility.Vector3dVector(pts)
+    _pcd = _pcd.voxel_down_sample(_VOXEL_SIZE)
+    pts = np.asarray(_pcd.points)
+    if len(pts) < 20:
         return None, None
 
-    # ── Keep only the dominant cluster ─────────────────────────────────────
+    # ── ② SOR on the downsampled cloud ────────────────────────────────────
+    _pcd, _ = _pcd.remove_statistical_outlier(
+        nb_neighbors=_SOR_NEIGHBORS, std_ratio=_SOR_STD_RATIO)
+    pts = np.asarray(_pcd.points)
+    if len(pts) < 20:
+        return None, None
+
+    # ── ③ Keep only the dominant cluster ──────────────────────────────────
     pts = _largest_cluster(pts)
-    if len(pts) < 50:
+    if len(pts) < 20:
         return None, None
 
     _fallback_axis = table_normal if table_normal is not None \
                      else np.array([0., 0., 1.])
 
-    # ── Fast path A: locked cuboid — compute normals for face-plane fitting ──
+    # ── Fast path A: locked cuboid ────────────────────────────────────────
     if tracker._shape_locked and tracker.shape == "cuboid":
-        _pcd = o3d.geometry.PointCloud()
+        # Reuse the already-downsampled _pcd from step ①
         _pcd.points = o3d.utility.Vector3dVector(pts)
         _pcd.estimate_normals(
             search_param=o3d.geometry.KDTreeSearchParamKNN(knn=_KNN_NORMAL))

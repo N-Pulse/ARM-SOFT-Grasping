@@ -87,12 +87,6 @@ RED_MIN_AREA  = 500   # minimum contour area in pixels (rejects noise specks)
 CLUSTER_EPS        = 0.02   # 2 cm — max neighbour distance within a cluster
 CLUSTER_MIN_POINTS = 10     # fragments smaller than this are discarded
 
-# ─── DBSCAN skip thresholds ───────────────────────────────────────────────────
-# DBSCAN is expensive; skip it when the detected bounding box hasn't moved or
-# grown/shrunk noticeably since the last frame.
-DBSCAN_SKIP_CENTER_PX  = 8     # skip if bbox centre moved < this many pixels
-DBSCAN_SKIP_SIZE_RATIO = 0.12  # skip if bbox area changed < this fraction
-
 
 def keep_largest_cluster(verts: np.ndarray,
                          colors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -135,14 +129,14 @@ def _build_pipeline():
 
     align    = rs.align(rs.stream.color)
     spatial  = rs.spatial_filter()
-    temporal = rs.temporal_filter()
     holes    = rs.hole_filling_filter()
+    # Temporal filter removed — it blends 60 % of depth from previous frames,
+    # causing the point cloud to lag behind when the object is placed or moved.
+    # Spatial smoothing alone gives sufficient depth noise reduction.
     spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
     spatial.set_option(rs.option.filter_smooth_delta, 20)
-    temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
-    temporal.set_option(rs.option.filter_smooth_delta, 20)
 
-    return pipeline, align, spatial, temporal, holes, rs.pointcloud()
+    return pipeline, align, spatial, holes, rs.pointcloud()
 
 
 def _build_foreground_mask(bgr: np.ndarray, depth_frame,
@@ -326,7 +320,7 @@ class ObjectIsolator:
 
     def _loop(self):
         try:
-            pipeline, align, spatial, temporal, holes, pc_util = _build_pipeline()
+            pipeline, align, spatial, holes, pc_util = _build_pipeline()
         except Exception as exc:
             print(f"[ObjectIsolator] FATAL: could not start RealSense pipeline: {exc}")
             return
@@ -334,11 +328,10 @@ class ObjectIsolator:
         print("[ObjectIsolator] camera ready — colour-based (red) detection active.")
         self.ready.set()
 
-        last_mask    = None
-        last_box     = None
-        _last_log    = 0.0
-        _prev_box    = None          # bbox from previous frame, for DBSCAN skip check
-        _cached_cluster: tuple | None = None  # (obj_verts_raw, obj_colors_raw)
+        last_mask   = None
+        last_box    = None
+        _last_log   = 0.0
+        _prev_box   = None   # bbox from previous frame, for DBSCAN skip check
         self.shape_hint: str | None = None    # latest YOLO classification result
 
         try:
@@ -353,7 +346,6 @@ class ObjectIsolator:
                     continue
 
                 depth_fr = spatial.process(depth_fr)
-                depth_fr = temporal.process(depth_fr)
                 depth_fr = holes.process(depth_fr)
 
                 bgr = np.asanyarray(color_fr.get_data())
@@ -399,41 +391,15 @@ class ObjectIsolator:
                     full_colors    = np.full_like(colors, 0.35)
                     full_colors[inside] = colors[inside]
 
-                    # Skip DBSCAN when the bounding box hasn't changed much.
-                    skip_dbscan = False
-                    if _prev_box is not None and last_box is not None and _cached_cluster is not None:
-                        prev_cx = (_prev_box[0] + _prev_box[2]) / 2.0
-                        prev_cy = (_prev_box[1] + _prev_box[3]) / 2.0
-                        curr_cx = (last_box[0]  + last_box[2])  / 2.0
-                        curr_cy = (last_box[1]  + last_box[3])  / 2.0
-                        center_moved = np.hypot(curr_cx - prev_cx, curr_cy - prev_cy)
-
-                        prev_area = (_prev_box[2] - _prev_box[0]) * (_prev_box[3] - _prev_box[1])
-                        curr_area = (last_box[2]  - last_box[0])  * (last_box[3]  - last_box[1])
-                        size_change = abs(curr_area - prev_area) / max(float(prev_area), 1.0)
-
-                        skip_dbscan = (center_moved < DBSCAN_SKIP_CENTER_PX and
-                                       size_change  < DBSCAN_SKIP_SIZE_RATIO)
-
-                    if skip_dbscan:
-                        # Use fresh points from the current frame so the
-                        # visualiser updates in real time; skip the expensive
-                        # DBSCAN clustering step only.
-                        obj_verts_raw  = verts[inside]
-                        obj_colors_raw = colors[inside]
-                    else:
-                        obj_verts_raw, obj_colors_raw = keep_largest_cluster(
-                            verts[inside], colors[inside]
-                        )
-                        _cached_cluster = (obj_verts_raw, obj_colors_raw)
-
+                    obj_verts_raw, obj_colors_raw = keep_largest_cluster(
+                        verts[inside], colors[inside]
+                    )
                     _prev_box = last_box
                 else:
                     full_colors    = colors
                     obj_verts_raw  = np.zeros((0, 3), np.float32)
                     obj_colors_raw = np.zeros((0, 3), np.float32)
-                    _prev_box       = None   # force fresh DBSCAN on next detection
-                    _cached_cluster = None
+                    _prev_box       = None
                     self.last_shape = None   # clear label when object is lost
 
                 # ── 6. cv2 preview ────────────────────────────────────────

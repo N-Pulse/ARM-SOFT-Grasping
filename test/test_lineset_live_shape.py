@@ -88,6 +88,7 @@ _GRIPPER_LINES  = [[0, 1], [1, 2], [1, 3], [2, 4], [3, 5]]
 
 # ── ROS joint trajectory ───────────────────────────────────────────────────────
 _JOINT_NAMES = ['joint_base_x', 'joint_base_y', 'joint_base_z',
+                'joint_base_roll', 'joint_base_pitch', 'joint_base_yaw',
                 'joint_wrist_x', 'joint_wrist_y']
 
 
@@ -400,8 +401,9 @@ class FitWorker:
         traj.joint_names = _JOINT_NAMES
         pt = JointTrajectoryPoint()
         pt.time_from_start = Duration(sec=2, nanosec=0)
-        pt.positions = [hand[0], hand[1], hand[2]-0.05,
-                            np.deg2rad(bear), np.deg2rad(elev)]
+        pt.positions = [hand[0], hand[1], hand[2]-0.05, 
+                        0., 0., 0, 
+                        np.deg2rad(bear), np.deg2rad(elev)]
         traj.points.append(pt)
         self._node.traj_pub.publish(traj)
 

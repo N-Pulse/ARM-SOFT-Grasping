@@ -129,14 +129,14 @@ def _build_pipeline():
 
     align    = rs.align(rs.stream.color)
     spatial  = rs.spatial_filter()
+    temporal = rs.temporal_filter()
     holes    = rs.hole_filling_filter()
-    # Temporal filter removed — it blends 60 % of depth from previous frames,
-    # causing the point cloud to lag behind when the object is placed or moved.
-    # Spatial smoothing alone gives sufficient depth noise reduction.
     spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
     spatial.set_option(rs.option.filter_smooth_delta, 20)
+    temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
+    temporal.set_option(rs.option.filter_smooth_delta, 20)
 
-    return pipeline, align, spatial, holes, rs.pointcloud()
+    return pipeline, align, spatial, temporal, holes, rs.pointcloud()
 
 
 def _build_foreground_mask(bgr: np.ndarray, depth_frame,
@@ -253,6 +253,11 @@ class ObjectIsolator:
         self.last_bgr:   np.ndarray | None = None  # raw BGR frame (no overlays)
         self.last_shape: str | None        = None  # latest shape label for preview
 
+        # YOLO rate-limiting state (background thread only)
+        self._yolo_shape:     str | None = None   # sticky last accepted result
+        self._yolo_last_time: float      = 0.0    # monotonic time of last YOLO call
+        self._yolo_had_obj:   bool       = False  # whether object was present last frame
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self):
@@ -320,7 +325,7 @@ class ObjectIsolator:
 
     def _loop(self):
         try:
-            pipeline, align, spatial, holes, pc_util = _build_pipeline()
+            pipeline, align, spatial, temporal, holes, pc_util = _build_pipeline()
         except Exception as exc:
             print(f"[ObjectIsolator] FATAL: could not start RealSense pipeline: {exc}")
             return
@@ -346,6 +351,7 @@ class ObjectIsolator:
                     continue
 
                 depth_fr = spatial.process(depth_fr)
+                depth_fr = temporal.process(depth_fr)
                 depth_fr = holes.process(depth_fr)
 
                 bgr = np.asanyarray(color_fr.get_data())
@@ -359,13 +365,40 @@ class ObjectIsolator:
                 last_mask, last_box = _detect_red_mask(bgr)
                 self.last_box = last_box   # expose for data-collector / outside callers
 
-                # ── 3b. YOLO shape classification on the bounding-box crop ───
-                shape_hint: str | None = None
-                if self._classifier is not None and last_box is not None:
-                    x1, y1, x2, y2 = last_box
-                    crop = bgr[y1:y2, x1:x2]
-                    if crop.size > 0:
-                        shape_hint = self._classifier.predict(crop)
+                # ── 3b. YOLO shape classification — rate-limited ─────────────
+                # Run YOLO only when:
+                #   · Object just appeared  (no red segment → red segment)
+                #   · 60 s have elapsed since the last successful classification
+                # All other frames reuse the last accepted result (sticky hint).
+                # This avoids running heavy inference every frame and is the
+                # primary source of lag reduction.
+                _YOLO_INTERVAL = 60.0   # seconds between periodic re-checks
+
+                has_obj_now = last_box is not None
+                now         = time.monotonic()
+
+                if self._classifier is not None and has_obj_now:
+                    newly_appeared   = not self._yolo_had_obj
+                    periodic_recheck = (now - self._yolo_last_time) >= _YOLO_INTERVAL
+
+                    if newly_appeared or periodic_recheck:
+                        x1, y1, x2, y2 = last_box
+                        crop = bgr[y1:y2, x1:x2]
+                        if crop.size > 0:
+                            result = self._classifier.predict(crop)
+                            if result is not None:
+                                self._yolo_shape     = result
+                                self._yolo_last_time = now
+                                reason = "new detection" if newly_appeared else "60 s check"
+                                print(f"[ObjectIsolator]  YOLO re-classify ({reason})"
+                                      f" → {result}")
+
+                self._yolo_had_obj = has_obj_now
+                # Expose sticky hint: keeps last known class while object is
+                # present; resets to None only when the object disappears.
+                shape_hint = self._yolo_shape if has_obj_now else None
+                if not has_obj_now:
+                    self._yolo_shape = None   # force re-classify on next appearance
 
                 # ── 4. Build subsampled point cloud ───────────────────────
                 pc_util.map_to(color_fr)

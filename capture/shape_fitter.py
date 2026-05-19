@@ -104,8 +104,55 @@ _SOR_NEIGHBORS = 20    # neighbours used for mean-distance statistics
 _SOR_STD_RATIO = 2.5   # remove points > this many σ above the mean
                         # (2.5 keeps edge/corner points; 2.0 was too aggressive)
 
+# ── DBSCAN clustering ─────────────────────────────────────────────────────────
+_DBSCAN_EPS        = 0.012   # neighbourhood radius (m) — ~12 mm covers typical
+                              # point spacing while bridging small surface gaps
+_DBSCAN_MIN_PTS    = 10      # minimum cluster size
+
 # ── Tracker ────────────────────────────────────────────────────────────────────
 _ALPHA    = 0.20   # EMA base learning rate
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cluster extraction
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _largest_cluster(pts: np.ndarray,
+                     eps: float = _DBSCAN_EPS,
+                     min_pts: int = _DBSCAN_MIN_PTS) -> np.ndarray:
+    """
+    Return only the points belonging to the largest DBSCAN cluster.
+
+    After SOR, fragments of the table surface, nearby objects, or edge artefacts
+    can still survive as small disconnected groups.  Fitting a shape to the union
+    of all those groups inflates the bounding box and misaligns the planes.
+    Keeping only the dominant cluster ensures we fit the actual object.
+
+    Falls back to the full input when:
+      · Every point is labelled noise (-1) by DBSCAN, or
+      · The largest cluster contains fewer than 50 points.
+    """
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts)
+    labels = np.asarray(pcd.cluster_dbscan(
+        eps=eps, min_points=min_pts, print_progress=False))
+
+    valid = labels[labels >= 0]
+    if len(valid) == 0:
+        return pts   # all noise — nothing to do
+
+    main_label = int(np.bincount(valid).argmax())
+    mask       = labels == main_label
+    kept       = pts[mask]
+
+    if len(kept) < 50:
+        return pts   # degenerate — fall back
+
+    n_removed = len(pts) - len(kept)
+    if n_removed > 0:
+        print(f"[shape_fitter]  cluster: kept {len(kept)}/{len(pts)} pts "
+              f"(removed {n_removed} from {labels.max()+1} cluster(s))")
+    return kept
 _N_LOCK   = 6      # consecutive agreeing frames to lock shape
 _N_UNLOCK = 20     # consecutive opposing frames to break the lock
 
@@ -781,6 +828,11 @@ def fit_once(pts: np.ndarray,
     if len(pts) < 50:
         return None, None
 
+    # ── Keep only the dominant cluster ─────────────────────────────────────
+    pts = _largest_cluster(pts)
+    if len(pts) < 50:
+        return None, None
+
     axis = table_normal if table_normal is not None \
            else np.array([0., 0., 1.])
 
@@ -867,6 +919,11 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker,
     _tmp, _ = _tmp.remove_statistical_outlier(
         nb_neighbors=_SOR_NEIGHBORS, std_ratio=_SOR_STD_RATIO)
     pts = np.asarray(_tmp.points)
+    if len(pts) < 50:
+        return None, None
+
+    # ── Keep only the dominant cluster ─────────────────────────────────────
+    pts = _largest_cluster(pts)
     if len(pts) < 50:
         return None, None
 

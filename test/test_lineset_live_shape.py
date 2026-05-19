@@ -410,8 +410,8 @@ class FitWorker:
         traj.header.frame_id = 'world'
         traj.joint_names = _JOINT_NAMES
         pt = JointTrajectoryPoint()
-        pt.time_from_start = Duration(sec=2, nanosec=0)
-        pt.positions = [hand[0], hand[1], hand[2] - 0.05,
+        pt.time_from_start = Duration(sec=1, nanosec=0)
+        pt.positions = [hand[0]+ 0.012, hand[1], hand[2] - 0.05,
                         base_roll,
                         np.deg2rad(bear), np.deg2rad(elev)]
         traj.points.append(pt)

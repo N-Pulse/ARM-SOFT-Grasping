@@ -398,8 +398,8 @@ class FitWorker:
         traj = JointTrajectory()
         traj.joint_names = _JOINT_NAMES
         pt = JointTrajectoryPoint()
-        pt.time_from_start = Duration(sec=3, nanosec=0)
-        pt.positions = [hand[0] - 0.12, hand[1], hand[2],
+        pt.time_from_start = Duration(sec=2, nanosec=0)
+        pt.positions = [hand[0] - 0.012, hand[1], hand[2],
                             np.deg2rad(bear), np.deg2rad(elev)]
         traj.points.append(pt)
         self._node.traj_pub.publish(traj)

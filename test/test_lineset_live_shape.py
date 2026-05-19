@@ -396,6 +396,7 @@ class FitWorker:
 
 
         traj = JointTrajectory()
+        traj.header.frame_id = 'world'
         traj.joint_names = _JOINT_NAMES
         pt = JointTrajectoryPoint()
         pt.time_from_start = Duration(sec=2, nanosec=0)

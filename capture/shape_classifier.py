@@ -43,10 +43,11 @@ class ShapeClassifier:
                  conf_thresh: float = 0.70,
                  imgsz: int = 128):
         from ultralytics import YOLO
-        self._model       = YOLO(model_path)
-        self._device      = device
-        self._conf_thresh = conf_thresh
-        self._imgsz       = imgsz
+        self._model        = YOLO(model_path)
+        self._device       = device
+        self._conf_thresh  = conf_thresh
+        self._imgsz        = imgsz
+        self._last_printed = None   # suppress duplicate terminal lines
         print(f"[ShapeClassifier]  loaded '{model_path}'")
         print(f"[ShapeClassifier]  classes: {self._model.names}  "
               f"conf_thresh={conf_thresh}")
@@ -58,11 +59,9 @@ class ShapeClassifier:
         Returns
         -------
         "cylinder" | "cuboid"
-            The predicted class name (matches the folder names used during
-            training) when top-1 confidence >= conf_thresh.
+            The predicted class name when top-1 confidence >= conf_thresh.
         None
-            Confidence is too low; caller should fall back to geometric
-            classification.
+            Confidence too low; no fit will be attempted.
         """
         if crop_bgr is None or crop_bgr.size == 0:
             return None
@@ -78,8 +77,14 @@ class ShapeClassifier:
         cls   = int(probs.top1)
         name  = self._model.names[cls]
 
-        print(f"[ShapeClassifier]  {name}  conf={conf:.2f}")
+        accepted = conf >= self._conf_thresh
+        result   = name if accepted else None
 
-        if conf < self._conf_thresh:
-            return None
-        return name
+        # Print to terminal only when the accepted result changes
+        line = f"[YOLO]  {name}  conf={conf:.2f}  " \
+               f"→ {'accepted' if accepted else f'rejected (threshold={self._conf_thresh})'}"
+        if line != self._last_printed:
+            print(line)
+            self._last_printed = line
+
+        return result

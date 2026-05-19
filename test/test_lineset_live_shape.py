@@ -403,7 +403,7 @@ class FitWorker:
 
         obj = Float64MultiArray()
         obj.data = [1. if shape == "cylinder" else 0.,
-                    d_m, 0., 0.05, 0., 0., 0.]
+                    d_m, 0., 0.01, 0., 0., 0.]
         self._node.object_pub.publish(obj)
 
         traj = JointTrajectory()

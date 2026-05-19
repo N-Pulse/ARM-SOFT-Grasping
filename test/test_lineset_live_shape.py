@@ -394,21 +394,19 @@ class FitWorker:
                     d_m, 0., 0., 0., 0., 0.]
         self._node.object_pub.publish(obj)
 
-        print(f'TEST OBJECT SPAWN FEEDBACK ATTRIBUTE {self._node.object_spawn_feedback}')
-        if self._node.object_spawn_feedback == 1. :
 
-            traj = JointTrajectory()
-            traj.joint_names = _JOINT_NAMES
-            pt = JointTrajectoryPoint()
-            pt.time_from_start = Duration(sec=5, nanosec=0)
-            pt.positions = [hand[0] - 0.12, hand[1], hand[2],
+        traj = JointTrajectory()
+        traj.joint_names = _JOINT_NAMES
+        pt = JointTrajectoryPoint()
+        pt.time_from_start = Duration(sec=5, nanosec=0)
+        pt.positions = [hand[0] - 0.12, hand[1], hand[2],
                             np.deg2rad(bear), np.deg2rad(elev)]
-            traj.points.append(pt)
-            self._node.traj_pub.publish(traj)
+        traj.points.append(pt)
+        self._node.traj_pub.publish(traj)
 
-            pose = Int8()
-            pose.data = 1
-            self._node.pose_pub.publish(pose)
+        pose = Float64()
+        pose.data = 1.
+        self._node.pose_pub.publish(pose)
 
         print(f"[grasp]  *** LOCKED & PUBLISHED  trans={np.round(trans, 3)}  "
               f"elev={elev:+.1f}°  bear={bear:+.1f}° ***")

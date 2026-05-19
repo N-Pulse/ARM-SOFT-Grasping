@@ -271,9 +271,9 @@ class CVPublisherNode(Node):
         super().__init__('CV_publisher_node')
         self.object_spawn_feedback = 0.
         self.object_pub = self.create_publisher(Float64MultiArray, '/cv/model/pose', 10)
-        self.traj_pub   = self.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
-        self.pose_pub   = self.create_publisher(Int8, '/pose_goals', 10)
-        self.create_subscription(Int8, '/cv/model/pose/feedback', self.object_feedback, 10)
+        self.traj_pub   = self.create_publisher(JointTrajectory, '/cv/base/pose', 10)
+        self.pose_pub   = self.create_publisher(Int8, '/cv/hand/pose', 10)
+        #self.create_subscription(Int8, '/cv/model/pose/feedback', self.object_feedback, 10)
 
     def object_feedback(self, msg):
         self.object_spawn_feedback = msg.data
@@ -398,7 +398,7 @@ class FitWorker:
         traj = JointTrajectory()
         traj.joint_names = _JOINT_NAMES
         pt = JointTrajectoryPoint()
-        pt.time_from_start = Duration(sec=5, nanosec=0)
+        pt.time_from_start = Duration(sec=3, nanosec=0)
         pt.positions = [hand[0] - 0.12, hand[1], hand[2],
                             np.deg2rad(bear), np.deg2rad(elev)]
         traj.points.append(pt)

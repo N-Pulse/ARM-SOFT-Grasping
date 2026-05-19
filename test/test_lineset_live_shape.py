@@ -88,6 +88,7 @@ _GRIPPER_LINES  = [[0, 1], [1, 2], [1, 3], [2, 4], [3, 5]]
 
 # ── ROS joint trajectory ───────────────────────────────────────────────────────
 _JOINT_NAMES = ['joint_base_x', 'joint_base_y', 'joint_base_z',
+                'joint_base_roll',
                 'joint_wrist_x', 'joint_wrist_y']
 
 
@@ -388,20 +389,31 @@ class FitWorker:
     def _publish(self, shape, rot, trans, shape_ls):
         d_m, elev, bear, hand = _object_params(
             rot, trans, shape, self._tracker, shape_ls)
-        
+
+        # ── alpha: signed angle between the jaw separation line (closing
+        #          axis) and the chessboard / table plane captured at
+        #          startup.  alpha = arcsin(closing · n) ∈ [-π/2, +π/2].
+        #          The base-roll joint is driven to (π/2 − alpha) so the
+        #          forearm rotates to make the jaw line vertical relative
+        #          to the table.
+        closing   = rot[:, 1]
+        alpha_rad = float(np.arcsin(
+            np.clip(np.dot(closing, self._table_normal), -1.0, 1.0)))
+        base_roll = float(np.pi / 2.0 - alpha_rad)
+
         obj = Float64MultiArray()
         obj.data = [1. if shape == "cylinder" else 0.,
                     d_m, 0., 0.05, 0., 0., 0.]
         self._node.object_pub.publish(obj)
-
 
         traj = JointTrajectory()
         traj.header.frame_id = 'world'
         traj.joint_names = _JOINT_NAMES
         pt = JointTrajectoryPoint()
         pt.time_from_start = Duration(sec=2, nanosec=0)
-        pt.positions = [hand[0], hand[1], hand[2]-0.05,
-                            np.deg2rad(bear), np.deg2rad(elev)]
+        pt.positions = [hand[0], hand[1], hand[2] - 0.05,
+                        base_roll,
+                        np.deg2rad(bear), np.deg2rad(elev)]
         traj.points.append(pt)
         self._node.traj_pub.publish(traj)
 
@@ -410,7 +422,9 @@ class FitWorker:
         self._node.pose_pub.publish(pose)
 
         print(f"[grasp]  *** LOCKED & PUBLISHED  trans={np.round(trans, 3)}  "
-              f"elev={elev:+.1f}°  bear={bear:+.1f}° ***")
+              f"elev={elev:+.1f}°  bear={bear:+.1f}°  "
+              f"alpha={np.degrees(alpha_rad):+.1f}°  "
+              f"base_roll={np.degrees(base_roll):+.1f}° ***")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

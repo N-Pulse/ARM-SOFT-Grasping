@@ -691,14 +691,11 @@ def fit_once(pts: np.ndarray,
     axis = table_normal if table_normal is not None \
            else np.array([0., 0., 1.])
 
-    # ── Classify ───────────────────────────────────────────────────────────
-    if shape_hint is not None:
-        shape = shape_hint
-        print(f"[shape_fitter]  YOLO → {shape}")
-    else:
-        td_shape, td_rs, _ = _classify_topdown(pts, axis)
-        shape = td_shape if td_shape != "unknown" else "cuboid"
-        print(f"[shape_fitter]  topdown → {shape}  (rect={td_rs:.3f})")
+    # ── Shape is determined entirely by YOLO ───────────────────────────────
+    if shape_hint is None:
+        return None, None   # no YOLO result → do not fit
+    shape = shape_hint
+    print(f"[shape_fitter]  YOLO → {shape}")
 
     # ── Fit ────────────────────────────────────────────────────────────────
     if shape == "cuboid":

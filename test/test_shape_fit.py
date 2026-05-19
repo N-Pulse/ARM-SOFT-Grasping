@@ -44,12 +44,19 @@ import pyrealsense2 as rs
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from capture.object_isolation import ObjectIsolator
 from capture.shape_fitter import fit_once
+from capture.shape_classifier import ShapeClassifier
 
 
 # ── Chessboard ─────────────────────────────────────────────────────────────────
 _BOARD_COLS = 10
 _BOARD_ROWS = 7
 _SQUARE_M   = 0.015   # 15 mm
+
+# ── YOLO classifier ────────────────────────────────────────────────────────────
+_MODEL_PATH = os.path.join(
+    os.path.dirname(__file__), "..",
+    "runs", "classify", "shape-3", "weights", "best.pt"
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -222,7 +229,10 @@ class ComputeWorker:
 def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS, debug=False):
     table_normal, _ = detect_table_plane(board_cols, board_rows)
 
-    isolator = ObjectIsolator(min_points=50)
+    # ── Load YOLO classifier ───────────────────────────────────────────────────
+    classifier = ShapeClassifier(_MODEL_PATH)
+
+    isolator = ObjectIsolator(min_points=50, classifier=classifier)
     isolator.start()
     print("Waiting for camera …")
     isolator.ready.wait()

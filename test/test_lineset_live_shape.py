@@ -275,8 +275,8 @@ class CVPublisherNode(Node):
         self.pose_pub   = self.create_publisher(Int8, '/pose_goals', 10)
         self.create_subscription(Int8, '/cv/model/pose/feedback', self.object_feedback, 10)
 
-        def object_feedback(self, msg):
-            self.object_spawn_feedback = msg.data
+    def object_feedback(self, msg):
+        self.object_spawn_feedback = msg.data
 
 
 # ══════════════════════════════════════════════════════════════════════════════

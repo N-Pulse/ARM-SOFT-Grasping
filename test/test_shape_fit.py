@@ -189,7 +189,7 @@ class ComputeWorker:
         while not self._stop.is_set():
             # Block until a frame is available (with timeout to check stop flag)
             try:
-                (verts, raw_colors, full_colors,
+                (verts, _, full_colors,
                  obj_verts, obj_colors,
                  preview_bgr, shape_hint) = \
                     self._isolator._frame_queue.get(timeout=0.1)

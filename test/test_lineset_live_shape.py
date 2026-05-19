@@ -6,11 +6,11 @@ Live gripper-lineset overlay derived from the FITTED SHAPE geometry.
 Threading model
 ---------------
   Background worker thread   FitWorker
-    · fit_and_track         (shape fitting + EMA + lock voting)
-    · _grasp_from_shape     (pose from smoothed shape params)
+    · fit_once              (shape fitting — identical pipeline to test_shape_fit)
+    · _grasp_from_shape     (pose from fitted shape geometry)
     · _fill_gripper_pts     (6-point gripper skeleton)
-    · _object_params        (only on lock rising edge)
-    · ROS2 publish          (only on lock rising edge)
+    · _object_params        (only on first valid grasp per object appearance)
+    · ROS2 publish          (only on first valid grasp per object appearance)
     → writes a result dict into a single shared slot under a lock
 
   Main / render thread       _on_frame callback (via show_isolated_pcd)
@@ -20,13 +20,6 @@ Threading model
 
 Because all the heavy work lives on the worker, the render loop stays
 responsive and the display no longer lags behind the camera.
-
-Convergence clock
------------------
-ShapeTracker EMA-smooths the shape parameters and toggles ``_shape_locked``
-after _N_LOCK consistent votes.  ``_grasp_from_shape`` is a deterministic
-function of those smoothed parameters, so the grasp pose converges and
-locks on exactly the same clock as the shape — no second smoother.
 
 Pipeline (identical to test_shape_fit.py)
 -----------------------------------------
@@ -245,23 +238,6 @@ def _object_params(rot, trans, shape, table_normal, shape_ls):
 
     elevation_deg = float(np.degrees(np.arcsin(np.clip(-approach[1], -1.0, 1.0))))
     bearing_deg   = float(np.degrees(np.arctan2(approach[0], approach[2])))
-
-    if shape == "cylinder" and shape_ls is not None:
-        # Estimate radius as the max horizontal distance from the cylinder axis.
-        verts  = np.asarray(shape_ls.points)
-        rel    = verts - trans
-        axial  = np.outer(rel @ table_normal, table_normal)
-        horiz  = rel - axial
-        obj_half_depth = float(np.linalg.norm(horiz, axis=1).max())
-    elif shape == "cuboid" and shape_ls is not None:
-        verts = np.asarray(shape_ls.points)
-        if len(verts) >= 4:
-            proj = verts @ approach
-            obj_half_depth = float((proj.max() - proj.min()) / 2.0)
-        else:
-            obj_half_depth = 0.0
-    else:
-        obj_half_depth = 0.0
 
     cam_pos  = trans - approach * FINGER_LENGTH
     hand_pos = np.array([cam_pos[2], -cam_pos[0], cam_pos[1]])

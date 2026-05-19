@@ -394,6 +394,7 @@ class FitWorker:
                     d_m, 0., 0., 0., 0., 0.]
         self._node.object_pub.publish(obj)
 
+        print(f'TEST OBJECT SPAWN FEEDBACK ATTRIBUTE {self._node.object_spawn_feedback}')
         if self._node.object_spawn_feedback == 1 :
 
             traj = JointTrajectory()

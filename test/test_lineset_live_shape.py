@@ -391,15 +391,16 @@ class FitWorker:
         
         obj = Float64MultiArray()
         obj.data = [1. if shape == "cylinder" else 0.,
-                    d_m, 0., 0., 0., 0., 0.]
+                    d_m, 0., 0.05, 0., 0., 0.]
         self._node.object_pub.publish(obj)
 
 
         traj = JointTrajectory()
+        traj.header.frame_id = 'world'
         traj.joint_names = _JOINT_NAMES
         pt = JointTrajectoryPoint()
         pt.time_from_start = Duration(sec=2, nanosec=0)
-        pt.positions = [hand[0] - 0.012, hand[1], hand[2],
+        pt.positions = [hand[0], hand[1], hand[2]-0.05,
                             np.deg2rad(bear), np.deg2rad(elev)]
         traj.points.append(pt)
         self._node.traj_pub.publish(traj)

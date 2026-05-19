@@ -71,7 +71,7 @@ from test_shape_fit import detect_table_plane
 import rclpy
 from rclpy.node import Node
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from std_msgs.msg import Float64, Float64MultiArray
+from std_msgs.msg import Int8, Float64MultiArray
 from builtin_interfaces.msg import Duration
 
 
@@ -272,8 +272,8 @@ class CVPublisherNode(Node):
         self.object_spawn_feedback = 0.
         self.object_pub = self.create_publisher(Float64MultiArray, '/cv/model/pose', 10)
         self.traj_pub   = self.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
-        self.pose_pub   = self.create_publisher(Float64, '/pose_goals', 10)
-        self.create_subscription(Float64, '/cv/model/pose/feedback', self.object_feedback, 10)
+        self.pose_pub   = self.create_publisher(Int8, '/pose_goals', 10)
+        self.create_subscription(Int8, '/cv/model/pose/feedback', self.object_feedback, 10)
 
     def object_feedback(self, msg):
         self.object_spawn_feedback = msg.data
@@ -404,8 +404,8 @@ class FitWorker:
         traj.points.append(pt)
         self._node.traj_pub.publish(traj)
 
-        pose = Float64()
-        pose.data = 1.
+        pose = Int8()
+        pose.data = 1
         self._node.pose_pub.publish(pose)
 
         print(f"[grasp]  *** LOCKED & PUBLISHED  trans={np.round(trans, 3)}  "

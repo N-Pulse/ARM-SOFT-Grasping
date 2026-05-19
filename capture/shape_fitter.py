@@ -650,6 +650,84 @@ def _build_cuboid(pts: np.ndarray, axis: np.ndarray) -> o3d.geometry.LineSet:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Simple single-frame fit  (no tracker, no voting, no EMA)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fit_once(pts: np.ndarray,
+             table_normal,
+             shape_hint: str | None = None
+             ) -> tuple[str | None, "o3d.geometry.LineSet | None"]:
+    """
+    Classify and fit the object in a single frame with no temporal state.
+
+    Classification priority
+    -----------------------
+    1. ``shape_hint``       — direct YOLO result; used as-is
+    2. ``_classify_topdown``— bird's-eye projection along table_normal
+    3. ``"cuboid"``         — fallback when topdown is "unknown"
+
+    Parameters
+    ----------
+    pts          : (N, 3) isolated object point cloud
+    table_normal : (3,) unit normal of the table plane, or None
+    shape_hint   : "cylinder" | "cuboid" | None
+
+    Returns
+    -------
+    (shape_name, LineSet) or (None, None) if pts is too sparse after SOR
+    """
+    if len(pts) < 50:
+        return None, None
+
+    # ── SOR ────────────────────────────────────────────────────────────────
+    _tmp = o3d.geometry.PointCloud()
+    _tmp.points = o3d.utility.Vector3dVector(pts)
+    _tmp, _ = _tmp.remove_statistical_outlier(
+        nb_neighbors=_SOR_NEIGHBORS, std_ratio=_SOR_STD_RATIO)
+    pts = np.asarray(_tmp.points)
+    if len(pts) < 50:
+        return None, None
+
+    axis = table_normal if table_normal is not None \
+           else np.array([0., 0., 1.])
+
+    # ── Classify ───────────────────────────────────────────────────────────
+    if shape_hint is not None:
+        shape = shape_hint
+        print(f"[shape_fitter]  YOLO → {shape}")
+    else:
+        td_shape, td_rs, _ = _classify_topdown(pts, axis)
+        shape = td_shape if td_shape != "unknown" else "cuboid"
+        print(f"[shape_fitter]  topdown → {shape}  (rect={td_rs:.3f})")
+
+    # ── Fit ────────────────────────────────────────────────────────────────
+    if shape == "cuboid":
+        return "cuboid", _build_cuboid(pts, axis)
+
+    # Cylinder: needs normals for axis fitting and height estimation
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts)
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamKNN(knn=_KNN_NORMAL))
+    pcd.orient_normals_towards_camera_location(
+        camera_location=np.array([0., 0., 0.]))
+    normals = np.asarray(pcd.normals)
+
+    axis_pt, r, err = _best_fit_cylinder(pts, normals, axis)
+    if axis_pt is None:
+        return "cuboid", _build_cuboid(pts, axis)
+
+    r        = float(np.clip(r, _R_MIN, _R_MAX))
+    centroid = pts.mean(axis=0)
+    h_min, h_max = _estimate_height(pts, normals, axis, centroid)
+
+    print(f"[shape_fitter]  cylinder  r={r*1e3:.1f}mm  "
+          f"h={(h_max-h_min)*1e3:.1f}mm  err={err*1e3:.2f}mm")
+
+    return "cylinder", _build_cylinder(axis, axis_pt, r, h_min, h_max)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Per-frame entry point
 # ══════════════════════════════════════════════════════════════════════════════
 

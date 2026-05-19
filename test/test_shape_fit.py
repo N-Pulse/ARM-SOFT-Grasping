@@ -1,13 +1,17 @@
 """
 test/test_shape_fit.py
 ======================
-Thin test runner for the shape-fitting pipeline.
+Live shape-fitting test: classify → fit → show wireframe.
 
-All fitting logic lives in capture/shape_fitter.py.
-This file handles:
-  · Table-plane detection via chessboard (RealSense pipeline)
-  · Open3D / cv2 visualisation callback
-  · CLI entry point
+No voting, no EMA smoothing, no temporal tracker.
+Every frame is classified and fitted independently via fit_once().
+
+Pipeline per frame
+------------------
+  1. shape_hint from YOLO  (if classifier is loaded into ObjectIsolator)
+  2. _classify_topdown      (bird's-eye projection along table_normal)
+  3. fit cylinder / cuboid
+  4. Update Open3D wireframe + cv2 bounding-box label
 
 Usage
 -----
@@ -37,13 +41,13 @@ import pyrealsense2 as rs
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from capture.object_isolation import ObjectIsolator
-from capture.shape_fitter import ShapeTracker, fit_and_track
+from capture.shape_fitter import fit_once
 from helper.pcd_visualizer import show_isolated_pcd
 
 
 # ── Chessboard ─────────────────────────────────────────────────────────────────
-_BOARD_COLS = 10    # inner corners  (11 col board  → 10)
-_BOARD_ROWS = 7     # inner corners  ( 8 row board  →  7)
+_BOARD_COLS = 10    # inner corners  (11 col board → 10)
+_BOARD_ROWS = 7     # inner corners  ( 8 row board →  7)
 _SQUARE_M   = 0.015 # 15 mm
 
 
@@ -86,7 +90,7 @@ def detect_table_plane(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
             img   = np.asarray(cf.get_data())
             depth = np.asarray(df.get_data()).astype(np.float32) * depth_scale
 
-            gray         = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            gray           = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             found, corners = cv2.findChessboardCorners(gray, board_shape, None)
 
             disp = img.copy()
@@ -144,22 +148,16 @@ def detect_table_plane(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
 # Visualizer callback
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _make_overlay_callback(table_normal):
+def _make_overlay_callback(table_normal, isolator):
     """
-    Returns an on_new_frame callback that runs fit_and_track on a background
-    thread so the Open3D render loop is never blocked by heavy computation.
+    Returns an on_new_frame(obj_verts, vis, shape_hint) callback.
 
-    Design
-    ------
-    · A single-slot input queue (_fit_in) holds the most recent obj_verts.
-      The worker drains it before each fit so stale frames are dropped.
-    · The latest fit result is stored in _fit_out under _fit_lock.
-    · _on_frame (called on the main/render thread) pushes new verts and reads
-      the latest result.  Open3D geometry calls stay on the main thread.
-    · lookat is re-centred only when the wireframe is first added.
+    A background worker calls fit_once() each frame (no tracker, no voting).
+    The Open3D wireframe is updated on the main/render thread.
+    isolator.last_shape is written after each fit so the cv2 preview window
+    can display the current class name above the bounding box.
     """
-    tracker   = ShapeTracker()
-    state     = {"ls": None, "label": None}
+    state = {"ls": None, "label": None}
 
     _fit_in   = queue.Queue(maxsize=1)
     _fit_out  = {"shape": None, "ls": None}
@@ -171,55 +169,53 @@ def _make_overlay_callback(table_normal):
                 item = _fit_in.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if item is None:        # sentinel — shut down
+            if item is None:
                 break
             verts, shape_hint = item
-            shape, ls = fit_and_track(verts, table_normal, tracker,
-                                      shape_hint=shape_hint)
-            if ls is not None:
+            shape, ls = fit_once(verts, table_normal, shape_hint=shape_hint)
+            if shape is not None and ls is not None:
                 with _fit_lock:
                     _fit_out["shape"] = shape
                     _fit_out["ls"]    = ls
+                isolator.last_shape = shape   # drives cv2 bounding-box label
 
     _thread = threading.Thread(target=_worker, daemon=True)
     _thread.start()
 
-    def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer,
+    def _on_frame(obj_verts: np.ndarray,
+                  vis: o3d.visualization.Visualizer,
                   shape_hint: str | None = None):
-        # ── Object lost — full reset so next object starts fresh ──────────────
+
+        # ── Object lost ───────────────────────────────────────────────────────
         if len(obj_verts) == 0:
-            tracker.full_reset()
-            # Remove stale wireframe from the scene
             if state["ls"] is not None:
                 vis.remove_geometry(state["ls"], reset_bounding_box=False)
                 state["ls"]    = None
                 state["label"] = None
                 vis.update_renderer()
+            isolator.last_shape = None
             return
 
-        # Push latest frame (drop the previous queued one if worker is busy)
+        # ── Push to worker (drop stale frame if worker is still busy) ─────────
         try:
             _fit_in.get_nowait()
         except queue.Empty:
             pass
         _fit_in.put((obj_verts.copy(), shape_hint))
 
-        # Pull latest fit result (non-blocking)
+        # ── Pull latest result (non-blocking) ─────────────────────────────────
         with _fit_lock:
             if _fit_out["ls"] is None:
-                return                    # worker hasn't finished a frame yet
+                return
             shape  = _fit_out["shape"]
             new_ls = _fit_out["ls"]
-            _fit_out["ls"] = None         # consume so we don't redraw same result
+            _fit_out["ls"] = None   # consume
 
         if shape != state["label"]:
-            print(f"[shape_fit]  *** shape → {shape} ***")
+            print(f"[shape_fit]  {shape}")
 
-        # Update Open3D geometry (must stay on main/render thread)
+        # ── Update wireframe (must stay on render thread) ─────────────────────
         if state["ls"] is None:
-            # reset_bounding_box=False preserves the camera orientation set by
-            # auto_zoom — without it, add_geometry calls reset_view_point which
-            # overrides the camera_up convention and flips the point cloud.
             vis.add_geometry(new_ls, reset_bounding_box=False)
             state["ls"] = new_ls
             vis.get_view_control().set_lookat(obj_verts.mean(axis=0).tolist())
@@ -251,9 +247,9 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS, debug=False):
     try:
         show_isolated_pcd(
             isolator,
-            on_new_frame=_make_overlay_callback(table_normal),
+            on_new_frame=_make_overlay_callback(table_normal, isolator),
             debug=debug,
-            camera_up=(0, -1, 0),  # RealSense Y-down convention — same as test_obj_iso
+            camera_up=(0, -1, 0),
         )
     finally:
         isolator.stop()

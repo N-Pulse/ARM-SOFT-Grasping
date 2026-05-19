@@ -255,8 +255,9 @@ class ObjectIsolator:
 
         # Latest frame data — readable from outside (e.g. data collector).
         # Written only by the background thread; reads are best-effort / non-blocking.
-        self.last_box: np.ndarray | None = None  # [x1, y1, x2, y2] pixel coords
-        self.last_bgr: np.ndarray | None = None  # raw BGR frame (no overlays)
+        self.last_box:   np.ndarray | None = None  # [x1, y1, x2, y2] pixel coords
+        self.last_bgr:   np.ndarray | None = None  # raw BGR frame (no overlays)
+        self.last_shape: str | None        = None  # latest shape label for preview
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -433,6 +434,7 @@ class ObjectIsolator:
                     obj_colors_raw = np.zeros((0, 3), np.float32)
                     _prev_box       = None   # force fresh DBSCAN on next detection
                     _cached_cluster = None
+                    self.last_shape = None   # clear label when object is lost
 
                 # ── 6. cv2 preview ────────────────────────────────────────
                 preview_bgr = bgr.copy()
@@ -443,7 +445,13 @@ class ObjectIsolator:
                     preview_bgr = cv2.addWeighted(preview_bgr, 0.7, overlay, 0.3, 0)
                     x1, y1, x2, y2 = last_box
                     cv2.rectangle(preview_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(preview_bgr, "red", (x1, max(y1 - 6, 14)),
+                    # Show YOLO hint if available, otherwise last known shape,
+                    # otherwise "?" while waiting for the first fit result.
+                    display_label = (shape_hint if shape_hint is not None
+                                     else (self.last_shape
+                                           if self.last_shape is not None
+                                           else "?"))
+                    cv2.putText(preview_bgr, display_label, (x1, max(y1 - 6, 14)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2,
                                 cv2.LINE_AA)
 

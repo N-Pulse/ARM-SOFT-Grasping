@@ -330,6 +330,51 @@ def _classify(pts: np.ndarray, normals: np.ndarray, axis: np.ndarray) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Top-down classifier  (primary — no per-point normals required)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _classify_topdown(pts: np.ndarray,
+                      axis: np.ndarray) -> tuple[str, float, int]:
+    """
+    Classify by projecting the full point cloud onto the chessboard plane
+    (along ``axis`` = table_normal) and analysing the 2-D footprint.
+
+    Compared with the normal-cluster approach, this:
+      · requires no per-point surface normals
+      · is robust to the 30° tilt of the D405 (projection direction is the
+        table normal, not the camera axis, so the footprint is always overhead)
+      · runs in < 2 ms for typical object clouds
+
+    Returns
+    -------
+    (shape, rect_score, n_corners)
+      shape : "cylinder" | "cuboid" | "unknown"
+        "unknown" is returned when rect_score falls in the ambiguous gap
+        (0.83 – 0.88) AND fewer than _MIN_CORNERS_CUBOID corners are found.
+    """
+    ref = np.array([1., 0., 0.]) if abs(axis[0]) < 0.9 \
+          else np.array([0., 1., 0.])
+    e1  = np.cross(axis, ref);  e1 /= np.linalg.norm(e1)
+    e2  = np.cross(axis, e1)
+
+    d      = pts - pts.mean(axis=0)
+    pts_2d = np.column_stack([d @ e1, d @ e2])
+
+    rs        = _rect_score_2d(pts_2d)
+    corners   = _detect_2d_corners(pts_2d)
+    n_corners = len(corners)
+
+    print(f"[shape_fitter]  [topdown]  pts={len(pts):4d}  "
+          f"rect={rs:.3f}  corners={n_corners}")
+
+    if rs >= _RECT_SCORE_CUBOID or n_corners >= _MIN_CORNERS_CUBOID:
+        return "cuboid", rs, n_corners
+    if rs <= _RECT_SCORE_CYLINDER:
+        return "cylinder", rs, n_corners
+    return "unknown", rs, n_corners
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Cylinder geometry helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -622,12 +667,24 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
     -------
     (shape_name, LineSet) or (None, None)
 
+    Classification pipeline
+    -----------------------
+    ① _classify_topdown  (primary — no per-point normals, ~2 ms)
+         Project all pts onto the chessboard plane along table_normal;
+         analyse the 2-D footprint with rect_score + corner count.
+         Returns "cylinder" | "cuboid" | "unknown".
+
+    ② _classify          (fallback — only when topdown is "unknown", ~25 ms)
+         Normal-cluster approach: split into cap / side-wall groups,
+         analyse each projection separately.
+
     Performance fast-paths
     ----------------------
-    locked cuboid   → SOR only, skip normals entirely  (~5 ms)
-    locked cylinder → SOR + normals, skip classify     (~15 ms)
-    unlocked        → SOR + normals + classify          (~25 ms)
-    (Previous pipeline included curvature estimation: ~80 ms unlocked)
+    locked cuboid              → SOR + topdown check, skip normals  (~5 ms)
+    locked cylinder            → SOR + topdown + normals, skip classify (~15 ms)
+    topdown confident cuboid   → SOR + topdown, skip normals (~7 ms)
+    topdown confident cylinder → SOR + topdown + normals for height  (~17 ms)
+    topdown "unknown"          → SOR + topdown + normals + fallback  (~27 ms)
     """
     if len(pts) < 50:
         return None, None
@@ -648,7 +705,21 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
     if tracker._shape_locked and tracker.shape == "cuboid":
         return "cuboid", _build_cuboid(pts, _fallback_axis)
 
-    # ── Normals ────────────────────────────────────────────────────────────
+    # ── Primary classifier: topdown projection (no normals) ────────────────
+    td_shape, td_rs, td_nc = _classify_topdown(pts, _fallback_axis)
+
+    # Confident cuboid from topdown → vote immediately, skip normals
+    if td_shape == "cuboid" and not (tracker._shape_locked and
+                                     tracker.shape == "cylinder"):
+        shape = tracker.vote_shape("cuboid")
+        print(f"[shape_fitter]  topdown→cuboid  committed={shape}  "
+              f"streak={tracker._shape_streak}  locked={tracker._shape_locked}")
+        if shape == "cuboid":
+            tracker.reset()
+            return "cuboid", _build_cuboid(pts, _fallback_axis)
+        # Tracker still committed to cylinder (rare, locked) — fall through
+
+    # ── Normals (needed for cylinder fitting and/or fallback classify) ─────
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     pcd.estimate_normals(
@@ -661,9 +732,15 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
     if tracker._shape_locked and tracker.shape == "cylinder":
         shape = "cylinder"
     else:
-        raw_shape = _classify(pts, normals, _fallback_axis)
-        shape     = tracker.vote_shape(raw_shape)
-        print(f"[shape_fitter]  raw={raw_shape}  committed={shape}  "
+        # Use topdown result if confident; otherwise fall back to normal-cluster
+        if td_shape != "unknown":
+            raw_shape = td_shape
+        else:
+            raw_shape = _classify(pts, normals, _fallback_axis)
+
+        shape = tracker.vote_shape(raw_shape)
+        print(f"[shape_fitter]  topdown={td_shape}(rect={td_rs:.3f})  "
+              f"raw={raw_shape}  committed={shape}  "
               f"streak={tracker._shape_streak}  locked={tracker._shape_locked}")
 
     # ── Cuboid branch ──────────────────────────────────────────────────────

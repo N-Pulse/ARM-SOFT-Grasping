@@ -632,52 +632,112 @@ def _build_cylinder(axis, axis_pt, r, h_min, h_max):
     return ls
 
 
-def _build_cuboid(pts: np.ndarray, axis: np.ndarray) -> o3d.geometry.LineSet:
+def _build_cuboid(pts: np.ndarray, axis: np.ndarray,
+                  normals: np.ndarray | None = None) -> o3d.geometry.LineSet:
     """
-    Build a cuboid wireframe whose faces align with the point-cloud surface.
+    Build a cuboid wireframe by fitting best-fit planes to each face.
 
-    1. Project pts onto the plane ⊥ axis (horizontal footprint).
-    2. _fit_rect_percentile → orientation from minAreaRect, extents from
-       percentile projections — avoids outlier-driven expansion.
-    3. Percentile bounds for height.
-    4. Reconstruct 8 3-D vertices → 12-edge LineSet.
+    Approach — analogous to fitting a line through points, but in 3-D we fit a
+    plane to each face group and intersect the 6 planes to get 8 corners:
+
+      1. Establish 3 orthogonal face-normal directions:
+           · vertical  = table_normal  (= axis)
+           · horizontal h1, h2  from cv2.minAreaRect on the floor footprint
+      2. For each face direction, split points into two face groups
+         (lowest FACE_FRAC and highest FACE_FRAC of projected distances).
+         If surface normals are available, additionally filter to points whose
+         normal aligns with the expected face direction — this gives cleaner
+         face membership, especially when two faces are partially occluded.
+      3. Plane offset  = mean projection of the face group along its normal.
+         This is the closed-form least-squares solution for a plane with
+         known normal: d* = mean(p_i · n).
+      4. 8 corners = all combinations of (lo/hi) × 3 axes.
+         Edges = corner pairs that differ in exactly one axis bit (12 edges).
     """
-    n   = axis.copy()
+    FACE_FRAC       = 0.20   # fraction of pts used as each face's candidates
+    NORMAL_ALIGN_TH = 0.50   # surface-normal dot-product threshold for face membership
+
+    # ── Orthonormal basis ─────────────────────────────────────────────────────
+    n   = axis / np.linalg.norm(axis)
     ref = np.array([1., 0., 0.]) if abs(n[0]) < 0.9 else np.array([0., 1., 0.])
     e1  = np.cross(n, ref);  e1 /= np.linalg.norm(e1)
     e2  = np.cross(n, e1)
 
+    # ── Horizontal footprint → minAreaRect for orientation ────────────────────
     mean_pt = pts.mean(axis=0)
     d       = pts - mean_pt
     u       = (d @ e1).astype(np.float32)
     v       = (d @ e2).astype(np.float32)
-    w       = pts @ n
     pts_2d  = np.column_stack([u, v])
+    pts_f   = pts_2d.astype(np.float32).reshape(-1, 1, 2)
+    _, _, angle = cv2.minAreaRect(pts_f)
+    rad = np.deg2rad(angle)
+    h1  = np.cos(rad) * e1 + np.sin(rad) * e2    # horizontal face normal 1
+    h2  = -np.sin(rad) * e1 + np.cos(rad) * e2   # horizontal face normal 2
 
-    # Use full min/max — SOR already removed noise so extremes are trustworthy
-    h_min = float(w.min())
-    h_max = float(w.max())
-    h_min = h_min if h_max - h_min > 0.005 else h_min - 0.0025
+    # ── Fit two planes per axis direction ─────────────────────────────────────
+    def face_extents(face_n):
+        """
+        Return (d_lo, d_hi) — the two face-plane offsets along face_n.
 
-    rect_corners = _fit_rect_percentile(pts_2d)   # (4, 2) CCW
-    mean_horiz   = mean_pt - (mean_pt @ n) * n
+        Each offset is the mean projection of that face's candidate points,
+        i.e. the least-squares plane position given a fixed normal direction.
+        """
+        proj  = pts @ face_n
+        n_pts = len(proj)
+        n_k   = max(5, int(n_pts * FACE_FRAC))
+        idx   = np.argsort(proj)
+        lo_idx = idx[:n_k]
+        hi_idx = idx[-n_k:]
 
-    verts = []
-    for (cu, cv) in rect_corners:
-        horiz = mean_horiz + cu * e1 + cv * e2
-        verts.append(horiz + h_min * n)
-        verts.append(horiz + h_max * n)
-    verts = np.array(verts)   # (8, 3)  layout: [bot0,top0, bot1,top1, ...]
+        if normals is not None:
+            # Tighten face membership using surface-normal alignment.
+            # The face with outward normal  face_n → surface normals ≈ +face_n
+            # The face with outward normal -face_n → surface normals ≈ -face_n
+            lo_align = normals[lo_idx] @ (-face_n)   # should be positive for bottom face
+            hi_align = normals[hi_idx] @   face_n    # should be positive for top face
+            lo_good  = lo_idx[lo_align > NORMAL_ALIGN_TH]
+            hi_good  = hi_idx[hi_align > NORMAL_ALIGN_TH]
+            if len(lo_good) >= 3:
+                lo_idx = lo_good
+            if len(hi_good) >= 3:
+                hi_idx = hi_good
 
-    lines = []
-    for i in range(4):
-        j = (i + 1) % 4
-        lines.append([2*i,     2*j    ])   # bottom ring
-        lines.append([2*i + 1, 2*j + 1])  # top ring
-        lines.append([2*i,     2*i + 1])  # vertical pillar
+        d_lo = float(proj[lo_idx].mean())
+        d_hi = float(proj[hi_idx].mean())
+
+        # Guard against degenerate (flat) case
+        if d_hi - d_lo < 0.005:
+            mid  = (d_lo + d_hi) / 2.0
+            d_lo, d_hi = mid - 0.0025, mid + 0.0025
+
+        return d_lo, d_hi
+
+    v_lo,  v_hi  = face_extents(n)
+    h1_lo, h1_hi = face_extents(h1)
+    h2_lo, h2_hi = face_extents(h2)
+
+    # ── Build 8 corners ───────────────────────────────────────────────────────
+    # Corner index i encodes: bit0 = v axis (0=lo,1=hi)
+    #                          bit1 = h1 axis
+    #                          bit2 = h2 axis
+    v_vals  = [v_lo,  v_hi ]
+    h1_vals = [h1_lo, h1_hi]
+    h2_vals = [h2_lo, h2_hi]
+    verts   = np.array([
+        v_vals[i & 1] * n + h1_vals[(i >> 1) & 1] * h1 + h2_vals[(i >> 2) & 1] * h2
+        for i in range(8)
+    ])
+
+    # Edges: connect any two corners that differ in exactly one axis (12 edges)
+    edges = [[i, j]
+             for i in range(8)
+             for j in range(i + 1, 8)
+             if bin(i ^ j).count('1') == 1]
+
     ls = o3d.geometry.LineSet()
     ls.points = o3d.utility.Vector3dVector(verts)
-    ls.lines  = o3d.utility.Vector2iVector(lines)
+    ls.lines  = o3d.utility.Vector2iVector(edges)
     ls.paint_uniform_color(_COLOR["cuboid"])
     return ls
 
@@ -730,11 +790,7 @@ def fit_once(pts: np.ndarray,
     shape = shape_hint
     print(f"[shape_fitter]  YOLO → {shape}")
 
-    # ── Fit ────────────────────────────────────────────────────────────────
-    if shape == "cuboid":
-        return "cuboid", _build_cuboid(pts, axis)
-
-    # Cylinder: needs normals for axis fitting and height estimation
+    # ── Surface normals (used by both cuboid face-plane fitting and cylinder) ─
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     pcd.estimate_normals(
@@ -743,9 +799,16 @@ def fit_once(pts: np.ndarray,
         camera_location=np.array([0., 0., 0.]))
     normals = np.asarray(pcd.normals)
 
+    # ── Fit ────────────────────────────────────────────────────────────────
+    if shape == "cuboid":
+        # Pass normals so face-plane fitting can use surface-normal alignment
+        # to cleanly separate face groups even when only 2-3 faces are visible.
+        return "cuboid", _build_cuboid(pts, axis, normals)
+
+    # Cylinder
     axis_pt, r, err = _best_fit_cylinder(pts, normals, axis)
     if axis_pt is None:
-        return "cuboid", _build_cuboid(pts, axis)
+        return "cuboid", _build_cuboid(pts, axis, normals)
 
     r        = float(np.clip(r, _R_MIN, _R_MAX))
     centroid = pts.mean(axis=0)
@@ -810,9 +873,16 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker,
     _fallback_axis = table_normal if table_normal is not None \
                      else np.array([0., 0., 1.])
 
-    # ── Fast path A: locked cuboid — no normals needed ─────────────────────
+    # ── Fast path A: locked cuboid — compute normals for face-plane fitting ──
     if tracker._shape_locked and tracker.shape == "cuboid":
-        return "cuboid", _build_cuboid(pts, _fallback_axis)
+        _pcd = o3d.geometry.PointCloud()
+        _pcd.points = o3d.utility.Vector3dVector(pts)
+        _pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamKNN(knn=_KNN_NORMAL))
+        _pcd.orient_normals_towards_camera_location(
+            camera_location=np.array([0., 0., 0.]))
+        return "cuboid", _build_cuboid(pts, _fallback_axis,
+                                        np.asarray(_pcd.normals))
 
     # ── YOLO hint (highest priority — skips all geometric classifiers) ────────
     if shape_hint is not None and not tracker._shape_locked:
@@ -821,13 +891,14 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker,
               f"streak={tracker._shape_streak}  locked={tracker._shape_locked}")
         if shape == "cuboid":
             tracker.reset()
-            return "cuboid", _build_cuboid(pts, _fallback_axis)
+            # normals computed below — use placeholder; will be recomputed
+            pass   # fall through to normals block
         # cylinder branch: still needs normals for fitting → fall through
 
     # ── Primary classifier: topdown projection (no normals) ────────────────
     td_shape, td_rs, td_nc = _classify_topdown(pts, _fallback_axis)
 
-    # Confident cuboid from topdown → vote immediately, skip normals
+    # Confident cuboid from topdown → vote immediately
     if shape_hint is None and td_shape == "cuboid" and \
             not (tracker._shape_locked and tracker.shape == "cylinder"):
         shape = tracker.vote_shape("cuboid")
@@ -835,8 +906,7 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker,
               f"streak={tracker._shape_streak}  locked={tracker._shape_locked}")
         if shape == "cuboid":
             tracker.reset()
-            return "cuboid", _build_cuboid(pts, _fallback_axis)
-        # Tracker still committed to cylinder (rare, locked) — fall through
+            pass   # fall through to normals block
 
     # ── Normals (needed for cylinder fitting and/or fallback classify) ─────
     pcd = o3d.geometry.PointCloud()
@@ -868,7 +938,7 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker,
     # ── Cuboid branch ──────────────────────────────────────────────────────
     if shape == "cuboid":
         tracker.reset()
-        return "cuboid", _build_cuboid(pts, _fallback_axis)
+        return "cuboid", _build_cuboid(pts, _fallback_axis, normals)
 
     # ── Cylinder branch ────────────────────────────────────────────────────
     axis = _fallback_axis.copy() if hasattr(_fallback_axis, "copy") \
@@ -877,7 +947,7 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker,
     axis_pt, r, err = _best_fit_cylinder(pts, normals, axis)
     if axis_pt is None:
         tracker.reset()
-        return "cuboid", _build_cuboid(pts, axis)
+        return "cuboid", _build_cuboid(pts, axis, normals)
 
     r = float(np.clip(r, _R_MIN, _R_MAX))
 

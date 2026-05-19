@@ -253,9 +253,10 @@ class ObjectIsolator:
         self._stop_event  = threading.Event()
         self._thread      = None
 
-        # Latest bounding box — readable from outside (e.g. data collector).
-        # Written only by the background thread; read is best-effort / non-blocking.
+        # Latest frame data — readable from outside (e.g. data collector).
+        # Written only by the background thread; reads are best-effort / non-blocking.
         self.last_box: np.ndarray | None = None  # [x1, y1, x2, y2] pixel coords
+        self.last_bgr: np.ndarray | None = None  # raw BGR frame (no overlays)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -355,6 +356,7 @@ class ObjectIsolator:
                 depth_fr = holes.process(depth_fr)
 
                 bgr = np.asanyarray(color_fr.get_data())
+                self.last_bgr = bgr   # expose raw frame before any drawing
 
                 # ── 2. Foreground filtering ───────────────────────────────
                 fg_mask = _build_foreground_mask(bgr, depth_fr,

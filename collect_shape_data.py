@@ -106,18 +106,19 @@ def run(data_dir: str = _DATA_DIR, pad: int = _PAD):
                 _, _, preview_bgr = frame
                 preview = preview_bgr.copy()
 
-                # Build crop from the exposed bounding box
-                box = isolator.last_box   # [x1, y1, x2, y2] or None
-                if box is not None:
-                    h_img, w_img = preview.shape[:2]
+                # Crop from the RAW frame (no overlays, no green mask)
+                box     = isolator.last_box   # [x1, y1, x2, y2] or None
+                raw_bgr = isolator.last_bgr   # original camera pixels
+                if box is not None and raw_bgr is not None:
+                    h_img, w_img = raw_bgr.shape[:2]
                     x1 = max(0,     int(box[0]) - pad)
                     y1 = max(0,     int(box[1]) - pad)
                     x2 = min(w_img, int(box[2]) + pad)
                     y2 = min(h_img, int(box[3]) + pad)
                     if (x2 - x1) * (y2 - y1) >= _MIN_AREA:
-                        crop = preview[y1:y2, x1:x2].copy()
+                        crop = raw_bgr[y1:y2, x1:x2].copy()
 
-                # Overlay count on the preview
+                # Overlay count on the preview (annotated view for the operator)
                 cnts = _counts(data_dir)
                 label = (f"cylinder={cnts['cylinder']}  cuboid={cnts['cuboid']}  "
                          f"| C=cylinder  B=cuboid  Q=quit")

@@ -165,7 +165,8 @@ def show_isolated_pcd(
         while True:
             # --- pull the latest frame ----------------------------------------
             try:
-                verts, raw_colors, full_colors, obj_verts, obj_colors, preview_bgr = \
+                verts, raw_colors, full_colors, obj_verts, obj_colors, \
+                    preview_bgr, shape_hint = \
                     isolator._frame_queue.get(timeout=frame_timeout)
 
                 has_obj = len(obj_verts) > 0
@@ -275,8 +276,10 @@ def show_isolated_pcd(
                 # wireframe).  Skipped in debug mode.
                 # _fit_pts is the filtered accumulated cloud when accumulation
                 # is active, otherwise the raw current-frame obj_verts.
+                # shape_hint (str | None) is forwarded so the callback can
+                # pass it to fit_and_track without touching the isolator directly.
                 if not debug and on_new_frame is not None:
-                    on_new_frame(_fit_pts, vis)
+                    on_new_frame(_fit_pts, vis, shape_hint)
 
                 # ── cv2 preview ────────────────────────────────────────────
                 if preview_bgr is not None:

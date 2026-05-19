@@ -653,7 +653,8 @@ def _build_cuboid(pts: np.ndarray, axis: np.ndarray) -> o3d.geometry.LineSet:
 # Per-frame entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
+def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker,
+                  shape_hint: str | None = None):
     """
     Run one frame through the full pipeline and update the tracker.
 
@@ -705,12 +706,22 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
     if tracker._shape_locked and tracker.shape == "cuboid":
         return "cuboid", _build_cuboid(pts, _fallback_axis)
 
+    # ── YOLO hint (highest priority — skips all geometric classifiers) ────────
+    if shape_hint is not None and not tracker._shape_locked:
+        shape = tracker.vote_shape(shape_hint)
+        print(f"[shape_fitter]  YOLO→{shape_hint}  committed={shape}  "
+              f"streak={tracker._shape_streak}  locked={tracker._shape_locked}")
+        if shape == "cuboid":
+            tracker.reset()
+            return "cuboid", _build_cuboid(pts, _fallback_axis)
+        # cylinder branch: still needs normals for fitting → fall through
+
     # ── Primary classifier: topdown projection (no normals) ────────────────
     td_shape, td_rs, td_nc = _classify_topdown(pts, _fallback_axis)
 
     # Confident cuboid from topdown → vote immediately, skip normals
-    if td_shape == "cuboid" and not (tracker._shape_locked and
-                                     tracker.shape == "cylinder"):
+    if shape_hint is None and td_shape == "cuboid" and \
+            not (tracker._shape_locked and tracker.shape == "cylinder"):
         shape = tracker.vote_shape("cuboid")
         print(f"[shape_fitter]  topdown→cuboid  committed={shape}  "
               f"streak={tracker._shape_streak}  locked={tracker._shape_locked}")
@@ -731,6 +742,9 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker):
     # ── Fast path B: locked cylinder — skip classify ───────────────────────
     if tracker._shape_locked and tracker.shape == "cylinder":
         shape = "cylinder"
+    elif shape_hint is not None:
+        # YOLO already voted above; shape is already set — just re-read it
+        shape = tracker.shape if tracker.shape is not None else shape_hint
     else:
         # Use topdown result if confident; otherwise fall back to normal-cluster
         if td_shape != "unknown":

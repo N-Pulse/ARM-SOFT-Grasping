@@ -238,14 +238,24 @@ class ObjectIsolator:
     ----------
     min_points : int
         Minimum number of isolated points for a frame to be considered valid.
+    classifier : ShapeClassifier | None
+        Optional YOLOv8 shape classifier.  When provided, it is called each
+        frame on the bounding-box crop and the result is included as
+        ``shape_hint`` in the frame tuple (7th element).  Pass None to skip
+        YOLO and rely on the geometric classifier in shape_fitter.py.
     """
 
-    def __init__(self, min_points: int = 50):
+    def __init__(self, min_points: int = 50, classifier=None):
         self.ready        = threading.Event()
         self._min_points  = min_points
+        self._classifier  = classifier
         self._frame_queue = queue.Queue(maxsize=1)
         self._stop_event  = threading.Event()
         self._thread      = None
+
+        # Latest bounding box — readable from outside (e.g. data collector).
+        # Written only by the background thread; read is best-effort / non-blocking.
+        self.last_box: np.ndarray | None = None  # [x1, y1, x2, y2] pixel coords
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -278,12 +288,17 @@ class ObjectIsolator:
         full_pcd    : entire scene; object in real colour, background greyed out.
         iso_pcd     : isolated red object only, or None if not detected.
         preview_bgr : annotated BGR image showing the red mask overlay.
+
+        Note: shape_hint (7th queue element) is consumed internally and
+        accessible via isolator.shape_hint after each call.
         """
         try:
-            full_verts, _raw_colors, full_colors, obj_verts, obj_colors, preview_bgr = \
-                self._frame_queue.get_nowait()
+            full_verts, _raw_colors, full_colors, obj_verts, obj_colors, \
+                preview_bgr, shape_hint = self._frame_queue.get_nowait()
         except queue.Empty:
             return None
+
+        self.shape_hint = shape_hint   # expose for FitWorker / callbacks
 
         full_pcd = o3d.geometry.PointCloud()
         full_pcd.points = o3d.utility.Vector3dVector(full_verts)
@@ -322,6 +337,7 @@ class ObjectIsolator:
         _last_log    = 0.0
         _prev_box    = None          # bbox from previous frame, for DBSCAN skip check
         _cached_cluster: tuple | None = None  # (obj_verts_raw, obj_colors_raw)
+        self.shape_hint: str | None = None    # latest YOLO classification result
 
         try:
             while not self._stop_event.is_set():
@@ -346,6 +362,15 @@ class ObjectIsolator:
 
                 # ── 3. Red-object detection ───────────────────────────────
                 last_mask, last_box = _detect_red_mask(bgr)
+                self.last_box = last_box   # expose for data-collector / outside callers
+
+                # ── 3b. YOLO shape classification on the bounding-box crop ───
+                shape_hint: str | None = None
+                if self._classifier is not None and last_box is not None:
+                    x1, y1, x2, y2 = last_box
+                    crop = bgr[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        shape_hint = self._classifier.predict(crop)
 
                 # ── 4. Build subsampled point cloud ───────────────────────
                 pc_util.map_to(color_fr)
@@ -439,7 +464,8 @@ class ObjectIsolator:
                 except queue.Empty:
                     pass
                 self._frame_queue.put(
-                    (verts, colors, full_colors, obj_verts, obj_colors, preview_bgr)
+                    (verts, colors, full_colors, obj_verts, obj_colors,
+                     preview_bgr, shape_hint)
                 )
 
         except Exception as exc:

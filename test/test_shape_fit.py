@@ -168,12 +168,14 @@ def _make_overlay_callback(table_normal):
     def _worker():
         while True:
             try:
-                verts = _fit_in.get(timeout=0.5)
+                item = _fit_in.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if verts is None:        # sentinel — shut down
+            if item is None:        # sentinel — shut down
                 break
-            shape, ls = fit_and_track(verts, table_normal, tracker)
+            verts, shape_hint = item
+            shape, ls = fit_and_track(verts, table_normal, tracker,
+                                      shape_hint=shape_hint)
             if ls is not None:
                 with _fit_lock:
                     _fit_out["shape"] = shape
@@ -182,7 +184,8 @@ def _make_overlay_callback(table_normal):
     _thread = threading.Thread(target=_worker, daemon=True)
     _thread.start()
 
-    def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer):
+    def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer,
+                  shape_hint: str | None = None):
         # ── Object lost — full reset so next object starts fresh ──────────────
         if len(obj_verts) == 0:
             tracker.full_reset()
@@ -199,7 +202,7 @@ def _make_overlay_callback(table_normal):
             _fit_in.get_nowait()
         except queue.Empty:
             pass
-        _fit_in.put(obj_verts.copy())
+        _fit_in.put((obj_verts.copy(), shape_hint))
 
         # Pull latest fit result (non-blocking)
         with _fit_lock:

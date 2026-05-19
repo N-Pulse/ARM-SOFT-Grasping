@@ -446,7 +446,8 @@ def _make_grasp_callback(worker: FitWorker):
             state["grasp_added"] = False
         state["label"] = None
 
-    def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer):
+    def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer,
+                  shape_hint: str | None = None):
         # ── Object lost — reset worker + drop overlays ───────────────────────
         if len(obj_verts) == 0:
             worker.reset()

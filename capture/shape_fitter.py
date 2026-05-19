@@ -923,6 +923,119 @@ def fit_once(pts: np.ndarray,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Temporal smoother for fit_once output
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ShapeEMA:
+    """
+    Exponential moving average over fitted-shape wireframe vertices.
+
+    Wraps ``fit_once`` results to reduce frame-to-frame jitter without adding
+    latency to the compute thread.  Two mechanisms work together:
+
+    1. **Vertex EMA** — each vertex position is blended toward the new frame:
+           smoothed = alpha * new + (1 - alpha) * smoothed
+       Lower ``alpha`` = smoother, but slower to follow real object motion.
+
+    2. **Vote lock** — the displayed shape type only switches after
+       ``lock_votes`` consecutive frames agree on the new label, preventing
+       single-frame YOLO misclassifications from flipping the wireframe.
+
+    Parameters
+    ----------
+    alpha : float
+        EMA weight for the newest frame in [0, 1].  Default 0.25.
+    lock_votes : int
+        Consecutive frames required before accepting a shape-type change.
+        Default 5.
+
+    Usage
+    -----
+    ::
+
+        ema = ShapeEMA()
+
+        # inside the per-frame loop:
+        shape, ls = fit_once(pts, table_normal, shape_hint=hint)
+        shape, ls = ema.update(shape, ls)   # smooth in place
+        # shape / ls now stable across frames
+
+        # when the object disappears:
+        ema.reset()
+    """
+
+    def __init__(self, alpha: float = 0.25, lock_votes: int = 5):
+        self._alpha      = float(alpha)
+        self._lock_votes = int(lock_votes)
+        self._shape:     "str | None"        = None  # committed shape type
+        self._pts:       "np.ndarray | None" = None  # EMA-smoothed vertices
+        self._candidate: "str | None"        = None  # shape being voted on
+        self._votes:     int                 = 0
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def update(
+        self,
+        shape: "str | None",
+        ls:    "o3d.geometry.LineSet | None",
+    ) -> "tuple[str | None, o3d.geometry.LineSet | None]":
+        """
+        Feed the latest ``fit_once`` result and return the smoothed version.
+
+        Returns ``(None, None)`` when ``shape`` or ``ls`` is ``None``.
+        The returned LineSet shares topology (``lines``, ``colors``) with the
+        input but has EMA-smoothed ``points``.
+        """
+        if shape is None or ls is None:
+            return None, None
+
+        pts = np.asarray(ls.points).copy()
+
+        # ── Vote on shape type ───────────────────────────────────────────────
+        if shape == self._candidate:
+            self._votes += 1
+        else:
+            self._candidate = shape
+            self._votes     = 1
+
+        # Veto a shape-type switch until lock_votes consecutive frames agree.
+        # On the very first frame (_shape is None) always accept immediately.
+        if (self._shape is not None
+                and shape != self._shape
+                and self._votes < self._lock_votes):
+            # Return last smoothed state unchanged.
+            out = o3d.geometry.LineSet()
+            out.points = o3d.utility.Vector3dVector(self._pts)
+            out.lines  = ls.lines
+            out.colors = ls.colors
+            return self._shape, out
+
+        # Shape type is accepted (same as before, or vote threshold reached).
+        if (shape != self._shape
+                or self._pts is None
+                or len(self._pts) != len(pts)):
+            # First frame or shape-type change — seed EMA with raw data.
+            self._shape = shape
+            self._pts   = pts.copy()
+        else:
+            # Normal EMA update.
+            self._pts = self._alpha * pts + (1.0 - self._alpha) * self._pts
+
+        out = o3d.geometry.LineSet()
+        out.points = o3d.utility.Vector3dVector(self._pts)
+        out.lines  = ls.lines
+        out.colors = ls.colors
+        return self._shape, out
+
+    def reset(self) -> None:
+        """Call whenever the object disappears to clear all EMA state."""
+        self._shape     = None
+        self._pts       = None
+        self._candidate = None
+        self._votes     = 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Per-frame entry point
 # ══════════════════════════════════════════════════════════════════════════════
 

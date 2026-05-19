@@ -43,7 +43,7 @@ import pyrealsense2 as rs
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from capture.object_isolation import ObjectIsolator
-from capture.shape_fitter import fit_once
+from capture.shape_fitter import fit_once, ShapeEMA
 from capture.shape_classifier import ShapeClassifier
 
 
@@ -169,6 +169,7 @@ class ComputeWorker:
     def __init__(self, isolator: ObjectIsolator, table_normal):
         self._isolator     = isolator
         self._table_normal = table_normal
+        self._ema          = ShapeEMA()
         self._result       = None
         self._lock         = threading.Lock()
         self._stop         = threading.Event()
@@ -204,9 +205,12 @@ class ComputeWorker:
                 # Shape is determined entirely by YOLO — no geometric fallback.
                 shape, ls = fit_once(
                     obj_verts, self._table_normal, shape_hint=shape_hint)
+                # Smooth vertex positions and stabilise shape-type label.
+                shape, ls = self._ema.update(shape, ls)
                 self._isolator.last_shape = shape
             else:
                 # Either no object or YOLO hasn't produced a confident result.
+                self._ema.reset()
                 self._isolator.last_shape = None
 
             with self._lock:

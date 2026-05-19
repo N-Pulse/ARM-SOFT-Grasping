@@ -57,7 +57,7 @@ import numpy as np
 import open3d as o3d
 
 from capture.object_isolation import ObjectIsolator
-from capture.shape_fitter import fit_once
+from capture.shape_fitter import fit_once, ShapeEMA
 from capture.shape_classifier import ShapeClassifier
 from helper.pcd_visualizer import show_isolated_pcd
 from test_shape_fit import detect_table_plane
@@ -287,6 +287,7 @@ class FitWorker:
         self._table_normal = table_normal
         self._node         = node
         self._published    = False   # publish once per object appearance
+        self._ema          = ShapeEMA()
 
         self._in           = queue.Queue(maxsize=1)
         self._out          = None
@@ -310,8 +311,9 @@ class FitWorker:
         return r
 
     def reset(self):
-        """Object lost — clear pending result and allow re-publish."""
+        """Object lost — clear pending result, EMA state, and allow re-publish."""
         self._published = False
+        self._ema.reset()
         with self._lock:
             self._out = None
 
@@ -334,6 +336,8 @@ class FitWorker:
             # 1. Shape fit — identical pipeline to test_shape_fit.py
             shape, shape_ls = fit_once(
                 verts, self._table_normal, shape_hint=shape_hint)
+            # Smooth vertex positions and stabilise shape-type label.
+            shape, shape_ls = self._ema.update(shape, shape_ls)
             if shape_ls is None:
                 continue
 

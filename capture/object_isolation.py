@@ -79,40 +79,6 @@ RED_VAL_MIN   =  50   # minimum HSV value      (rejects near-black pixels)
 RED_MIN_AREA  = 500   # minimum contour area in pixels (rejects noise specks)
 
 
-# ─── Cluster filtering ────────────────────────────────────────────────────────
-# After colour-mask isolation, stray reflections or background leakage can
-# leave disconnected point patches.  DBSCAN groups points into connected
-# regions; keeping only the largest removes those fragments.
-
-CLUSTER_EPS        = 0.02   # 2 cm — max neighbour distance within a cluster
-CLUSTER_MIN_POINTS = 10     # fragments smaller than this are discarded
-
-
-def keep_largest_cluster(verts: np.ndarray,
-                         colors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Return only the points in the largest DBSCAN cluster.
-
-    If no cluster is found or the input is too small, the original arrays are
-    returned unchanged.
-    """
-    if len(verts) < CLUSTER_MIN_POINTS:
-        return verts, colors
-
-    tmp = o3d.geometry.PointCloud()
-    tmp.points = o3d.utility.Vector3dVector(verts)
-    labels = np.array(tmp.cluster_dbscan(
-        eps=CLUSTER_EPS,
-        min_points=CLUSTER_MIN_POINTS,
-        print_progress=False,
-    ))
-
-    valid = labels >= 0
-    if not valid.any():
-        return verts, colors
-
-    largest = np.bincount(labels[valid]).argmax()
-    mask    = labels == largest
-    return verts[mask], colors[mask]
 
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -365,40 +331,13 @@ class ObjectIsolator:
                 last_mask, last_box = _detect_red_mask(bgr)
                 self.last_box = last_box   # expose for data-collector / outside callers
 
-                # ── 3b. YOLO shape classification — rate-limited ─────────────
-                # Run YOLO only when:
-                #   · Object just appeared  (no red segment → red segment)
-                #   · 60 s have elapsed since the last successful classification
-                # All other frames reuse the last accepted result (sticky hint).
-                # This avoids running heavy inference every frame and is the
-                # primary source of lag reduction.
-                _YOLO_INTERVAL = 60.0   # seconds between periodic re-checks
-
-                has_obj_now = last_box is not None
-                now         = time.monotonic()
-
-                if self._classifier is not None and has_obj_now:
-                    newly_appeared   = not self._yolo_had_obj
-                    periodic_recheck = (now - self._yolo_last_time) >= _YOLO_INTERVAL
-
-                    if newly_appeared or periodic_recheck:
-                        x1, y1, x2, y2 = last_box
-                        crop = bgr[y1:y2, x1:x2]
-                        if crop.size > 0:
-                            result = self._classifier.predict(crop)
-                            if result is not None:
-                                self._yolo_shape     = result
-                                self._yolo_last_time = now
-                                reason = "new detection" if newly_appeared else "60 s check"
-                                print(f"[ObjectIsolator]  YOLO re-classify ({reason})"
-                                      f" → {result}")
-
-                self._yolo_had_obj = has_obj_now
-                # Expose sticky hint: keeps last known class while object is
-                # present; resets to None only when the object disappears.
-                shape_hint = self._yolo_shape if has_obj_now else None
-                if not has_obj_now:
-                    self._yolo_shape = None   # force re-classify on next appearance
+                # ── 3b. YOLO shape classification on the bounding-box crop ───
+                shape_hint: str | None = None
+                if self._classifier is not None and last_box is not None:
+                    x1, y1, x2, y2 = last_box
+                    crop = bgr[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        shape_hint = self._classifier.predict(crop)
 
                 # ── 4. Build subsampled point cloud ───────────────────────
                 pc_util.map_to(color_fr)
@@ -424,9 +363,11 @@ class ObjectIsolator:
                     full_colors    = np.full_like(colors, 0.35)
                     full_colors[inside] = colors[inside]
 
-                    obj_verts_raw, obj_colors_raw = keep_largest_cluster(
-                        verts[inside], colors[inside]
-                    )
+                    # No DBSCAN here — bounding box already constrains the
+                    # region.  shape_fitter runs DBSCAN after voxel
+                    # downsampling, where the cloud is small and it's cheap.
+                    obj_verts_raw  = verts[inside]
+                    obj_colors_raw = colors[inside]
                     _prev_box = last_box
                 else:
                     full_colors    = colors

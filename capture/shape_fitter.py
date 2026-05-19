@@ -55,6 +55,7 @@ Wireframe colours
 
 from __future__ import annotations
 
+import time
 import cv2
 import numpy as np
 import open3d as o3d
@@ -769,6 +770,22 @@ def _build_cuboid(pts: np.ndarray, axis: np.ndarray,
     h1_lo, h1_hi = face_extents(h1)
     h2_lo, h2_hi = face_extents(h2)
 
+    # ── Force equal side lengths (cube) ──────────────────────────────────────
+    # Take the largest fitted extent across all three axes and apply it
+    # symmetrically around each face-pair centre.
+    v_size  = v_hi  - v_lo
+    h1_size = h1_hi - h1_lo
+    h2_size = h2_hi - h2_lo
+    side    = max(v_size, h1_size, h2_size)
+
+    v_ctr   = (v_lo  + v_hi)  / 2.0
+    h1_ctr  = (h1_lo + h1_hi) / 2.0
+    h2_ctr  = (h2_lo + h2_hi) / 2.0
+
+    v_lo,  v_hi  = v_ctr  - side / 2, v_ctr  + side / 2
+    h1_lo, h1_hi = h1_ctr - side / 2, h1_ctr + side / 2
+    h2_lo, h2_hi = h2_ctr - side / 2, h2_ctr + side / 2
+
     # ── Build 8 corners ───────────────────────────────────────────────────────
     # Corner index i encodes: bit0 = v axis (0=lo,1=hi)
     #                          bit1 = h1 axis
@@ -821,39 +838,47 @@ def fit_once(pts: np.ndarray,
     -------
     (shape_name, LineSet) or (None, None) if pts is too sparse after SOR
     """
-    if len(pts) < 50:
+    if len(pts) < 20:
         return None, None
 
-    # ── ① Voxel downsample  (fast — reduces N before all expensive ops) ────
+    if shape_hint is None:
+        return None, None   # no YOLO result → do not fit
+
+    _t0 = time.perf_counter()
+
+    # ── ① Voxel downsample ────────────────────────────────────────────────
     _pcd = o3d.geometry.PointCloud()
     _pcd.points = o3d.utility.Vector3dVector(pts)
     _pcd = _pcd.voxel_down_sample(_VOXEL_SIZE)
     pts = np.asarray(_pcd.points)
+    _t1 = time.perf_counter()
+
     if len(pts) < 20:
         return None, None
 
-    # ── ② SOR on the downsampled cloud ────────────────────────────────────
+    # ── ② Lightweight SOR ────────────────────────────────────────────────
     _pcd, _ = _pcd.remove_statistical_outlier(
         nb_neighbors=_SOR_NEIGHBORS, std_ratio=_SOR_STD_RATIO)
     pts = np.asarray(_pcd.points)
+    _t2 = time.perf_counter()
+
     if len(pts) < 20:
         return None, None
 
-    # ── ③ Keep only the dominant cluster ──────────────────────────────────
+    # ── ③ Main cluster only (on the small downsampled cloud — fast) ───────
     pts = _largest_cluster(pts)
+    _t3 = time.perf_counter()
+
     if len(pts) < 20:
         return None, None
 
-    axis = table_normal if table_normal is not None \
-           else np.array([0., 0., 1.])
-
-    # ── Shape is determined entirely by YOLO ───────────────────────────────
-    if shape_hint is None:
-        return None, None   # no YOLO result → do not fit
+    axis  = table_normal if table_normal is not None else np.array([0., 0., 1.])
     shape = shape_hint
-    print(f"[shape_fitter]  YOLO → {shape}  pts={len(pts)}")
+    print(f"[fit_once]  {shape}  pts={len(pts)}  "
+          f"vox={(_t1-_t0)*1e3:.1f}ms  sor={(_t2-_t1)*1e3:.1f}ms  "
+          f"dbscan={(_t3-_t2)*1e3:.1f}ms")
 
-    # ── Surface normals (used by both cuboid face-plane fitting and cylinder) ─
+    # ── ④ Surface normals ─────────────────────────────────────────────────
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     pcd.estimate_normals(
@@ -861,26 +886,33 @@ def fit_once(pts: np.ndarray,
     pcd.orient_normals_towards_camera_location(
         camera_location=np.array([0., 0., 0.]))
     normals = np.asarray(pcd.normals)
+    _t4 = time.perf_counter()
+    print(f"[fit_once]  normals={(_t4-_t3)*1e3:.1f}ms")
 
     # ── Fit ────────────────────────────────────────────────────────────────
     if shape == "cuboid":
-        # Pass normals so face-plane fitting can use surface-normal alignment
-        # to cleanly separate face groups even when only 2-3 faces are visible.
-        return "cuboid", _build_cuboid(pts, axis, normals)
+        ls = _build_cuboid(pts, axis, normals)
+        _t5 = time.perf_counter()
+        print(f"[fit_once]  cuboid fit={(_t5-_t4)*1e3:.1f}ms  "
+              f"total={(_t5-_t0)*1e3:.1f}ms")
+        return "cuboid", ls
 
     # Cylinder
     axis_pt, r, err = _best_fit_cylinder(pts, normals, axis)
+    _t5 = time.perf_counter()
     if axis_pt is None:
         return "cuboid", _build_cuboid(pts, axis, normals)
 
     r        = float(np.clip(r, _R_MIN, _R_MAX))
     centroid = pts.mean(axis=0)
     h_min, h_max = _estimate_height(pts, normals, axis, centroid)
+    ls = _build_cylinder(axis, axis_pt, r, h_min, h_max)
+    _t6 = time.perf_counter()
+    print(f"[fit_once]  cylinder r={r*1e3:.1f}mm h={(h_max-h_min)*1e3:.1f}mm "
+          f"err={err*1e3:.2f}mm  circle_fit={(_t5-_t4)*1e3:.1f}ms  "
+          f"total={(_t6-_t0)*1e3:.1f}ms")
 
-    print(f"[shape_fitter]  cylinder  r={r*1e3:.1f}mm  "
-          f"h={(h_max-h_min)*1e3:.1f}mm  err={err*1e3:.2f}mm")
-
-    return "cylinder", _build_cylinder(axis, axis_pt, r, h_min, h_max)
+    return "cylinder", ls
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -932,14 +964,14 @@ def fit_and_track(pts: np.ndarray, table_normal, tracker: ShapeTracker,
     if len(pts) < 20:
         return None, None
 
-    # ── ② SOR on the downsampled cloud ────────────────────────────────────
+    # ── ② Lightweight SOR ─────────────────────────────────────────────────
     _pcd, _ = _pcd.remove_statistical_outlier(
         nb_neighbors=_SOR_NEIGHBORS, std_ratio=_SOR_STD_RATIO)
     pts = np.asarray(_pcd.points)
     if len(pts) < 20:
         return None, None
 
-    # ── ③ Keep only the dominant cluster ──────────────────────────────────
+    # ── ③ Main cluster only ───────────────────────────────────────────────
     pts = _largest_cluster(pts)
     if len(pts) < 20:
         return None, None

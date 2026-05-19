@@ -25,8 +25,6 @@ import cv2
 import numpy as np
 import open3d as o3d
 
-from capture.object_isolation import keep_largest_cluster
-
 if TYPE_CHECKING:
     from capture.object_isolation import ObjectIsolator
 
@@ -236,11 +234,10 @@ def show_isolated_pcd(
                         all_pts  = np.concatenate([v for v, _ in _accum_buf])
                         all_cols = np.concatenate([c for _, c in _accum_buf])
 
-                        # Remove outliers from the merged historical cloud so
-                        # the shape fitter only receives the dominant cluster.
-                        all_pts, all_cols = keep_largest_cluster(
-                            all_pts, all_cols)
-                        _fit_pts = all_pts   # pass clean history to callback
+                        # Pass the merged cloud directly — fit_once handles
+                        # voxel downsample → SOR → DBSCAN internally,
+                        # identical to the test_shape_fit pipeline.
+                        _fit_pts = all_pts
 
                         # Build temp cloud and voxel-downsample for display
                         tmp = o3d.geometry.PointCloud()

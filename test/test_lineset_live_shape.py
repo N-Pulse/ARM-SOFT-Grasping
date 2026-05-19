@@ -257,7 +257,7 @@ def _object_params(rot, trans, shape, tracker, shape_ls):
     else:
         obj_half_depth = 0.0
 
-    cam_pos  = trans - approach * (FINGER_LENGTH + obj_half_depth)
+    cam_pos  = trans - approach * FINGER_LENGTH
     hand_pos = np.array([cam_pos[2], -cam_pos[0], cam_pos[1]])
     return distance_m, elevation_deg, bearing_deg, hand_pos
 

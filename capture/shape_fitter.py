@@ -156,14 +156,14 @@ def _rect_score_2d(pts_2d: np.ndarray) -> float:
 
 
 def _fit_rect_percentile(pts_2d: np.ndarray,
-                          lo: float = 1.0,
-                          hi: float = 99.0) -> np.ndarray:
+                          lo: float = 0.0,
+                          hi: float = 100.0) -> np.ndarray:
     """
     Fit a tight rectangle to pts_2d.
 
     Uses cv2.minAreaRect for orientation (robust to partial visibility), then
-    percentile projections for extents so the wireframe aligns with the
-    surface rather than the most extreme — often noisy — points.
+    min/max projections for extents so the wireframe covers the full point
+    cloud (SOR already removed noise, so we can trust the extremes).
 
     Returns (4, 2) corners in CCW angular order.
     """
@@ -382,7 +382,15 @@ def _best_fit_cylinder(pts: np.ndarray,
                         normals: np.ndarray,
                         axis: np.ndarray):
     """
-    Least-squares 2-D circle fit in the plane ⊥ to axis.
+    Geometric 2-D circle fit in the plane ⊥ to axis.
+
+    Two-stage:
+      1. Algebraic least-squares for a robust initial estimate.
+      2. Geometric refinement via scipy.optimize.least_squares that minimises
+         the actual radial distance error  Σ (‖p_⊥ - centre‖ − r)².
+         This is critical for partial arcs (~1/3 visible at 30°) where the
+         algebraic fit is biased toward a larger, looser circle.
+
     Returns (axis_pt, radius, mean_radial_err) or (None, None, inf).
     """
     centroid = pts.mean(axis=0)
@@ -391,15 +399,37 @@ def _best_fit_cylinder(pts: np.ndarray,
     e2  = np.cross(axis, e1);  e2 /= np.linalg.norm(e2)
     d   = pts - centroid
     u, v = d @ e1, d @ e2
-    A    = np.column_stack([-2*u, -2*v, np.ones(len(u))])
-    b    = -(u**2 + v**2)
+
+    # ── Stage 1: algebraic least-squares (fast initial estimate) ─────────────
+    A  = np.column_stack([-2*u, -2*v, np.ones(len(u))])
+    b  = -(u**2 + v**2)
     x, *_ = np.linalg.lstsq(A, b, rcond=None)
-    cu, cv, dv = x
-    r_sq = cu**2 + cv**2 - dv
+    cu0, cv0, dv = x
+    r_sq = cu0**2 + cv0**2 - dv
     if r_sq <= 0:
         return None, None, np.inf
-    r       = float(np.sqrt(r_sq))
-    axis_pt = centroid + cu*e1 + cv*e2
+    r0 = float(np.sqrt(r_sq))
+
+    # ── Stage 2: geometric refinement ────────────────────────────────────────
+    try:
+        from scipy.optimize import least_squares as _lsq
+
+        def _residuals(params):
+            cu_, cv_, r_ = params
+            dist = np.sqrt((u - cu_)**2 + (v - cv_)**2)
+            return dist - abs(r_)
+
+        res = _lsq(_residuals, [cu0, cv0, r0], method='lm',
+                   max_nfev=200, ftol=1e-6, xtol=1e-6)
+        cu, cv, r_fit = res.x
+        r_fit = abs(r_fit)
+        if r_fit > 0:
+            cu0, cv0, r0 = cu, cv, r_fit
+    except Exception:
+        pass   # keep algebraic result if scipy unavailable or diverges
+
+    r       = float(r0)
+    axis_pt = centroid + cu0*e1 + cv0*e2
     along   = (pts - axis_pt) @ axis
     on_ax   = axis_pt + np.outer(along, axis)
     err     = float(np.mean(np.abs(np.linalg.norm(pts - on_ax, axis=1) - r)))
@@ -410,9 +440,11 @@ def _estimate_height(pts: np.ndarray,
                       normals: np.ndarray,
                       axis: np.ndarray,
                       centroid: np.ndarray):
+    # Use full min/max — SOR already removed stray points so the extremes are
+    # trustworthy.  Percentiles used to leave visible gaps at the top/bottom.
     proj  = (pts - centroid) @ axis
-    h_min = float(np.percentile(proj, 1))
-    h_max = float(np.percentile(proj, 99))
+    h_min = float(proj.min())
+    h_max = float(proj.max())
     cap   = np.abs(normals @ axis) > _CAP_NORMAL_DOT
     if cap.sum() >= _CAP_MIN_PTS:
         cp   = proj[cap];  span = h_max - h_min
@@ -622,8 +654,9 @@ def _build_cuboid(pts: np.ndarray, axis: np.ndarray) -> o3d.geometry.LineSet:
     w       = pts @ n
     pts_2d  = np.column_stack([u, v])
 
-    h_min = float(np.percentile(w, 1))
-    h_max = float(np.percentile(w, 99))
+    # Use full min/max — SOR already removed noise so extremes are trustworthy
+    h_min = float(w.min())
+    h_max = float(w.max())
     h_min = h_min if h_max - h_min > 0.005 else h_min - 0.0025
 
     rect_corners = _fit_rect_percentile(pts_2d)   # (4, 2) CCW

@@ -772,13 +772,18 @@ def _build_cuboid(pts: np.ndarray, axis: np.ndarray,
     h1_lo, h1_hi = face_extents(h1)
     h2_lo, h2_hi = face_extents(h2)
 
-    # ── Force equal side lengths (cube) ──────────────────────────────────────
-    # Take the largest fitted extent across all three axes and apply it
-    # symmetrically around each face-pair centre.
-    v_size  = v_hi  - v_lo
-    h1_size = h1_hi - h1_lo
-    h2_size = h2_hi - h2_lo
-    side    = max(v_size, h1_size, h2_size)
+    # ── Force equal side lengths (cube), prioritising the front face ──────────
+    # The "front face" is the one whose outward normal is most aligned with the
+    # camera-to-object direction — i.e. the face we see most head-on (正视图).
+    # Its two fitted planes are the most reliable because the camera sees them
+    # with minimal foreshortening, so we use that extent as the canonical side
+    # length and expand all other face-pairs symmetrically around their centres.
+    centroid_3d = pts.mean(axis=0)
+    cam_to_obj  = centroid_3d / (np.linalg.norm(centroid_3d) + 1e-9)
+
+    dots   = [abs(cam_to_obj @ n), abs(cam_to_obj @ h1), abs(cam_to_obj @ h2)]
+    sizes  = [v_hi - v_lo, h1_hi - h1_lo, h2_hi - h2_lo]
+    side   = sizes[int(np.argmax(dots))]   # extent from the most-visible face
 
     v_ctr   = (v_lo  + v_hi)  / 2.0
     h1_ctr  = (h1_lo + h1_hi) / 2.0

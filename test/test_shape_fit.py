@@ -1,13 +1,19 @@
 """
 test/test_shape_fit.py
 ======================
-Thin test runner for the shape-fitting pipeline.
+Two-thread architecture:
 
-All fitting logic lives in capture/shape_fitter.py.
-This file handles:
-  · Table-plane detection via chessboard (RealSense pipeline)
-  · Open3D / cv2 visualisation callback
-  · CLI entry point
+  ComputeWorker (background)
+    · Drains ObjectIsolator's frame queue
+    · Receives shape_hint from YOLO (set inside ObjectIsolator)
+    · Calls fit_once — shape is determined entirely by shape_hint
+    · Stores result in a lock-protected single slot
+
+  Render loop (main thread)
+    · Reads the latest pre-computed result (non-blocking)
+    · Updates Open3D point cloud + wireframe geometries
+    · Shows cv2 camera preview
+    · Zero computation on the render thread
 
 Usage
 -----
@@ -17,7 +23,7 @@ Usage
 
 Controls
 --------
-  Close the Open3D window or press Ctrl+C to stop.
+  Close the Open3D window | Ctrl+C | ESC / q in the camera preview
 
 Chessboard
 ----------
@@ -37,14 +43,13 @@ import pyrealsense2 as rs
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from capture.object_isolation import ObjectIsolator
-from capture.shape_fitter import ShapeTracker, fit_and_track
-from helper.pcd_visualizer import show_isolated_pcd
+from capture.shape_fitter import fit_once
 
 
 # ── Chessboard ─────────────────────────────────────────────────────────────────
-_BOARD_COLS = 10    # inner corners  (11 col board  → 10)
-_BOARD_ROWS = 7     # inner corners  ( 8 row board  →  7)
-_SQUARE_M   = 0.015 # 15 mm
+_BOARD_COLS = 10
+_BOARD_ROWS = 7
+_SQUARE_M   = 0.015   # 15 mm
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -52,10 +57,8 @@ _SQUARE_M   = 0.015 # 15 mm
 # ══════════════════════════════════════════════════════════════════════════════
 
 def detect_table_plane(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
-    """
-    Stream RealSense frames until chessboard is found; fit plane via SVD.
-    Returns (table_normal, d)  or  (None, None) on ESC.
-    """
+    """Stream RealSense frames until chessboard is found; fit plane via SVD.
+    Returns (table_normal, d) or (None, None) on ESC."""
     board_shape = (board_cols, board_rows)
     criteria    = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 
@@ -68,7 +71,7 @@ def detect_table_plane(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
     profile     = pipe.start(cfg)
     intr        = (profile.get_stream(rs.stream.color)
                           .as_video_stream_profile().get_intrinsics())
-    depth_scale = (profile.get_device().first_depth_sensor().get_depth_scale())
+    depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
     fx, fy, cx, cy = intr.fx, intr.fy, intr.ppx, intr.ppy
 
     print(f"\n[table]  Board inner corners {board_cols}×{board_rows}, "
@@ -77,16 +80,16 @@ def detect_table_plane(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
 
     try:
         while True:
-            frames      = pipe.wait_for_frames()
-            aligned     = align.process(frames)
-            cf, df      = aligned.get_color_frame(), aligned.get_depth_frame()
+            frames  = pipe.wait_for_frames()
+            aligned = align.process(frames)
+            cf, df  = aligned.get_color_frame(), aligned.get_depth_frame()
             if not cf or not df:
                 continue
 
             img   = np.asarray(cf.get_data())
             depth = np.asarray(df.get_data()).astype(np.float32) * depth_scale
 
-            gray         = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            gray           = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             found, corners = cv2.findChessboardCorners(gray, board_shape, None)
 
             disp = img.copy()
@@ -141,99 +144,79 @@ def detect_table_plane(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Visualizer callback
+# COMPUTE WORKER  (background thread — all heavy work lives here)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _make_overlay_callback(table_normal):
+class ComputeWorker:
     """
-    Returns an on_new_frame callback that runs fit_and_track on a background
-    thread so the Open3D render loop is never blocked by heavy computation.
+    Drains ObjectIsolator's frame queue on a background thread.
 
-    Design
-    ------
-    · A single-slot input queue (_fit_in) holds the most recent obj_verts.
-      The worker drains it before each fit so stale frames are dropped.
-    · The latest fit result is stored in _fit_out under _fit_lock.
-    · _on_frame (called on the main/render thread) pushes new verts and reads
-      the latest result.  Open3D geometry calls stay on the main thread.
-    · lookat is re-centred only when the wireframe is first added.
+    For each frame:
+      · shape_hint comes from YOLO (set inside ObjectIsolator._loop).
+      · fit_once is called with that shape_hint — the shape is determined
+        entirely by YOLO; no geometric classifier overrides it.
+      · The result is stored in a single lock-protected slot.  The render
+        thread reads it non-blocking; stale results are silently overwritten.
     """
-    tracker   = ShapeTracker()
-    state     = {"ls": None, "label": None}
 
-    _fit_in   = queue.Queue(maxsize=1)
-    _fit_out  = {"shape": None, "ls": None}
-    _fit_lock = threading.Lock()
+    def __init__(self, isolator: ObjectIsolator, table_normal):
+        self._isolator     = isolator
+        self._table_normal = table_normal
+        self._result       = None
+        self._lock         = threading.Lock()
+        self._stop         = threading.Event()
+        self._thread       = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
-    def _worker():
-        while True:
+    def latest(self):
+        """Non-blocking.  Returns and clears the latest result dict, or None."""
+        with self._lock:
+            r, self._result = self._result, None
+        return r
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=3.0)
+
+    def _run(self):
+        while not self._stop.is_set():
+            # Block until a frame is available (with timeout to check stop flag)
             try:
-                verts = _fit_in.get(timeout=0.5)
+                (verts, raw_colors, full_colors,
+                 obj_verts, obj_colors,
+                 preview_bgr, shape_hint) = \
+                    self._isolator._frame_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
-            if verts is None:        # sentinel — shut down
-                break
-            shape, ls = fit_and_track(verts, table_normal, tracker)
-            if ls is not None:
-                with _fit_lock:
-                    _fit_out["shape"] = shape
-                    _fit_out["ls"]    = ls
 
-    _thread = threading.Thread(target=_worker, daemon=True)
-    _thread.start()
+            has_obj = len(obj_verts) > 0
+            shape   = None
+            ls      = None
 
-    def _on_frame(obj_verts: np.ndarray, vis: o3d.visualization.Visualizer):
-        # ── Object lost — full reset so next object starts fresh ──────────────
-        if len(obj_verts) == 0:
-            tracker.full_reset()
-            # Remove stale wireframe from the scene
-            if state["ls"] is not None:
-                vis.remove_geometry(state["ls"], reset_bounding_box=False)
-                state["ls"]    = None
-                state["label"] = None
-                vis.update_renderer()
-            return
+            if has_obj and shape_hint is not None:
+                # Shape is determined entirely by YOLO — no geometric fallback.
+                shape, ls = fit_once(
+                    obj_verts, self._table_normal, shape_hint=shape_hint)
+                self._isolator.last_shape = shape
+            else:
+                # Either no object or YOLO hasn't produced a confident result.
+                self._isolator.last_shape = None
 
-        # Push latest frame (drop the previous queued one if worker is busy)
-        try:
-            _fit_in.get_nowait()
-        except queue.Empty:
-            pass
-        _fit_in.put(obj_verts.copy())
-
-        # Pull latest fit result (non-blocking)
-        with _fit_lock:
-            if _fit_out["ls"] is None:
-                return                    # worker hasn't finished a frame yet
-            shape  = _fit_out["shape"]
-            new_ls = _fit_out["ls"]
-            _fit_out["ls"] = None         # consume so we don't redraw same result
-
-        if shape != state["label"]:
-            print(f"[shape_fit]  *** shape → {shape} ***")
-
-        # Update Open3D geometry (must stay on main/render thread)
-        if state["ls"] is None:
-            # reset_bounding_box=False preserves the camera orientation set by
-            # auto_zoom — without it, add_geometry calls reset_view_point which
-            # overrides the camera_up convention and flips the point cloud.
-            vis.add_geometry(new_ls, reset_bounding_box=False)
-            state["ls"] = new_ls
-            vis.get_view_control().set_lookat(obj_verts.mean(axis=0).tolist())
-        else:
-            ls = state["ls"]
-            ls.points = new_ls.points
-            ls.lines  = new_ls.lines
-            ls.colors = new_ls.colors
-            vis.update_geometry(ls)
-
-        state["label"] = shape
-
-    return _on_frame
+            with self._lock:
+                self._result = {
+                    "obj_verts":   obj_verts,
+                    "obj_colors":  obj_colors,
+                    "full_verts":  verts,
+                    "full_colors": full_colors,
+                    "preview_bgr": preview_bgr,
+                    "shape":       shape,
+                    "ls":          ls,
+                    "has_obj":     has_obj,
+                }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Entry point
+# ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS, debug=False):
@@ -245,21 +228,109 @@ def run(board_cols=_BOARD_COLS, board_rows=_BOARD_ROWS, debug=False):
     isolator.ready.wait()
     print("Camera ready.\n")
 
+    worker = ComputeWorker(isolator, table_normal)
+
+    # ── Open3D window ──────────────────────────────────────────────────────────
+    vis = o3d.visualization.Visualizer()
+    vis.create_window("Shape Fit — Live", width=1280, height=720)
+
+    pcd       = o3d.geometry.PointCloud()
+    shape_ls  = o3d.geometry.LineSet()
+    pcd_added = False
+    ls_added  = False
+    first_obj = True   # trigger auto-zoom on first valid detection
+
+    CV2_WIN = "Camera Preview"
+    cv2.namedWindow(CV2_WIN, cv2.WINDOW_NORMAL)
+
+    last_shape = None
+
+    print("[render]  Window open — close or press Ctrl+C / q / ESC to stop.")
+
     try:
-        show_isolated_pcd(
-            isolator,
-            on_new_frame=_make_overlay_callback(table_normal),
-            debug=debug,
-            camera_up=(0, -1, 0),  # RealSense Y-down convention — same as test_obj_iso
-        )
+        while True:
+            result = worker.latest()
+
+            if result is not None:
+
+                # ── Choose which points to display ─────────────────────────
+                if debug or not result["has_obj"]:
+                    pts  = result["full_verts"]
+                    cols = result["full_colors"]
+                else:
+                    pts  = result["obj_verts"]
+                    cols = result["obj_colors"]
+
+                # ── Update point cloud ─────────────────────────────────────
+                pcd.points = o3d.utility.Vector3dVector(pts)
+                pcd.colors = o3d.utility.Vector3dVector(cols)
+
+                if not pcd_added:
+                    vis.add_geometry(pcd)
+                    pcd_added = True
+                else:
+                    vis.update_geometry(pcd)
+
+                # ── Auto-zoom on first isolated object ─────────────────────
+                if result["has_obj"] and first_obj and len(pts) > 0:
+                    ctr = vis.get_view_control()
+                    ctr.set_lookat(pts.mean(axis=0).tolist())
+                    ctr.set_front([0, 0, -1])
+                    ctr.set_up([0, -1, 0])
+                    ctr.set_zoom(0.5)
+                    first_obj = False
+
+                # ── Update wireframe ───────────────────────────────────────
+                new_ls = result["ls"]
+
+                if new_ls is not None:
+                    shape_ls.points = new_ls.points
+                    shape_ls.lines  = new_ls.lines
+                    shape_ls.colors = new_ls.colors
+                    if not ls_added:
+                        vis.add_geometry(shape_ls, reset_bounding_box=False)
+                        ls_added = True
+                    else:
+                        vis.update_geometry(shape_ls)
+
+                    if result["shape"] != last_shape:
+                        print(f"[render]  shape → {result['shape']}")
+                        last_shape = result["shape"]
+
+                elif ls_added and not result["has_obj"]:
+                    vis.remove_geometry(shape_ls, reset_bounding_box=False)
+                    ls_added  = False
+                    first_obj = True   # re-zoom when next object appears
+                    last_shape = None
+
+                # ── cv2 preview ────────────────────────────────────────────
+                if result["preview_bgr"] is not None:
+                    cv2.imshow(CV2_WIN, result["preview_bgr"])
+
+            # ── Service GUI event loops (zero computation) ─────────────────
+            if not vis.poll_events():
+                break
+            vis.update_renderer()
+
+            key = cv2.waitKey(1) & 0xFF
+            if key in (27, ord('q')):
+                break
+
+    except KeyboardInterrupt:
+        pass
     finally:
+        print("\nShutting down …")
+        worker.stop()
         isolator.stop()
+        cv2.destroyAllWindows()
+        vis.destroy_window()
+        print("Done.")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--board-cols", type=int, default=_BOARD_COLS)
     p.add_argument("--board-rows", type=int, default=_BOARD_ROWS)
-    p.add_argument("--debug", action="store_true")
+    p.add_argument("--debug",      action="store_true")
     a = p.parse_args()
     run(board_cols=a.board_cols, board_rows=a.board_rows, debug=a.debug)

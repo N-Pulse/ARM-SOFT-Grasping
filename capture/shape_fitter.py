@@ -127,32 +127,34 @@ def _largest_cluster(pts: np.ndarray,
                      eps: float = _DBSCAN_EPS,
                      min_pts: int = _DBSCAN_MIN_PTS) -> np.ndarray:
     """
-    Return only the points belonging to the largest DBSCAN cluster.
+    Return the cluster closest to the camera among all DBSCAN clusters.
 
-    After SOR, fragments of the table surface, nearby objects, or edge artefacts
-    can still survive as small disconnected groups.  Fitting a shape to the union
-    of all those groups inflates the bounding box and misaligns the planes.
-    Keeping only the dominant cluster ensures we fit the actual object.
+    When multiple clusters exist (e.g. object + table fragment), always prefer
+    the one with the smallest mean depth (z) — i.e. closest to the camera.
+    This gives a stable, deterministic choice that never jumps between clusters.
 
-    Falls back to the full input when:
-      · Every point is labelled noise (-1) by DBSCAN, or
-      · The largest cluster contains fewer than 50 points.
+    Falls back to the full input when every point is labelled noise (-1).
     """
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     labels = np.asarray(pcd.cluster_dbscan(
         eps=eps, min_points=min_pts, print_progress=False))
 
-    valid = labels[labels >= 0]
-    if len(valid) == 0:
-        return pts   # all noise — nothing to do
+    unique = np.unique(labels[labels >= 0])
+    if len(unique) == 0:
+        return pts   # all noise — fall back
 
-    main_label = int(np.bincount(valid).argmax())
-    mask       = labels == main_label
-    kept       = pts[mask]
+    # Sort all clusters by size (descending), take the top 2, then among
+    # those pick the one closest to the camera (smallest mean z).
+    # This avoids jumping: a tiny stray fragment near the camera is never
+    # preferred over the actual object, but if two large clusters compete
+    # the nearer one always wins consistently.
+    by_size   = sorted(unique, key=lambda lbl: (labels == lbl).sum(), reverse=True)
+    top2      = by_size[:2]
+    best_label = min(top2, key=lambda lbl: pts[labels == lbl, 2].mean())
+    kept = pts[labels == best_label]
 
-    if len(kept) < 50:
-        return pts   # degenerate — fall back
+    n_removed = len(pts) - len(kept)
 
     n_removed = len(pts) - len(kept)
     if n_removed > 0:

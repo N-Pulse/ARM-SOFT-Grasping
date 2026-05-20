@@ -81,7 +81,9 @@ _MODEL_PATH = os.path.join(
 # ── Gripper geometry ───────────────────────────────────────────────────────────
 FINGER_LENGTH   = 0.085
 PALM_DEPTH      = 0.06
-FINGER_DISTANCE = 0.06
+FINGER_DISTANCE = 0.10   # jaw separation — must exceed the object width in the
+                          # closing direction so the fingers clear the object
+                          # surface rather than intersecting it (was 0.06)
 GRIPPER_COLOR   = [1.0, 0.4, 0.0]
 _GRIPPER_LINES  = [[0, 1], [1, 2], [1, 3], [2, 4], [3, 5]]
 
@@ -332,6 +334,11 @@ class FitWorker:
                 break
 
             verts, shape_hint = item
+
+            # No YOLO result yet — reset EMA and wait (mirrors test_shape_fit).
+            if shape_hint is None:
+                self._ema.reset()
+                continue
 
             # 1. Shape fit — identical pipeline to test_shape_fit.py
             shape, shape_ls = fit_once(

@@ -92,7 +92,7 @@ def show_isolated_pcd(
     on_new_frame=None,
     debug: bool = False,
     camera_up=(0, -1, 0),
-    accum_frames: int = 20,
+    accum_frames: int = 8,
     accum_voxel_m: float = 0.003,
 ) -> None:
     """Spin up an Open3D window and stream frames from *isolator*.
@@ -127,8 +127,9 @@ def show_isolated_pcd(
         coverage and depth filtering without needing a detected object.
     accum_frames : int
         Number of past isolated-object frames to accumulate into a dense
-        smoothed cloud shown alongside the live frame.  Set to 0 to disable.
-        Default: 20.
+        cloud passed to the fit callback.  ShapeEMA handles temporal
+        smoothing, so 8 frames is sufficient.  Set to 0 to disable.
+        Default: 8.
     accum_voxel_m : float
         Voxel size (metres) for downsampling the accumulated cloud before
         display.  Keeps point count manageable even with many frames.

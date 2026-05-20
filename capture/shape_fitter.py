@@ -68,7 +68,8 @@ _COLOR = {
 }
 
 # ── Normal estimation ──────────────────────────────────────────────────────────
-_KNN_NORMAL = 10   # reduced from 15 — sufficient after voxel downsampling
+_KNN_NORMAL = 6    # sufficient for 4-fold orientation trick and cylinder fit;
+                   # lower = faster KD-tree query, still smooth enough normals
 
 # ── Geometry ───────────────────────────────────────────────────────────────────
 _R_MIN          = 0.005
@@ -101,18 +102,15 @@ _NORMAL_HIST_BINS      = 36    # 10° per bin
 _NORMAL_CLUSTER_THRESH = 0.35  # normalised entropy < this → clustered → cuboid
 
 # ── Voxel downsampling  (FIRST step — runs before everything else) ────────────
-_VOXEL_SIZE = 0.005   # 5 mm grid — keeps shape detail, reduces N by ~5-10×
-                       # Raise to 0.008 for faster but coarser fit;
-                       # Lower to 0.003 for denser clouds / larger objects.
-
-# ── Statistical outlier removal ───────────────────────────────────────────────
-_SOR_NEIGHBORS = 20    # neighbours used for mean-distance statistics
-_SOR_STD_RATIO = 2.5   # remove points > this many σ above the mean
-                        # (2.5 keeps edge/corner points; 2.0 was too aggressive)
+_VOXEL_SIZE = 0.008   # 8 mm grid — ~2.5× fewer surface points than 5 mm,
+                       # all downstream ops proportionally faster.
+                       # Lower to 0.005 for finer detail on large objects.
 
 # ── DBSCAN clustering ─────────────────────────────────────────────────────────
-_DBSCAN_EPS        = 0.012   # neighbourhood radius (m) — ~12 mm covers typical
-                              # point spacing while bridging small surface gaps
+_DBSCAN_EPS        = 0.018   # neighbourhood radius (m) — must be > voxel size
+                              # (8 mm) to connect adjacent surface points; 18 mm
+                              # gives comfortable connectivity without merging
+                              # distinct objects
 _DBSCAN_MIN_PTS    = 5       # minimum cluster size (smaller after downsampling)
 
 # ── Tracker ────────────────────────────────────────────────────────────────────
@@ -859,6 +857,8 @@ def fit_once(pts: np.ndarray,
     _t0 = time.perf_counter()
 
     # ── ① Voxel downsample ────────────────────────────────────────────────
+    # SOR removed: voxel regularises the cloud sufficiently, and DBSCAN
+    # naturally discards isolated noise points (size < min_pts).
     _pcd = o3d.geometry.PointCloud()
     _pcd.points = o3d.utility.Vector3dVector(pts)
     _pcd = _pcd.voxel_down_sample(_VOXEL_SIZE)
@@ -868,18 +868,9 @@ def fit_once(pts: np.ndarray,
     if len(pts) < 20:
         return None, None
 
-    # ── ② Lightweight SOR ────────────────────────────────────────────────
-    _pcd, _ = _pcd.remove_statistical_outlier(
-        nb_neighbors=_SOR_NEIGHBORS, std_ratio=_SOR_STD_RATIO)
-    pts = np.asarray(_pcd.points)
-    _t2 = time.perf_counter()
-
-    if len(pts) < 20:
-        return None, None
-
-    # ── ③ Main cluster only (on the small downsampled cloud — fast) ───────
+    # ── ② Main cluster only (DBSCAN on the small downsampled cloud) ───────
     pts = _largest_cluster(pts)
-    _t3 = time.perf_counter()
+    _t2 = time.perf_counter()
 
     if len(pts) < 20:
         return None, None
@@ -887,10 +878,10 @@ def fit_once(pts: np.ndarray,
     axis  = table_normal if table_normal is not None else np.array([0., 0., 1.])
     shape = shape_hint
     print(f"[fit_once]  {shape}  pts={len(pts)}  "
-          f"vox={(_t1-_t0)*1e3:.1f}ms  sor={(_t2-_t1)*1e3:.1f}ms  "
-          f"dbscan={(_t3-_t2)*1e3:.1f}ms")
+          f"vox={(_t1-_t0)*1e3:.1f}ms  "
+          f"dbscan={(_t2-_t1)*1e3:.1f}ms")
 
-    # ── ④ Surface normals ─────────────────────────────────────────────────
+    # ── ③ Surface normals ─────────────────────────────────────────────────
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     pcd.estimate_normals(
@@ -898,20 +889,20 @@ def fit_once(pts: np.ndarray,
     pcd.orient_normals_towards_camera_location(
         camera_location=np.array([0., 0., 0.]))
     normals = np.asarray(pcd.normals)
-    _t4 = time.perf_counter()
-    print(f"[fit_once]  normals={(_t4-_t3)*1e3:.1f}ms")
+    _t3 = time.perf_counter()
+    print(f"[fit_once]  normals={(_t3-_t2)*1e3:.1f}ms")
 
     # ── Fit ────────────────────────────────────────────────────────────────
     if shape == "cuboid":
         ls = _build_cuboid(pts, axis, normals)
-        _t5 = time.perf_counter()
-        print(f"[fit_once]  cuboid fit={(_t5-_t4)*1e3:.1f}ms  "
-              f"total={(_t5-_t0)*1e3:.1f}ms")
+        _t4 = time.perf_counter()
+        print(f"[fit_once]  cuboid fit={(_t4-_t3)*1e3:.1f}ms  "
+              f"total={(_t4-_t0)*1e3:.1f}ms")
         return "cuboid", ls
 
     # Cylinder
     axis_pt, r, err = _best_fit_cylinder(pts, normals, axis)
-    _t5 = time.perf_counter()
+    _t4 = time.perf_counter()
     if axis_pt is None:
         return "cuboid", _build_cuboid(pts, axis, normals)
 
@@ -919,10 +910,10 @@ def fit_once(pts: np.ndarray,
     centroid = pts.mean(axis=0)
     h_min, h_max = _estimate_height(pts, normals, axis, centroid)
     ls = _build_cylinder(axis, axis_pt, r, h_min, h_max)
-    _t6 = time.perf_counter()
+    _t5 = time.perf_counter()
     print(f"[fit_once]  cylinder r={r*1e3:.1f}mm h={(h_max-h_min)*1e3:.1f}mm "
-          f"err={err*1e3:.2f}mm  circle_fit={(_t5-_t4)*1e3:.1f}ms  "
-          f"total={(_t6-_t0)*1e3:.1f}ms")
+          f"err={err*1e3:.2f}mm  circle_fit={(_t4-_t3)*1e3:.1f}ms  "
+          f"total={(_t5-_t0)*1e3:.1f}ms")
 
     return "cylinder", ls
 

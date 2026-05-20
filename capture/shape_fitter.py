@@ -690,27 +690,27 @@ def _build_cylinder(axis, axis_pt, r, h_min, h_max):
 def _build_cuboid(pts: np.ndarray, axis: np.ndarray,
                   normals: np.ndarray | None = None) -> o3d.geometry.LineSet:
     """
-    Build a cuboid wireframe by fitting best-fit planes to each face.
+    Build a cube wireframe whose faces contain 90 % of the main cluster points.
 
-    Approach — analogous to fitting a line through points, but in 3-D we fit a
-    plane to each face group and intersect the 6 planes to get 8 corners:
-
+    Approach
+    --------
       1. Establish 3 orthogonal face-normal directions:
            · vertical  = table_normal  (= axis)
            · horizontal h1, h2  from cv2.minAreaRect on the floor footprint
-      2. For each face direction, split points into two face groups
-         (lowest FACE_FRAC and highest FACE_FRAC of projected distances).
-         If surface normals are available, additionally filter to points whose
-         normal aligns with the expected face direction — this gives cleaner
-         face membership, especially when two faces are partially occluded.
-      3. Plane offset  = mean projection of the face group along its normal.
-         This is the closed-form least-squares solution for a plane with
-         known normal: d* = mean(p_i · n).
+      2. For each axis project all points and read off the 5th / 95th
+         percentile.  This directly places each face pair so that exactly
+         90 % of the projected distances fall inside.
+      3. Force equal side lengths (cube).
+         side = max of the three 90 %-range extents — guarantees 90 % coverage
+         along every axis simultaneously.  Each face pair is then re-centred
+         at the midpoint of its own percentile range.
       4. 8 corners = all combinations of (lo/hi) × 3 axes.
          Edges = corner pairs that differ in exactly one axis bit (12 edges).
     """
-    FACE_FRAC       = 0.20   # fraction of pts used as each face's candidates
-    NORMAL_ALIGN_TH = 0.50   # surface-normal dot-product threshold for face membership
+    COVER_PCT = 90.0                          # desired point coverage
+    lo_pct    = (100.0 - COVER_PCT) / 2.0    # 5th  percentile
+    hi_pct    = 100.0 - lo_pct               # 95th percentile
+    MIN_SIDE  = 0.005                         # 5 mm floor to avoid degenerate flat
 
     # ── Orthonormal basis ─────────────────────────────────────────────────────
     n   = axis / np.linalg.norm(axis)
@@ -723,67 +723,32 @@ def _build_cuboid(pts: np.ndarray, axis: np.ndarray,
     d       = pts - mean_pt
     u       = (d @ e1).astype(np.float32)
     v       = (d @ e2).astype(np.float32)
-    pts_2d  = np.column_stack([u, v])
-    pts_f   = pts_2d.astype(np.float32).reshape(-1, 1, 2)
+    pts_f   = np.column_stack([u, v]).astype(np.float32).reshape(-1, 1, 2)
     _, _, angle = cv2.minAreaRect(pts_f)
     rad = np.deg2rad(angle)
     h1  = np.cos(rad) * e1 + np.sin(rad) * e2    # horizontal face normal 1
     h2  = -np.sin(rad) * e1 + np.cos(rad) * e2   # horizontal face normal 2
 
-    # ── Fit two planes per axis direction ─────────────────────────────────────
-    def face_extents(face_n):
-        """
-        Return (d_lo, d_hi) — the two face-plane offsets along face_n.
+    # ── Percentile-based face extents (90 % coverage per axis) ────────────────
+    def pct_extents(face_n):
+        proj = pts @ face_n
+        lo   = float(np.percentile(proj, lo_pct))
+        hi   = float(np.percentile(proj, hi_pct))
+        if hi - lo < MIN_SIDE:
+            mid = (lo + hi) / 2.0
+            lo, hi = mid - MIN_SIDE / 2, mid + MIN_SIDE / 2
+        return lo, hi
 
-        Each offset is the mean projection of that face's candidate points,
-        i.e. the least-squares plane position given a fixed normal direction.
-        """
-        proj  = pts @ face_n
-        n_pts = len(proj)
-        n_k   = max(5, int(n_pts * FACE_FRAC))
-        idx   = np.argsort(proj)
-        lo_idx = idx[:n_k]
-        hi_idx = idx[-n_k:]
+    v_lo,  v_hi  = pct_extents(n)
+    h1_lo, h1_hi = pct_extents(h1)
+    h2_lo, h2_hi = pct_extents(h2)
 
-        if normals is not None:
-            # Tighten face membership using surface-normal alignment.
-            # The face with outward normal  face_n → surface normals ≈ +face_n
-            # The face with outward normal -face_n → surface normals ≈ -face_n
-            lo_align = normals[lo_idx] @ (-face_n)   # should be positive for bottom face
-            hi_align = normals[hi_idx] @   face_n    # should be positive for top face
-            lo_good  = lo_idx[lo_align > NORMAL_ALIGN_TH]
-            hi_good  = hi_idx[hi_align > NORMAL_ALIGN_TH]
-            if len(lo_good) >= 3:
-                lo_idx = lo_good
-            if len(hi_good) >= 3:
-                hi_idx = hi_good
-
-        d_lo = float(proj[lo_idx].mean())
-        d_hi = float(proj[hi_idx].mean())
-
-        # Guard against degenerate (flat) case
-        if d_hi - d_lo < 0.005:
-            mid  = (d_lo + d_hi) / 2.0
-            d_lo, d_hi = mid - 0.0025, mid + 0.0025
-
-        return d_lo, d_hi
-
-    v_lo,  v_hi  = face_extents(n)
-    h1_lo, h1_hi = face_extents(h1)
-    h2_lo, h2_hi = face_extents(h2)
-
-    # ── Force equal side lengths (cube), prioritising the front face ──────────
-    # The "front face" is the one whose outward normal is most aligned with the
-    # camera-to-object direction — i.e. the face we see most head-on (正视图).
-    # Its two fitted planes are the most reliable because the camera sees them
-    # with minimal foreshortening, so we use that extent as the canonical side
-    # length and expand all other face-pairs symmetrically around their centres.
-    centroid_3d = pts.mean(axis=0)
-    cam_to_obj  = centroid_3d / (np.linalg.norm(centroid_3d) + 1e-9)
-
-    dots   = [abs(cam_to_obj @ n), abs(cam_to_obj @ h1), abs(cam_to_obj @ h2)]
-    sizes  = [v_hi - v_lo, h1_hi - h1_lo, h2_hi - h2_lo]
-    side   = sizes[int(np.argmax(dots))]   # extent from the most-visible face
+    # ── Force equal side lengths (cube) ───────────────────────────────────────
+    # Take the largest of the three 90 %-ranges so every axis is covered.
+    # Each face pair is centred at its own percentile midpoint so the cube
+    # stays centred on the point cloud along each axis independently.
+    sizes = [v_hi - v_lo, h1_hi - h1_lo, h2_hi - h2_lo]
+    side  = float(max(sizes))
 
     v_ctr   = (v_lo  + v_hi)  / 2.0
     h1_ctr  = (h1_lo + h1_hi) / 2.0

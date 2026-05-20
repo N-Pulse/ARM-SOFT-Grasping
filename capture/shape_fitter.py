@@ -707,10 +707,13 @@ def _build_cuboid(pts: np.ndarray, axis: np.ndarray,
       4. 8 corners = all combinations of (lo/hi) × 3 axes.
          Edges = corner pairs that differ in exactly one axis bit (12 edges).
     """
-    COVER_PCT = 90.0                          # desired point coverage
-    lo_pct    = (100.0 - COVER_PCT) / 2.0    # 5th  percentile
-    hi_pct    = 100.0 - lo_pct               # 95th percentile
-    MIN_SIDE  = 0.005                         # 5 mm floor to avoid degenerate flat
+    COVER_PCT        = 90.0    # desired point coverage
+    lo_pct           = (100.0 - COVER_PCT) / 2.0   # 5th  percentile
+    hi_pct           = 100.0 - lo_pct              # 95th percentile
+    MIN_SIDE         = 0.005   # 5 mm floor to avoid degenerate flat
+    PERP_THRESH      = 0.50    # |n · table_n| < this → side-wall normal
+    MIN_SIDE_NORMALS = 10      # minimum side-wall normals to trust the estimate
+    CONFIDENCE_MIN   = 0.15    # |z_mean| floor; below this → fall back to rect
 
     # ── Orthonormal basis ─────────────────────────────────────────────────────
     n   = axis / np.linalg.norm(axis)
@@ -718,16 +721,53 @@ def _build_cuboid(pts: np.ndarray, axis: np.ndarray,
     e1  = np.cross(n, ref);  e1 /= np.linalg.norm(e1)
     e2  = np.cross(n, e1)
 
-    # ── Horizontal footprint → minAreaRect for orientation ────────────────────
-    mean_pt = pts.mean(axis=0)
-    d       = pts - mean_pt
-    u       = (d @ e1).astype(np.float32)
-    v       = (d @ e2).astype(np.float32)
-    pts_f   = np.column_stack([u, v]).astype(np.float32).reshape(-1, 1, 2)
-    _, _, angle = cv2.minAreaRect(pts_f)
-    rad = np.deg2rad(angle)
-    h1  = np.cos(rad) * e1 + np.sin(rad) * e2    # horizontal face normal 1
-    h2  = -np.sin(rad) * e1 + np.cos(rad) * e2   # horizontal face normal 2
+    # ── Horizontal face orientation from surface normals (4-fold circular mean) ─
+    #
+    # A cube's side-wall normals cluster into exactly 2 perpendicular directions
+    # (one per pair of opposite faces).  Encoding them as complex exponentials
+    # with 4× the angle folds all four equivalent directions onto the same point
+    # on the unit circle, so a simple vector mean gives the dominant orientation
+    # even with arbitrary mixtures of visible faces and ±n sign ambiguity.
+    #
+    # |z_mean| ≈ 1  →  confident, all normals aligned with a cube face pair
+    # |z_mean| ≈ 0  →  normals are disordered → fall back to minAreaRect
+    h1 = h2 = None
+    if normals is not None:
+        side_mask = np.abs(normals @ n) < PERP_THRESH
+        side_n    = normals[side_mask]
+
+        if len(side_n) >= MIN_SIDE_NORMALS:
+            # Project each normal onto the horizontal plane and normalise.
+            horiz = side_n - np.outer(side_n @ n, n)
+            mag   = np.linalg.norm(horiz, axis=1)
+            valid = mag > 0.30
+            if valid.sum() >= MIN_SIDE_NORMALS:
+                horiz = horiz[valid] / mag[valid, None]
+
+                # Angle in the (e1, e2) reference frame.
+                angles = np.arctan2(horiz @ e2, horiz @ e1)
+
+                # 4-fold complex mean: exp(4iθ) collapses the four equivalent
+                # orientations (θ, θ+90°, θ+180°, θ+270°) to the same phasor.
+                z_mean = np.exp(4j * angles).mean()
+                if abs(z_mean) >= CONFIDENCE_MIN:
+                    theta = float(np.angle(z_mean)) / 4.0
+                    h1 = np.cos(theta) * e1 + np.sin(theta) * e2
+                    h2 = np.cross(n, h1);  h2 /= np.linalg.norm(h2)
+                    print(f"[cuboid]  normal-based orientation  "
+                          f"θ={np.degrees(theta):+.1f}°  "
+                          f"confidence={abs(z_mean):.2f}")
+
+    if h1 is None:
+        # Fallback: minimum-area bounding rectangle of the floor footprint.
+        mean_pt = pts.mean(axis=0)
+        d       = pts - mean_pt
+        pts_f   = np.column_stack([d @ e1, d @ e2]).astype(np.float32).reshape(-1, 1, 2)
+        _, _, angle = cv2.minAreaRect(pts_f)
+        rad = np.deg2rad(angle)
+        h1  = np.cos(rad) * e1 + np.sin(rad) * e2
+        h2  = -np.sin(rad) * e1 + np.cos(rad) * e2
+        print("[cuboid]  orientation fallback → minAreaRect")
 
     # ── Percentile-based face extents (90 % coverage per axis) ────────────────
     def pct_extents(face_n):

@@ -904,7 +904,12 @@ def fit_once(pts: np.ndarray,
     axis_pt, r, err = _best_fit_cylinder(pts, normals, axis)
     _t4 = time.perf_counter()
     if axis_pt is None:
-        return "cuboid", _build_cuboid(pts, axis, normals)
+        # Cylinder fit failed — return nothing rather than silently switching to
+        # cuboid.  This keeps the EMA class-vote purely driven by YOLO: a failed
+        # fit is just skipped (EMA holds its last committed shape) rather than
+        # injecting a spurious "cuboid" vote that would corrupt YOLO's result.
+        print("[fit_once]  cylinder fit failed — skipping frame")
+        return None, None
 
     r        = float(np.clip(r, _R_MIN, _R_MAX))
     centroid = pts.mean(axis=0)

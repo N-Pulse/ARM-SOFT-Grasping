@@ -47,6 +47,7 @@ import os
 import queue
 import threading
 import argparse
+from collections import deque
 
 _HERE = os.path.dirname(__file__)
 _ROOT = os.path.abspath(os.path.join(_HERE, ".."))
@@ -83,6 +84,14 @@ FINGER_LENGTH    = 0.085
 PALM_DEPTH       = 0.06
 FINGER_CLEARANCE = 0.008  # 8 mm gap between each fingertip and the object
                            # surface — keeps fingertips outside without touching
+
+# ── Publish stability gate ─────────────────────────────────────────────────────
+# ROS is only published when BOTH object position AND jaw opening have been
+# stable across the last _STABLE_FRAMES frames (i.e. the object is still and
+# the fit has converged).  Stability = per-axis std-dev below the threshold.
+_STABLE_FRAMES  = 8      # number of consecutive frames that must be stable
+_STABLE_POS_M   = 0.004  # 4 mm max std-dev in TCP position (x, y, z)
+_STABLE_JAW_M   = 0.003  # 3 mm max std-dev in jaw half-opening
 GRIPPER_COLOR   = [1.0, 0.4, 0.0]
 _GRIPPER_LINES  = [[0, 1], [1, 2], [1, 3], [2, 4], [3, 5]]
 
@@ -305,6 +314,10 @@ class FitWorker:
         self._published    = False   # publish once per object appearance
         self._ema          = ShapeEMA()
 
+        # Stability gate: rolling history of TCP position and jaw half-opening.
+        self._trans_buf  = deque(maxlen=_STABLE_FRAMES)
+        self._jaw_buf    = deque(maxlen=_STABLE_FRAMES)
+
         self._in           = queue.Queue(maxsize=1)
         self._out          = None
         self._lock         = threading.Lock()
@@ -327,9 +340,11 @@ class FitWorker:
         return r
 
     def reset(self):
-        """Object lost — clear pending result, EMA state, and allow re-publish."""
+        """Object lost — clear pending result, EMA, stability buffers, re-publish."""
         self._published = False
         self._ema.reset()
+        self._trans_buf.clear()
+        self._jaw_buf.clear()
         with self._lock:
             self._out = None
 
@@ -352,15 +367,23 @@ class FitWorker:
             # No YOLO result yet — reset EMA and wait (mirrors test_shape_fit).
             if shape_hint is None:
                 self._ema.reset()
+                self._trans_buf.clear()
+                self._jaw_buf.clear()
                 continue
 
             # 1. Shape fit — identical pipeline to test_shape_fit.py
             shape, shape_ls = fit_once(
                 verts, self._table_normal, shape_hint=shape_hint)
             # Smooth vertex positions and stabilise shape-type label.
+            # shape is the EMA-committed version of shape_hint (YOLO's result).
             shape, shape_ls = self._ema.update(shape, shape_ls)
             if shape_ls is None:
                 continue
+
+            # shape_hint = raw YOLO classification this frame
+            # shape      = EMA-committed class (requires lock_votes consecutive
+            #              YOLO frames to agree before switching)
+            # Both should agree once converged; printed below for verification.
 
             # 2. Grasp pose from the fitted shape geometry
             rot, trans, half_w = _grasp_from_shape(
@@ -371,12 +394,33 @@ class FitWorker:
             if has_grasp:
                 _fill_gripper_pts(grasp_pts, rot, trans, half_w)
 
-            # 3. ROS publish once per object appearance (first valid grasp)
-            if has_grasp and not self._published:
+            # 3. Stability gate ────────────────────────────────────────────────
+            # Accumulate TCP position and jaw opening over the last
+            # _STABLE_FRAMES frames.  Publish only when BOTH are steady
+            # (std-dev below threshold) so the arm doesn't move to a
+            # momentarily noisy estimate.
+            if has_grasp:
+                self._trans_buf.append(trans.copy())
+                self._jaw_buf.append(float(half_w))
+            else:
+                self._trans_buf.clear()
+                self._jaw_buf.clear()
+
+            is_stable = False
+            if len(self._trans_buf) == _STABLE_FRAMES:
+                pos_std = float(np.std(np.array(self._trans_buf), axis=0).max())
+                jaw_std = float(np.std(self._jaw_buf))
+                is_stable = (pos_std < _STABLE_POS_M) and (jaw_std < _STABLE_JAW_M)
+                print(f"[FitWorker]  YOLO={shape_hint!r}  published_class={shape!r}"
+                      f"  pos_std={pos_std*1e3:.1f}mm  jaw_std={jaw_std*1e3:.1f}mm"
+                      f"  stable={is_stable}")
+
+            # 4. ROS publish once the result has stabilised
+            if has_grasp and is_stable and not self._published:
                 self._publish(shape, rot, trans, shape_ls)
                 self._published = True
 
-            # 4. Hand the result to the render thread.
+            # 5. Hand the result to the render thread.
             centroid = trans if has_grasp \
                        else _shape_centroid(shape, self._table_normal, shape_ls)
             with self._lock:

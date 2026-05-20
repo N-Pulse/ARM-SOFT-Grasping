@@ -79,11 +79,10 @@ _MODEL_PATH = os.path.join(
 )
 
 # ── Gripper geometry ───────────────────────────────────────────────────────────
-FINGER_LENGTH   = 0.085
-PALM_DEPTH      = 0.06
-FINGER_DISTANCE = 0.10   # jaw separation — must exceed the object width in the
-                          # closing direction so the fingers clear the object
-                          # surface rather than intersecting it (was 0.06)
+FINGER_LENGTH    = 0.085
+PALM_DEPTH       = 0.06
+FINGER_CLEARANCE = 0.008  # 8 mm gap between each fingertip and the object
+                           # surface — keeps fingertips outside without touching
 GRIPPER_COLOR   = [1.0, 0.4, 0.0]
 _GRIPPER_LINES  = [[0, 1], [1, 2], [1, 3], [2, 4], [3, 5]]
 
@@ -134,7 +133,7 @@ def _grasp_from_shape(shape, table_normal, shape_ls):
     """
     trans = _shape_centroid(shape, table_normal, shape_ls)
     if trans is None:
-        return None, None
+        return None, None, None
 
     # ── Vertical (table) axis ────────────────────────────────────────────────
     # Cylinder : always the table normal (fit_once constrains the axis).
@@ -146,14 +145,14 @@ def _grasp_from_shape(shape, table_normal, shape_ls):
     elif shape == "cuboid":
         verts = np.asarray(shape_ls.points)
         if len(verts) < 8:
-            return None, None
+            return None, None, None
         axis = (verts[1::2] - verts[::2]).mean(axis=0)
         n    = np.linalg.norm(axis)
         if n < 1e-9:
-            return None, None
+            return None, None, None
         axis = axis / n
     else:
-        return None, None
+        return None, None, None
 
     # ── Approach: (camera → centroid) projected onto the table plane ─────────
     to_obj   = trans / (np.linalg.norm(trans) + 1e-9)
@@ -192,10 +191,20 @@ def _grasp_from_shape(shape, table_normal, shape_ls):
     rot   = np.column_stack([approach, closing, third])
     if np.linalg.det(rot) < 0:
         rot[:, 2] = -rot[:, 2]
-    return rot, trans
+
+    # ── Half jaw opening: object half-width in closing direction + clearance ─
+    # Project all wireframe vertices onto the closing axis; the half-range is
+    # how far the object surface extends from the centroid in that direction.
+    # Adding FINGER_CLEARANCE ensures the fingertips stay just outside the
+    # surface rather than touching or penetrating it.
+    all_verts  = np.asarray(shape_ls.points)
+    proj       = all_verts @ closing
+    half_w     = (proj.max() - proj.min()) / 2.0 + FINGER_CLEARANCE
+
+    return rot, trans, half_w
 
 
-def _fill_gripper_pts(pts: np.ndarray, rot, trans):
+def _fill_gripper_pts(pts: np.ndarray, rot, trans, half_w: float):
     """
     Write a 6-point gripper skeleton into the preallocated buffer.
 
@@ -210,10 +219,15 @@ def _fill_gripper_pts(pts: np.ndarray, rot, trans):
     Lines (see _GRIPPER_LINES):
         [palm_back→palm], [palm→l_root], [palm→r_root],
         [l_root→l_tip],   [r_root→r_tip]
+
+    Parameters
+    ----------
+    half_w : float
+        Half the jaw separation — computed dynamically from the fitted object
+        geometry so fingertips land just outside the object surface.
     """
     approach = rot[:, 0]
     closing  = rot[:, 1]
-    half_w   = FINGER_DISTANCE / 2.0
 
     palm       = trans - approach * FINGER_LENGTH
     palm_back  = palm  - approach * PALM_DEPTH
@@ -349,12 +363,13 @@ class FitWorker:
                 continue
 
             # 2. Grasp pose from the fitted shape geometry
-            rot, trans = _grasp_from_shape(shape, self._table_normal, shape_ls)
-            has_grasp  = rot is not None
+            rot, trans, half_w = _grasp_from_shape(
+                shape, self._table_normal, shape_ls)
+            has_grasp = rot is not None
 
             grasp_pts = np.zeros((6, 3))
             if has_grasp:
-                _fill_gripper_pts(grasp_pts, rot, trans)
+                _fill_gripper_pts(grasp_pts, rot, trans, half_w)
 
             # 3. ROS publish once per object appearance (first valid grasp)
             if has_grasp and not self._published:

@@ -34,7 +34,7 @@ geometry-only fallback can replace the network entirely; see
 | | model + simulator + replay | real RealSense camera |
 | --- | --- | --- |
 | **Linux** (x86-64 / ARM64) | yes | yes |
-| **Windows** | yes | yes |
+| **Windows** | yes | yes — tested with a D405 (section 8) |
 | **WSL2** | yes | awkward — see below |
 | **macOS** | yes | needs librealsense built from source |
 
@@ -110,6 +110,9 @@ pip install -r requirements.txt
 Versions this tree was tested with (Ubuntu 22.04, Python 3.10, CPU only):
 `numpy 2.2.6`, `scipy 1.15.3`, `opencv 5.0.0`, `open3d 0.20.0`,
 `torch 2.14.0+cpu`, `ultralytics 8.4.158`.
+
+Also run end to end on **Windows with Python 3.12** (CPU only) and a live
+**D405** camera; see *Tested on real hardware* in section 8.
 
 ## 3. Check that it works
 
@@ -271,7 +274,8 @@ What it does **not** reproduce: real sensor artefacts (multipath, dropouts at
 grazing angles, colour noise), cluttered backgrounds, motion blur, and any
 in-camera post-processing. Numbers measured in simulation are a sanity check,
 not a validation of accuracy — for that, record real frames with `--record` and
-replay them.
+replay them. The first real-camera results (section 8) already differ from the
+simulator on object width.
 
 Use `--source sim` to force simulation even when a camera is plugged in, and
 `--source camera` to fail loudly instead of silently falling back.
@@ -325,6 +329,9 @@ python -m armsoft --source camera --calibrate --frames 0
 ```
 
 Without either, it assumes `0,-1,0` (camera upright, table below the lens).
+For a camera tilted down by an angle θ, the normal is `0,-cos θ,-sin θ`
+(e.g. `0,-0.866,-0.5` for 30°). A camera looking straight down does **not**
+match the default.
 
 **6. Record while you have the camera**, so you can keep working without it:
 
@@ -349,6 +356,56 @@ and at least **500 px** in the image. Results on real frames will be noisier
 than the simulator suggests — see *Known limitations*. Watch the `stable` flag
 rather than individual frames: only a stable grasp is worth acting on, and only
 stable results are published.
+
+### Tested on real hardware
+
+Tested with a RealSense **D405 on Windows** (Python 3.12, CPU only, no Jetson).
+It works end to end: the selftest passes, the camera opens, YOLO runs on the
+CPU, and grasps are computed in about **40–60 ms per frame**.
+
+> The camera was **hand-held** during all trials, which can introduce errors of
+> its own (motion, and an imprecise camera pose).
+
+Trials 1 and 2 were run with the camera **overhead** (looking straight down) but
+with the default `--table-normal 0,-1,0`, which assumes the camera is upright
+with the table below it, so the orientation **did not match**. For trial 3
+the camera was tilted by about 30° (estimated by hand) and the table normal was
+set accordingly (`0,-0.866,-0.5`, i.e. `0,-cos 30°,-sin 30°`), so the
+orientation **matched**.
+
+| | Trial 1 | Trial 2 | Trial 3 |
+| --- | --- | --- | --- |
+| Object | 5 cm cube | cylinder, Ø 3.5 cm × 5 cm | same cylinder |
+| Camera | overhead, ~10 cm away | overhead | tilted ~30° |
+| `--table-normal` | `0,-1,0` (mismatch) | `0,-1,0` (mismatch) | `0,-0.866,-0.5` (matches) |
+| Classified as | cuboid ✓ | cylinder ✓ | cylinder ✓ |
+| Frames with a grasp | 30 / 30 | 149 / 200 | 60 / 60 |
+| Stable reached | yes | not recorded | yes |
+| Width computed (real) | 57 mm (50 mm) | 41.6 mm (35 mm) | **63.7 mm (35 mm)** |
+| Height computed (real) | — | 38.8 mm (50 mm) | 47.3 mm (50 mm) |
+| Distance computed | — | — | 369 mm |
+
+Notes:
+
+* **Trial 2 height is expected to be wrong.** From directly above only the top
+  disc is visible, so the height cannot be determined from that viewpoint.
+  With the camera tilted (trial 3) the height comes out within 3 mm.
+* **Trial 3 width is unexplained.** 63.7 mm for a 35 mm cylinder is far off,
+  even though the orientation was correct and the height was accurate. More
+  trials are needed to tell whether this is an isolated error or a systematic one.
+* **The width was overestimated in every trial** (+7 mm, +6.6 mm, +28.7 mm).
+  This is the opposite of the simulator, where the cylinder fit is within
+  about 1 mm and extra noise makes the width *shrink*. Because the jaw opening
+  is derived from the width, the gripper currently opens wider than needed.
+* Shape classification was correct in all three trials, including the
+  mismatched-orientation ones.
+
+<img width="640" height="480" alt="image" src="https://github.com/user-attachments/assets/22765560-4ee4-4d04-ac42-612190f0f524" />
+
+<img width="640" height="480" alt="image" src="https://github.com/user-attachments/assets/ab7c7f98-6da9-4e0d-925e-0b951b789946" />
+
+<img width="640" height="480" alt="image" src="https://github.com/user-attachments/assets/53e3f6f2-4c19-4c13-8d6f-36299c8a935f" />
+
 
 ## 9. Visual check of the simulated scenes
 
@@ -487,7 +544,8 @@ Results of the default sweep (5 seeds × 12 frames per point):
   **43 mm at 10 mm noise** — a 28 % underestimate. Since the jaw opening is
   derived from that width, heavy noise makes the gripper close *too far*, which
   is the failure mode to watch on real data. The same trend holds for the
-  cuboid (121 → 107 mm).
+  cuboid (121 → 107 mm). Note that the first real-camera trials (section 8)
+  showed the opposite: the width was *overestimated*.
 * **Zero noise is the worst case for the classifier.** With noise switched off
   entirely, the cuboid is rejected in every run (conf 0.65); adding 0.5 mm
   lifts it to 0.75 and 80 % detection. A perfectly clean synthetic render is
@@ -548,7 +606,13 @@ Fresh-Branch/
 * **Partial views inflate cuboids.** From a single viewpoint only two faces are
   visible, and the cuboid fitter overestimates the footprint: a simulated 60 mm
   cube comes out at about 94 mm wide, which inflates the jaw opening. The
-  cylinder fit is accurate to roughly 1 mm.
+  cylinder fit is accurate to roughly 1 mm in simulation.
+* **Real-camera widths are overestimated so far.** In the first hand-held D405
+  trials the fitted width was 7–29 mm too large (see section 8), unlike the
+  simulator. Not yet understood; more real-data trials are needed.
+* **Height needs an oblique view.** From directly above only the top face is
+  visible, so the fitted height is unreliable; tilt the camera and set the
+  table normal to match.
 * **The geometric classifier is the weaker one.** On a clean simulated cylinder
   it reports a cuboid, because the top-cap silhouette registers as corners.
   Prefer the trained model when torch is available.
@@ -563,7 +627,8 @@ Fresh-Branch/
   opening with it.
 * **Speed.** About 50 ms per frame on a laptop CPU — isolation ≈ 40 ms,
   the classifier ≈ 6 ms, the fit ≈ 3 ms. Isolation dominates and scales with
-  image area, so lowering the resolution is the obvious lever.
+  image area, so lowering the resolution is the obvious lever. On a live D405
+  (Windows, CPU) it ran at about 40–60 ms per frame.
 
 ## 12. Porting to a smaller board
 
@@ -619,6 +684,10 @@ that does not do 640×480 @ 30 fps for both depth and colour. Try
 
 **Frames arrive but everything is `no_object`** — see the last entry in this
 section; the object must be red, 7–70 cm away, and reasonably large.
+
+**The fitted height is far off with the camera looking straight down** —
+expected: only the top face is visible from above. Tilt the camera and pass a
+matching `--table-normal` (see section 8, step 5).
 
 **The camera works on Windows but not in WSL** — expected. USB devices are not
 visible to WSL2 unless forwarded with usbipd-win. Use native Windows or Linux

@@ -1,0 +1,26 @@
+# Runtime dependencies for the armsoft grasping model.
+# Everything here installs from PyPI on a plain CPU machine — no GPU, no robot
+# middleware, no vendor SDK.
+
+numpy>=1.23
+scipy>=1.10                 # least-squares cylinder fit
+opencv-python>=4.8          # HSV segmentation, morphology, contours, chessboard
+open3d>=0.17                # voxel grid, DBSCAN, normal estimation, 3-D viewer
+
+# Shape classifier.  Needed only for `--classifier yolo` (the default when the
+# shipped weights are present); `--classifier geometric` needs neither.
+#
+# Install the CPU builds of torch AND torchvision together, from the same index,
+# BEFORE this file — a mixed pair fails at runtime with
+# "operator torchvision::nms does not exist":
+#
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#
+torch>=2.0
+torchvision>=0.15
+ultralytics>=8.0
+
+# Optional extras, deliberately NOT installed by default:
+#   pyrealsense2   only to drive a real Intel RealSense depth camera
+#   rclpy          only for --ros2; comes from a ROS 2 installation, not pip
+#   pyserial       only for --serial (serial link to a microcontroller)

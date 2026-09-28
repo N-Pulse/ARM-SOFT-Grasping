@@ -1,5 +1,14 @@
-.DS_Store
+# virtual environment (rebuild with: bash setup_env.sh)
+.venv/
+
+# bundled OpenGL libraries (rebuild per vendor/README.md)
+vendor/usr/
+
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+
+# run artefacts
+*.jsonl
+*.npz
+preview*.png
+rec/

@@ -1,0 +1,98 @@
+{
+  "machine": "x86_64",
+  "python": "3.10.12",
+  "reference": "torch",
+  "threads": 4,
+  "n_real": 174,
+  "n_sim": 24,
+  "rows": [
+    {
+      "backend": "torch",
+      "top1_agree": 1.0,
+      "accept_agree": 1.0,
+      "max_abs_dp": 0.0,
+      "mean_abs_dp": 0.0,
+      "acc_real": 1.0,
+      "acc_sim": 0.875,
+      "ms_median": 4.615433979779482,
+      "prob_sum": 0.9999999978362857
+    },
+    {
+      "backend": "ort-fp32",
+      "top1_agree": 1.0,
+      "accept_agree": 1.0,
+      "max_abs_dp": 0.051299333572387695,
+      "mean_abs_dp": 0.0012447175099627582,
+      "acc_real": 1.0,
+      "acc_sim": 0.875,
+      "ms_median": 2.049824222922325,
+      "prob_sum": 0.9999999990815861
+    },
+    {
+      "backend": "cv2-fp32",
+      "top1_agree": 1.0,
+      "accept_agree": 1.0,
+      "max_abs_dp": 0.05130079388618469,
+      "mean_abs_dp": 0.0012447458994994966,
+      "acc_real": 1.0,
+      "acc_sim": 0.875,
+      "ms_median": 3.3905692398548126,
+      "prob_sum": 1.0000000004460998
+    },
+    {
+      "backend": "ort-int8",
+      "top1_agree": 0.9848484848484849,
+      "accept_agree": 0.98989898989899,
+      "max_abs_dp": 0.33194610476493835,
+      "mean_abs_dp": 0.009539691869485572,
+      "acc_real": 1.0,
+      "acc_sim": 0.8333333333333334,
+      "ms_median": 1.5127663500607014,
+      "prob_sum": 0.9960784910016252
+    },
+    {
+      "backend": "tfl-float32",
+      "top1_agree": 1.0,
+      "accept_agree": 1.0,
+      "max_abs_dp": 0.05130350589752197,
+      "mean_abs_dp": 0.0012447558583669747,
+      "acc_real": 1.0,
+      "acc_sim": 0.875,
+      "ms_median": 1.2857690453529358,
+      "prob_sum": 1.000000001298627
+    },
+    {
+      "backend": "tfl-float16",
+      "top1_agree": 1.0,
+      "accept_agree": 1.0,
+      "max_abs_dp": 0.05113869905471802,
+      "mean_abs_dp": 0.0012678877903456384,
+      "acc_real": 1.0,
+      "acc_sim": 0.875,
+      "ms_median": 1.3546566478908062,
+      "prob_sum": 1.0000000025314353
+    },
+    {
+      "backend": "tfl-int8",
+      "top1_agree": 0.9696969696969697,
+      "accept_agree": 0.9595959595959596,
+      "max_abs_dp": 0.5683416426181793,
+      "mean_abs_dp": 0.025071242980722285,
+      "acc_real": 1.0,
+      "acc_sim": 0.625,
+      "ms_median": 1.3742982409894466,
+      "prob_sum": 0.9965869633838383
+    },
+    {
+      "backend": "ort-tvpre",
+      "top1_agree": 1.0,
+      "accept_agree": 1.0,
+      "max_abs_dp": 2.4437904357910156e-06,
+      "mean_abs_dp": 9.628401544802599e-08,
+      "acc_real": 1.0,
+      "acc_sim": 0.875,
+      "ms_median": 2.764260396361351,
+      "prob_sum": 0.9999999996687131
+    }
+  ]
+}

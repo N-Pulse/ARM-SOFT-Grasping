@@ -1,0 +1,13 @@
+{
+  "frames": 60,
+  "both_ok": 51,
+  "same_status": 60,
+  "same_shape": 60,
+  "same_stable": 60,
+  "same_hand_pose": 60,
+  "max_dpos_mm": 6.237683191961853e-07,
+  "max_djaw_mm": 7.032631421655111e-08,
+  "max_dwidth_mm": 7.032631421655111e-08,
+  "max_dheight_mm": 1.3877787807814457e-14,
+  "max_djoint": 1.7782012745679986e-09
+}

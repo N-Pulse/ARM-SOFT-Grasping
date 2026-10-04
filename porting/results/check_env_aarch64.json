@@ -1,0 +1,105 @@
+{
+  "env": {
+    "machine": "aarch64",
+    "python": "3.13.5",
+    "platform": "Linux-6.8.0-124-generic-aarch64-with-glibc2.41"
+  },
+  "libs": [
+    {
+      "lib": "numpy",
+      "status": "OK",
+      "version": "2.5.3",
+      "role": "required",
+      "tested": "linalg.lstsq",
+      "seconds": 2.95
+    },
+    {
+      "lib": "scipy",
+      "status": "OK",
+      "version": "1.18.1",
+      "role": "required  (cylinder fit)",
+      "tested": "optimize.least_squares(lm), spatial.cKDTree",
+      "seconds": 13.51
+    },
+    {
+      "lib": "opencv",
+      "status": "OK",
+      "version": "5.0.0",
+      "role": "required  (isolation, fitting)",
+      "tested": "HSV, contours, minAreaRect, convexHull, chessboard",
+      "seconds": 0.74
+    },
+    {
+      "lib": "open3d",
+      "status": "OK",
+      "version": "0.20.0",
+      "role": "required today; to be replaced",
+      "tested": "voxel, DBSCAN, normals, cylinder LineSet",
+      "seconds": 49.62
+    },
+    {
+      "lib": "onnxruntime",
+      "status": "OK",
+      "version": "1.30.0",
+      "role": "classifier runtime (ONNX)",
+      "tested": "providers=AzureExecutionProvider,CPUExecutionProvider",
+      "seconds": 1.77
+    },
+    {
+      "lib": "torch",
+      "status": "OK",
+      "version": "2.14.0+cpu",
+      "role": "optional  (--classifier yolo)",
+      "tested": "conv2d; threads=4",
+      "seconds": 41.89
+    },
+    {
+      "lib": "torchvision",
+      "status": "OK",
+      "version": "0.29.0+cpu",
+      "role": "optional  (--classifier yolo)",
+      "tested": "C++ ops (nms) registered",
+      "seconds": 38.45
+    },
+    {
+      "lib": "ultralytics",
+      "status": "OK",
+      "version": "8.4.165",
+      "role": "optional  (--classifier yolo)",
+      "tested": "import",
+      "seconds": 1.1
+    },
+    {
+      "lib": "onnx",
+      "status": "MISSING",
+      "version": "-",
+      "role": "export host only",
+      "tested": "No module named 'onnx'",
+      "seconds": 0.0
+    },
+    {
+      "lib": "tflite",
+      "status": "OK",
+      "version": "2.2.0",
+      "role": "alternative classifier runtime",
+      "tested": "ai_edge_litert.Interpreter",
+      "seconds": 0.24
+    },
+    {
+      "lib": "pyrealsense2",
+      "status": "MISSING",
+      "version": "-",
+      "role": "optional  (live camera)",
+      "tested": "No module named 'pyrealsense2'",
+      "seconds": 0.0
+    },
+    {
+      "lib": "pyserial",
+      "status": "MISSING",
+      "version": "-",
+      "role": "optional  (--serial)",
+      "tested": "No module named 'serial'",
+      "seconds": 0.0
+    }
+  ]
+}

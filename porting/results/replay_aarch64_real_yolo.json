@@ -1,0 +1,69 @@
+{
+  "machine": "aarch64",
+  "python": "3.13.5",
+  "open3d": "0.20.0",
+  "classifier": "yolo",
+  "backend": null,
+  "sequences": [
+    {
+      "sequence": "cuboid",
+      "frames": 20,
+      "ok": 4,
+      "stable": 0,
+      "shapes": {
+        "cylinder": 0,
+        "cuboid": 4
+      },
+      "width_mm": 128.2,
+      "height_mm": 93.8,
+      "jaw_mm": 144.2,
+      "ms_median": 1029.7,
+      "stage_ms": {
+        "isolation": 550.7546281442046,
+        "classify": 461.081312969327,
+        "fit": 0.0,
+        "grasp": 0.0
+      }
+    },
+    {
+      "sequence": "cylinder",
+      "frames": 20,
+      "ok": 0,
+      "stable": 0,
+      "shapes": {
+        "cylinder": 0,
+        "cuboid": 0
+      },
+      "width_mm": null,
+      "height_mm": null,
+      "jaw_mm": null,
+      "ms_median": 1015.4,
+      "stage_ms": {
+        "isolation": 544.0787361003458,
+        "classify": 457.65264285728335,
+        "fit": 0.0,
+        "grasp": 0.0
+      }
+    },
+    {
+      "sequence": "cylinder_worms",
+      "frames": 20,
+      "ok": 15,
+      "stable": 0,
+      "shapes": {
+        "cylinder": 0,
+        "cuboid": 15
+      },
+      "width_mm": 103.9,
+      "height_mm": 89.8,
+      "jaw_mm": 119.9,
+      "ms_median": 1122.4,
+      "stage_ms": {
+        "isolation": 542.5390438176692,
+        "classify": 464.05744971707463,
+        "fit": 102.23573120310903,
+        "grasp": 4.428796004503965
+      }
+    }
+  ]
+}

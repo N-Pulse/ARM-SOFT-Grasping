@@ -12,3 +12,17 @@ __pycache__/
 *.npz
 preview*.png
 rec/
+
+# training/ — datasets, runs and weights are large and reproducible
+training/.venv-download/
+training/datasets/
+training/runs/
+training/weights/
+training/results/live/
+training/**/*.pt
+training/**/*.onnx
+training/**/*.tflite
+/yolo26n.pt
+
+# local planning docs (not versioned)
+docs/superpowers/

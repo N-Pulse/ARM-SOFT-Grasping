@@ -23,6 +23,7 @@ training/**/*.pt
 training/**/*.onnx
 training/**/*.tflite
 /yolo26n.pt
+training/colab/*.zip
 
 # local planning docs (not versioned)
 docs/superpowers/

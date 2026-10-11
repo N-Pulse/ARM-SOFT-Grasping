@@ -87,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="comma-separated camera-frame normal, e.g. '0,-1,0'")
     mdl.add_argument("--calibrate", action="store_true",
                      help="detect the table plane from a chessboard first")
+    mdl.add_argument("--board", default="10x7",
+                     help="chessboard INNER corners as COLSxROWS "
+                          "(a 14x10-square board is 13x9)")
     mdl.add_argument("--no-smooth", action="store_true",
                      help="disable ShapeEMA temporal smoothing")
 
@@ -133,7 +136,8 @@ def main(argv=None) -> int:
         if args.table_normal:
             table_normal = np.array([float(x) for x in args.table_normal.split(",")])
         elif args.calibrate:
-            table_normal, _ = detect_table_plane(source)
+            cols, rows = (int(v) for v in args.board.lower().split("x"))
+            table_normal, _ = detect_table_plane(source, board_cols=cols, board_rows=rows)
         else:
             hint = getattr(source, "table_normal_hint", None)
             table_normal = np.array([0.0, -1.0, 0.0]) if hint is None else np.asarray(hint)

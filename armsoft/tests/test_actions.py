@@ -15,6 +15,13 @@ class Point:
     visibility: float = 1.0
 
 
+@dataclass
+class WorldPoint:
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+
+
 def standing_pose():
     points = [Point() for _ in range(33)]
     coords = {
@@ -71,6 +78,19 @@ class ClassifyPoseTest(unittest.TestCase):
         self.assertEqual([arm.side for arm in arms], ["left", "right"])
         self.assertTrue(all(arm.elbow_deg is not None for arm in arms))
         self.assertTrue(all(arm.state.endswith("straight") for arm in arms))
+
+    def test_arm_angle_prefers_3d_world_landmarks(self):
+        image_points = standing_pose()
+        world_points = [WorldPoint() for _ in range(33)]
+        world_points[11] = WorldPoint(0.0, 1.0, 0.0)
+        world_points[13] = WorldPoint(0.0, 0.0, 0.0)
+        world_points[15] = WorldPoint(1.0, 0.0, 0.0)
+        world_points[12] = WorldPoint(0.0, 1.0, 0.0)
+        world_points[14] = WorldPoint(0.0, 0.0, 0.0)
+        world_points[16] = WorldPoint(1.0, 0.0, 0.0)
+        arms = analyze_arms(image_points, world_points)
+        self.assertAlmostEqual(arms[0].elbow_deg, 90.0)
+        self.assertAlmostEqual(arms[1].elbow_deg, 90.0)
 
     def test_hand_result_parsing(self):
         @dataclass

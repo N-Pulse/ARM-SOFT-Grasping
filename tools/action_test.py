@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 from armsoft.actions import PoseActionRecognizer, draw_prediction  # noqa: E402
 
 
-DEFAULT_MODEL = ROOT / "models" / "pose_landmarker_lite.task"
+DEFAULT_MODEL = ROOT / "models" / "pose_landmarker_full.task"
 DEFAULT_GESTURE_MODEL = ROOT / "models" / "gesture_recognizer.task"
 
 
@@ -24,6 +24,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Recognize simple human poses")
     parser.add_argument("--camera", type=int, default=0,
                         help="OpenCV camera index (default: 0)")
+    parser.add_argument("--width", type=int, default=1280,
+                        help="requested camera width (default: 1280)")
+    parser.add_argument("--height", type=int, default=720,
+                        help="requested camera height (default: 720)")
     parser.add_argument("--video", help="video file instead of a live camera")
     parser.add_argument("--model", default=str(DEFAULT_MODEL))
     parser.add_argument("--gesture-model", default=str(DEFAULT_GESTURE_MODEL))
@@ -42,6 +46,13 @@ def main(argv=None) -> int:
     if not capture.isOpened():
         print(f"[actions] cannot open camera/video: {source}")
         return 2
+
+    if not args.video:
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+        actual_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"[actions] camera resolution: {actual_width}x{actual_height}")
 
     fps = capture.get(cv2.CAP_PROP_FPS)
     if not fps or fps != fps or fps > 240:

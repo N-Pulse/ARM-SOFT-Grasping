@@ -15,7 +15,7 @@ import numpy as np
 
 POSE_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-    "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
+    "pose_landmarker_full/float16/latest/pose_landmarker_full.task"
 )
 GESTURE_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/"
@@ -31,6 +31,13 @@ POSE_CONNECTIONS = (
     (16, 22), (18, 20), (11, 23), (12, 24), (23, 24), (23, 25),
     (24, 26), (25, 27), (26, 28), (27, 29), (28, 30), (29, 31),
     (30, 32), (27, 31), (28, 32),
+)
+# Only these body segments are relevant to the upper-limb tool. MediaPipe may
+# still use the body internally, but faces, torso and legs are never exposed in
+# the preview.
+UPPER_LIMB_CONNECTIONS = (
+    (11, 13), (13, 15),  # left shoulder -> elbow -> wrist
+    (12, 14), (14, 16),  # right shoulder -> elbow -> wrist
 )
 HAND_CONNECTIONS = (
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -72,9 +79,10 @@ def _visible(point, threshold: float = 0.45) -> bool:
 
 
 def _angle(a, b, c) -> float:
-    """Angle ABC in degrees, using normalized image coordinates."""
-    ba = np.array([a.x - b.x, a.y - b.y], dtype=np.float64)
-    bc = np.array([c.x - b.x, c.y - b.y], dtype=np.float64)
+    """Angle ABC in degrees, using 3-D coordinates when available."""
+    dimensions = ("x", "y", "z") if all(hasattr(p, "z") for p in (a, b, c)) else ("x", "y")
+    ba = np.array([getattr(a, d) - getattr(b, d) for d in dimensions], dtype=np.float64)
+    bc = np.array([getattr(c, d) - getattr(b, d) for d in dimensions], dtype=np.float64)
     denom = float(np.linalg.norm(ba) * np.linalg.norm(bc))
     if denom < 1e-8:
         return 0.0
@@ -126,8 +134,9 @@ def classify_pose(landmarks: Sequence) -> tuple[str, float]:
     return "standing", 0.72
 
 
-def analyze_arms(landmarks: Sequence) -> tuple[ArmAnalysis, ...]:
-    """Return readable left/right arm state and elbow angle."""
+def analyze_arms(landmarks: Sequence,
+                 world_landmarks: Sequence | None = None) -> tuple[ArmAnalysis, ...]:
+    """Return arm state and elbow angle, preferring MediaPipe 3-D points."""
     if len(landmarks) < 17:
         return ()
     analyses = []
@@ -140,7 +149,10 @@ def analyze_arms(landmarks: Sequence) -> tuple[ArmAnalysis, ...]:
         if not all(_visible(p) for p in (shoulder, elbow, wrist)):
             analyses.append(ArmAnalysis(side, "not_visible", None))
             continue
-        elbow_deg = _angle(shoulder, elbow, wrist)
+        angle_points = world_landmarks if world_landmarks and len(world_landmarks) >= 17 else landmarks
+        elbow_deg = _angle(
+            angle_points[shoulder_i], angle_points[elbow_i], angle_points[wrist_i]
+        )
         if wrist.y < shoulder.y:
             direction = "raised"
         elif abs(wrist.y - shoulder.y) < 0.08:
@@ -208,9 +220,9 @@ class PoseActionRecognizer:
             base_options=mp.tasks.BaseOptions(model_asset_path=str(model_path)),
             running_mode=mp.tasks.vision.RunningMode.VIDEO,
             num_poses=1,
-            min_pose_detection_confidence=0.5,
-            min_pose_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
+            min_pose_detection_confidence=0.65,
+            min_pose_presence_confidence=0.65,
+            min_tracking_confidence=0.65,
         )
         self._mp = mp
         self._landmarker = mp.tasks.vision.PoseLandmarker.create_from_options(options)
@@ -220,9 +232,9 @@ class PoseActionRecognizer:
             ),
             running_mode=mp.tasks.vision.RunningMode.VIDEO,
             num_hands=2,
-            min_hand_detection_confidence=0.5,
-            min_hand_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
+            min_hand_detection_confidence=0.65,
+            min_hand_presence_confidence=0.65,
+            min_tracking_confidence=0.65,
         )
         self._gesture_recognizer = (
             mp.tasks.vision.GestureRecognizer.create_from_options(gesture_options)
@@ -249,7 +261,10 @@ class PoseActionRecognizer:
         self._labels.append(label)
         stable_label, votes = Counter(self._labels).most_common(1)[0]
         stability = votes / len(self._labels)
-        arms = analyze_arms(landmarks)
+        world_landmarks = (
+            result.pose_world_landmarks[0] if result.pose_world_landmarks else None
+        )
+        arms = analyze_arms(landmarks, world_landmarks)
         return ActionPrediction(
             stable_label, confidence * stability, landmarks, arms, hands
         )
@@ -271,15 +286,16 @@ def draw_prediction(image: np.ndarray, prediction: ActionPrediction) -> np.ndarr
     h, w = canvas.shape[:2]
     landmarks = prediction.landmarks
     if landmarks:
-        for a, b in POSE_CONNECTIONS:
+        for a, b in UPPER_LIMB_CONNECTIONS:
             pa, pb = landmarks[a], landmarks[b]
             if _visible(pa) and _visible(pb):
                 cv2.line(canvas, (int(pa.x * w), int(pa.y * h)),
                          (int(pb.x * w), int(pb.y * h)), (50, 220, 50), 2)
-        for point in landmarks:
+        for index in (11, 12, 13, 14, 15, 16):
+            point = landmarks[index]
             if _visible(point):
                 cv2.circle(canvas, (int(point.x * w), int(point.y * h)),
-                           3, (0, 180, 255), -1)
+                           6, (0, 180, 255), -1)
 
     for hand in prediction.hands:
         for a, b in HAND_CONNECTIONS:

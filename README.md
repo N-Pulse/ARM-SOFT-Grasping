@@ -16,6 +16,15 @@ To create a raw RGB-D training session without running grasp inference:
 python tools/collect_rgbd_dataset.py --source camera \
   --purpose mechanical-hand-pose --frames 300 \
   --out datasets/captures/hand_session_001
+
+# Create masks/previews without modifying the raw capture
+python tools/preprocess_rgbd_session.py datasets/captures/hand_session_001 \
+  --out datasets/captures/hand_session_001/derived/depth_v1 \
+  --min-depth 0.10 --max-depth 0.80 --roi 0.1,0.1,0.9,0.9
+
+# Preview the same filter live before exporting a complete session (Q to quit)
+python tools/preview_depth_filter.py --source camera \
+  --min-depth 0.10 --max-depth 0.80 --roi 0.1,0.1,0.9,0.9
 ```
 
 ## Quick start

@@ -10,9 +10,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ..data import CaptureSessionWriter, SESSION_SCHEMA_VERSION
+from ..data import CaptureSessionWriter, SESSION_SCHEMA_VERSION, read_capture_session
 from ..preprocessing import DepthFilterConfig, apply_depth_filter
-from ..sources import SimulatedSource
+from ..sources import CameraIntrinsics, SimulatedSource
 
 
 class DepthFilterTests(unittest.TestCase):
@@ -28,6 +28,30 @@ class DepthFilterTests(unittest.TestCase):
         np.testing.assert_array_equal(color, original)
         self.assertTrue(np.all(filtered[~mask] == 0))
         self.assertTrue(np.all(filtered[mask] == 90))
+
+    def test_normalized_roi(self):
+        color = np.full((4, 4, 3), 255, dtype=np.uint8)
+        depth = np.full((4, 4), 0.4, dtype=np.float32)
+        _, mask = apply_depth_filter(
+            color, depth, DepthFilterConfig(0.1, 0.8, roi_xyxy=(0.25, 0.25, 0.75, 0.75))
+        )
+        expected = np.zeros((4, 4), dtype=bool)
+        expected[1:3, 1:3] = True
+        np.testing.assert_array_equal(mask, expected)
+
+    def test_table_plane_removes_surface_but_keeps_object_above_it(self):
+        # +Y points down. Plane y=0.1 has upward normal (0,-1,0), d=0.1.
+        intrinsics = CameraIntrinsics(2, 2, 1.0, 1.0, 0.0, 0.0)
+        depth = np.array([[0.4, 0.4], [0.1, 0.4]], dtype=np.float32)
+        color = np.full((2, 2, 3), 255, dtype=np.uint8)
+        config = DepthFilterConfig(
+            0.05, 0.8, table_plane=(0.0, -1.0, 0.0, 0.1),
+            min_height_above_table_m=0.01,
+        )
+        _, mask = apply_depth_filter(color, depth, config, intrinsics)
+        # Top row y=0 is above the table; bottom-left lies on it.
+        self.assertTrue(mask[0, 0])
+        self.assertFalse(mask[1, 0])
 
 
 class CaptureSessionTests(unittest.TestCase):
@@ -48,6 +72,9 @@ class CaptureSessionTests(unittest.TestCase):
             lines = (root / "manifest.jsonl").read_text().splitlines()
             self.assertEqual(len(lines), 1)
             self.assertEqual(json.loads(lines[0])["id"], "frame_000000")
+            rows = list(read_capture_session(root))
+            self.assertEqual(len(rows), 1)
+            np.testing.assert_array_equal(rows[0][1].depth_m, frame.depth_m)
 
 
 if __name__ == "__main__":

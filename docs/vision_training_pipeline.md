@@ -95,6 +95,38 @@ armsoft/preprocessing/depth_filter.py
 
 建议第一版根据工作空间设置 `min_depth_m` 和 `max_depth_m`。后续可添加桌面平面消除、ROI、多帧 temporal filtering，但必须保留原始 session，通过配置可重复生成结果。
 
+当前 depth preprocessing 分支已经支持三个可以组合的过滤条件：
+
+1. near/far distance：保留指定相机距离；
+2. normalized ROI：用 `x1,y1,x2,y2` 限制画面工作区域；
+3. table plane：用 `nx,ny,nz,d` 和最小离桌高度去掉桌面及桌面下方点。
+
+先用三栏实时画面检查参数（RAW / FILTERED / MASK，按 `Q` 退出）：
+
+```bash
+python tools/preview_depth_filter.py --source camera \
+  --min-depth 0.10 --max-depth 0.80 --roi 0.1,0.1,0.9,0.9
+```
+
+处理一个已经采集的 session：
+
+```bash
+python tools/preprocess_rgbd_session.py datasets/captures/hand_session_001 \
+  --out datasets/captures/hand_session_001/derived/depth_v1 \
+  --min-depth 0.10 --max-depth 0.80 \
+  --roi 0.1,0.1,0.9,0.9
+```
+
+如果已经通过棋盘标定得到平面 `normal` 和 `d`，可进一步去掉桌面：
+
+```bash
+python tools/preprocess_rgbd_session.py datasets/captures/hand_session_001 \
+  --out datasets/captures/hand_session_001/derived/table_v1 \
+  --table-plane 0,-1,0,0.08 --min-table-height 0.005
+```
+
+输出目录包含 `config.json`、逐帧 binary masks、暗化背景的 previews 和可追溯到 raw session 的 `manifest.jsonl`。这些都是 derived artifacts，删除后可以根据配置重建。
+
 ## 5. 两个数据集工作流
 
 ### A. 物品 YOLO Segmentation

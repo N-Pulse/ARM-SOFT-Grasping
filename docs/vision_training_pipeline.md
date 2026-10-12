@@ -9,7 +9,8 @@
 | 物品 segmentation | ✅ 第一版闭环完成 | `feature/object-segmentation` | depth proposals、可选 SAM、审核、YOLO-Seg export/train |
 | 机械手 pose | ✅ 第一版标注/训练闭环完成 | `feature/mechanical-hand-pose` | 橙色候选、17 点编辑、YOLO-Pose export/train |
 | 模型质量提升 | ⏳ 待真实数据 | 各模型分支 | pseudo-label、hard cases、冻结 test set、指标门槛 |
-| RGB-D 3D integration | ⏳ 下一阶段 | `feat/rgbd-pose-integration` | 2D→depth→3D、置信度、实时联合推理 |
+| RGB-D 3D integration | ✅ 第一版完成 | `feat/rgbd-pose-integration` | 2D→depth→3D、局部 depth 恢复、置信度、实时/回放推理 |
+| 真实模型验证与部署 | ⏳ 待真实数据/weights | integration branch | D405 精度、延迟、失败门槛、机器人接口 |
 
 “完成”表示代码路径与模拟/单元测试可运行，不表示模型已经训练完成。真正的模型精度取决于真实 D405 数据、人工审核质量、session-level split 和独立 test set。
 
@@ -260,6 +261,30 @@ Branch 是一条代码开发线；workflow 是从采集、标注、训练、评�
 - segmentation mask 和 pose keypoints 映射到可靠 depth；
 - 输出相机坐标系中的距离/3D 坐标、置信度和失败原因；
 - 实时性能和错误安全策略通过实机测试。
+
+第一版 integration 已实现。它不会只读取关键点正下方的一个 depth pixel；当该点
+缺失时，会在有限邻域内寻找同一深度表面的有效像素，并报告 support、搜索半径、
+depth dispersion、depth confidence 和失败原因。输出坐标系与 D405 一致：`+X` 向右、
+`+Y` 向下、`+Z` 向前，单位 metre。
+
+```bash
+# 实时 D405 + 已训练的机械手 Pose weights
+python tools/run_mechanical_hand_rgbd.py \
+  --weights runs/mechanical_hand_pose/mechanical_hand_pose_v1/weights/best.pt \
+  --source camera --show --jsonl runs/rgbd_pose/live_001.jsonl \
+  --min-depth 0.10 --max-depth 0.80 --roi 0.1,0.1,0.9,0.9
+
+# 对新的 versioned capture session 做可重复离线评估
+python tools/run_mechanical_hand_rgbd.py \
+  --weights runs/mechanical_hand_pose/mechanical_hand_pose_v1/weights/best.pt \
+  --session datasets/captures/hand_session_test \
+  --jsonl runs/rgbd_pose/test_session.jsonl \
+  --save-preview runs/rgbd_pose/test_preview.png
+```
+
+每个关键点都有 `pose_confidence`、`depth_confidence`、`fused_confidence`、
+`xyz_m`、欧氏 `distance_m` 和失败 `reason`。下游机器人逻辑只能消费达到门槛的点，
+不能把缺失 depth 当作零距离。
 
 ## 8. 采集覆盖清单
 

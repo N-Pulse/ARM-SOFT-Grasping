@@ -37,12 +37,19 @@ python tools/preview_depth_filter.py --source camera \
 python tools/annotate_mechanical_hand_pose.py datasets/captures/hand_session_001 \
   --derived datasets/captures/hand_session_001/derived/depth_v1 \
   --out datasets/mechanical_hand_pose/hand_session_001
+
+# Fuse trained 2-D keypoints with live D405 depth into metric 3-D points
+python tools/run_mechanical_hand_rgbd.py \
+  --weights runs/mechanical_hand_pose/mechanical_hand_pose_v1/weights/best.pt \
+  --source camera --show --min-depth 0.10 --max-depth 0.80
 ```
 
 The tracker outputs persistent candidate IDs and 2-D pixel centres; the
 annotation editor uses them for snapping while a human confirms anatomical
 identity. Canonical JSON, YOLO-Pose export and the training entry point are now
-implemented. The next development stage adds 3-D coordinates from the D405.
+implemented. The RGB-D integration branch additionally lifts every accepted
+2-D point into metric D405 camera coordinates with an explicit confidence and
+failure reason.
 The shared end-to-end plan and current progress are
 tracked in [`docs/vision_training_pipeline.md`](docs/vision_training_pipeline.md).
 

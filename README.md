@@ -32,12 +32,18 @@ python tools/collect_rgbd_dataset.py --source camera \
 # Preview depth/ROI filtering before producing derived masks
 python tools/preview_depth_filter.py --source camera \
   --min-depth 0.10 --max-depth 0.80 --roi 0.1,0.1,0.9,0.9
+
+# Create/edit 17-point pose labels with orange-tip snapping
+python tools/annotate_mechanical_hand_pose.py datasets/captures/hand_session_001 \
+  --derived datasets/captures/hand_session_001/derived/depth_v1 \
+  --out datasets/mechanical_hand_pose/hand_session_001
 ```
 
-The current tracker outputs persistent `tip 1–5` IDs and 2-D pixel centres.
-The next development stages map those tracks to anatomical finger names,
-provide assisted 17-keypoint annotation, train YOLO Pose and finally add 3-D
-coordinates from the D405. The shared end-to-end plan and current progress are
+The tracker outputs persistent candidate IDs and 2-D pixel centres; the
+annotation editor uses them for snapping while a human confirms anatomical
+identity. Canonical JSON, YOLO-Pose export and the training entry point are now
+implemented. The next development stage adds 3-D coordinates from the D405.
+The shared end-to-end plan and current progress are
 tracked in [`docs/vision_training_pipeline.md`](docs/vision_training_pipeline.md).
 
 Vision-based grasp planning for the **n-pulse** soft robotic hand.

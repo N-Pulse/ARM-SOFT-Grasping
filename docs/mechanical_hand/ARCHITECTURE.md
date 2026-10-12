@@ -2,16 +2,16 @@
 
 ## Branches
 
-`feature/mechanical-hand-pose` is the integration branch based on
-`independent-cv`. Short-lived work branches are created from it and merged back
-through review:
+`feature/mechanical-hand-pose` is the integration branch. It now includes the
+shared RGB-D collector and depth-preprocessing stack. Short-lived work branches
+can still be created from it and merged back through review:
 
 1. `feat/keypoint-schema`
 2. `feat/orange-tip-tracking`
-3. `feat/annotation-tool`
+3. `feat/annotation-tool` — completed in the integration branch
 4. `feat/video-label-propagation`
-5. `feat/yolo-pose-export`
-6. `feat/yolo-pose-training`
+5. `feat/yolo-pose-export` — completed in the integration branch
+6. `feat/yolo-pose-training` — training entry point completed
 7. `feat/pseudo-labeling`
 8. `feat/pose-evaluation`
 9. `feat/d405-depth-fusion`

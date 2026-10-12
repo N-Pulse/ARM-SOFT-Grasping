@@ -9,22 +9,24 @@ names:
 
 kpt_shape: [17, 3]
 flip_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+kpt_oks_sigmas: [0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824, 0.058824]
 
-keypoint_names:
-  - wrist
-  - palm_center
-  - thumb_base
-  - thumb_joint
-  - thumb_tip
-  - index_base
-  - index_joint
-  - index_tip
-  - middle_base
-  - middle_joint
-  - middle_tip
-  - ring_base
-  - ring_joint
-  - ring_tip
-  - pinky_base
-  - pinky_joint
-  - pinky_tip
+kpt_names:
+  0:
+    - wrist
+    - palm_center
+    - thumb_base
+    - thumb_joint
+    - thumb_tip
+    - index_base
+    - index_joint
+    - index_tip
+    - middle_base
+    - middle_joint
+    - middle_tip
+    - ring_base
+    - ring_joint
+    - ring_tip
+    - pinky_base
+    - pinky_joint
+    - pinky_tip

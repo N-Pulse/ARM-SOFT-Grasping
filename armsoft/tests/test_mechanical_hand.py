@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
 import cv2
 import numpy as np
 
-from armsoft.mechanical_hand import OrangeFingertipTracker
+from armsoft.mechanical_hand import (
+    KEYPOINT_NAMES, OrangeFingertipTracker, PoseAnnotation, PosePoint,
+    empty_keypoints, to_yolo_pose_line,
+)
 
 
 def synthetic_hand(offset: int = 0) -> np.ndarray:
@@ -36,6 +41,33 @@ class OrangeFingertipTrackerTest(unittest.TestCase):
                          [tip.track_id for tip in second])
         for before, after in zip(first, second):
             self.assertAlmostEqual(after.center_px[0] - before.center_px[0], 8.0)
+
+
+class PoseAnnotationTest(unittest.TestCase):
+    def annotation(self) -> PoseAnnotation:
+        points = empty_keypoints()
+        points[0] = PosePoint(50, 80, 2, "manual")
+        points[4] = PosePoint(90, 20, 2, "orange-snap")
+        return PoseAnnotation(
+            frame_id="frame_000001", source_session="/tmp/session",
+            source_color="color/frame_000001.png", width=200, height=100,
+            bbox_xyxy=[20, 10, 180, 95], keypoints=points,
+            fingertip_candidates_xy=[[90, 20]],
+        )
+
+    def test_pose_json_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pose.json"
+            self.annotation().save(path)
+            loaded = PoseAnnotation.load(path)
+            self.assertEqual(len(loaded.keypoints), len(KEYPOINT_NAMES))
+            self.assertEqual(loaded.keypoints[4].source, "orange-snap")
+
+    def test_yolo_pose_has_box_and_all_keypoints(self):
+        values = to_yolo_pose_line(self.annotation()).split()
+        self.assertEqual(len(values), 1 + 4 + len(KEYPOINT_NAMES) * 3)
+        self.assertEqual(values[0], "0")
+        self.assertEqual(float(values[5 + 4 * 3 + 2]), 2.0)
 
 
 if __name__ == "__main__":

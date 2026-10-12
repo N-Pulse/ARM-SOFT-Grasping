@@ -1,5 +1,18 @@
 # N-Pulse 视觉数据与模型训练流程
 
+## 当前进度（2026-10-13）
+
+| 阶段 | 状态 | Branch | 已实现内容 |
+| --- | --- | --- | --- |
+| RGB-D 数据采集 | ✅ 完成 | `feat/rgbd-dataset-collector` | versioned session、RGB/depth/内参/manifest、覆盖保护 |
+| Depth preprocessing | ✅ 完成 | `feat/depth-preprocessing` | near/far、ROI、桌面平面、实时预览、derived export |
+| 物品 segmentation | ✅ 第一版闭环完成 | `feature/object-segmentation` | depth proposals、可选 SAM、审核、YOLO-Seg export/train |
+| 机械手 pose | ✅ 第一版标注/训练闭环完成 | `feature/mechanical-hand-pose` | 橙色候选、17 点编辑、YOLO-Pose export/train |
+| 模型质量提升 | ⏳ 待真实数据 | 各模型分支 | pseudo-label、hard cases、冻结 test set、指标门槛 |
+| RGB-D 3D integration | ⏳ 下一阶段 | `feat/rgbd-pose-integration` | 2D→depth→3D、置信度、实时联合推理 |
+
+“完成”表示代码路径与模拟/单元测试可运行，不表示模型已经训练完成。真正的模型精度取决于真实 D405 数据、人工审核质量、session-level split 和独立 test set。
+
 ## 1. 最终目标
 
 建立一条可以重复运行的 RGB-D 视觉流水线，最终输出：
@@ -159,6 +172,35 @@ datasets/object_segmentation/
 6. 训练第一版 YOLO Pose；
 7. 用第一版模型 pseudo-label 新数据，再人工校正；
 8. 将 2D keypoint 对应到 depth；邻域 depth 无效时使用中位数/最近有效像素，并输出 3D 置信度。
+
+当前机械手分支已经实现前 1–6 步的工具链。橙色 tracker 只产生无语义的
+fingertip candidates；标注者仍确认每个指尖身份，点击时会自动吸附到附近候选点。
+这样不会因手掌旋转而错误地把“从左到右”当成“拇指到小指”。
+
+```bash
+# 1. 建立 17 点模板并检测橙色候选（无 GUI，适合先批量运行）
+python tools/annotate_mechanical_hand_pose.py datasets/captures/hand_session_001 \
+  --derived datasets/captures/hand_session_001/derived/depth_v1 \
+  --out datasets/mechanical_hand_pose/hand_session_001 --bootstrap-only
+
+# 2. 交互标注；左键=可见，右键=遮挡，x=不存在，u=返回，a=批准
+python tools/annotate_mechanical_hand_pose.py datasets/captures/hand_session_001 \
+  --derived datasets/captures/hand_session_001/derived/depth_v1 \
+  --out datasets/mechanical_hand_pose/hand_session_001
+
+# 3. 以 session 为单位导出 train/val/test
+python tools/export_yolo_pose.py datasets/mechanical_hand_pose/hand_session_001 \
+  --out datasets/mechanical_hand_pose/exports/yolo_pose_v1 --split train
+
+# 4. 训练自定义 17 点模型
+python tools/train_mechanical_hand_pose.py \
+  --data datasets/mechanical_hand_pose/exports/yolo_pose_v1/data.yaml \
+  --model yolo11n-pose.pt --epochs 150 --device cpu
+```
+
+导出的 YAML 使用 Ultralytics 的 `kpt_names` 结构，并显式设置机械手自己的
+`kpt_oks_sigmas`。因为本项目也恰好有 17 点，如果不设置，框架可能使用 COCO
+人体 17 点的默认 OKS 权重，而这些语义与机械手 skeleton 不一致。
 
 建议结构：
 

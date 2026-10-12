@@ -1,5 +1,32 @@
 # ARM-SOFT Grasping — standalone model
 
+> **Branch: `feature/mediapipe-actions` — human upper-limb experiment.**  This
+> branch combines MediaPipe Pose Full and Gesture Recognizer to detect human
+> shoulders, elbows, wrists, 21 landmarks per hand, elbow angles and common
+> gestures. It is not the main mechanical-hand development branch; that work
+> lives on `feature/mechanical-hand-pose`.
+
+## Quick start: human arms and hands
+
+```bash
+# First setup
+bash setup_env.sh
+source .venv/bin/activate
+
+# macOS/PC webcam; try --camera 1 if the external camera is not index 0
+python tools/action_test.py --camera 0 --width 1280 --height 720
+
+# Reproducible run from a video and save the annotated result
+python tools/action_test.py --video person.mp4 --output actions.mp4
+
+# Rule and integration checks
+python -m armsoft.tests.test_actions
+python -m armsoft.tests.selftest
+```
+
+Grant the terminal application camera access in the operating-system privacy
+settings. Press `Q` in the preview window to stop.
+
 Vision-based grasp planning for the **n-pulse** soft robotic hand.
 
 One aligned RGB-D frame goes in; the shape of the object, a grasp pose and the

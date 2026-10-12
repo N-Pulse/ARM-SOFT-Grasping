@@ -4,6 +4,8 @@
 >
 > 数据架构更新：所有 worktree 默认共享 `CV_Project_V2526/ARM-SOFT-data`。原始数据、derived cache、annotations、exports 和 models 分层保存，避免 branch 间复制数据。采集器会跳过高度相似的连续帧。
 
+机械手分支的 17 点标注、YOLO-Pose 导出/训练和 RGB-D 2D→3D 融合模块已经并入统一集成分支；“代码路径完成”不代表模型精度已经达标，最终质量仍取决于真实 D405 数据和人工审核。
+
 ## 1. 最终目标
 
 建立一条可以重复运行的 RGB-D 视觉流水线，最终输出：
@@ -194,6 +196,35 @@ datasets/object_segmentation/
 6. 训练第一版 YOLO Pose；
 7. 用第一版模型 pseudo-label 新数据，再人工校正；
 8. 将 2D keypoint 对应到 depth；邻域 depth 无效时使用中位数/最近有效像素，并输出 3D 置信度。
+
+当前机械手分支已经实现前 1–6 步的工具链。橙色 tracker 只产生无语义的
+fingertip candidates；标注者仍确认每个指尖身份，点击时会自动吸附到附近候选点。
+这样不会因手掌旋转而错误地把“从左到右”当成“拇指到小指”。
+
+```bash
+# 1. 建立 17 点模板并检测橙色候选（无 GUI，适合先批量运行）
+python tools/annotate_mechanical_hand_pose.py datasets/captures/hand_session_001 \
+  --derived datasets/captures/hand_session_001/derived/depth_v1 \
+  --out datasets/mechanical_hand_pose/hand_session_001 --bootstrap-only
+
+# 2. 交互标注；左键=可见，右键=遮挡，x=不存在，u=返回，a=批准
+python tools/annotate_mechanical_hand_pose.py datasets/captures/hand_session_001 \
+  --derived datasets/captures/hand_session_001/derived/depth_v1 \
+  --out datasets/mechanical_hand_pose/hand_session_001
+
+# 3. 以 session 为单位导出 train/val/test
+python tools/export_yolo_pose.py datasets/mechanical_hand_pose/hand_session_001 \
+  --out datasets/mechanical_hand_pose/exports/yolo_pose_v1 --split train
+
+# 4. 训练自定义 17 点模型
+python tools/train_mechanical_hand_pose.py \
+  --data datasets/mechanical_hand_pose/exports/yolo_pose_v1/data.yaml \
+  --model yolo11n-pose.pt --epochs 150 --device cpu
+```
+
+导出的 YAML 使用 Ultralytics 的 `kpt_names` 结构，并显式设置机械手自己的
+`kpt_oks_sigmas`。因为本项目也恰好有 17 点，如果不设置，框架可能使用 COCO
+人体 17 点的默认 OKS 权重，而这些语义与机械手 skeleton 不一致。
 
 建议结构：
 

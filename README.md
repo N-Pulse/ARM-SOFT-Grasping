@@ -63,6 +63,11 @@ python tools/preview_depth_filter.py --source camera \
 python tools/annotate_object_segmentation.py datasets/captures/object_session_001 \
   --derived datasets/captures/object_session_001/derived/depth_v1 \
   --out datasets/object_segmentation/object_session_001
+
+# Create/edit 17-point mechanical-hand pose labels with orange-tip snapping
+python tools/annotate_mechanical_hand_pose.py datasets/captures/hand_session_001 \
+  --derived datasets/captures/hand_session_001/derived/depth_v1 \
+  --out datasets/mechanical_hand_pose/hand_session_001
 ```
 
 ## Quick start

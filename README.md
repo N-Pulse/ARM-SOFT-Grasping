@@ -185,6 +185,27 @@ python -m armsoft --source replay --replay-path rec/ --frames 0
 
 ## 5. Using it from your own code
 
+### Mechanical hand: orange fingertip tracking
+
+MediaPipe is trained for human hands and is not used for the printed mechanical
+hand. The colour tracker segments the five existing orange fingertip shells,
+rejects small orange noise, assigns persistent IDs and smooths their positions.
+
+```bash
+# Live camera. Add --show-mask while tuning the colour range.
+python tools/mechanical_hand_test.py --camera 0 --show-mask
+
+# A still image, writing an annotated preview.
+python tools/mechanical_hand_test.py --image hand.png --output tracked.png
+
+# Override HSV thresholds if lighting changes.
+python tools/mechanical_hand_test.py --camera 0 --hue 3,18 \
+    --saturation-min 150 --value-min 140
+```
+
+The terminal prints each tracked fingertip centre in pixels. Depth-based 3-D
+coordinates can be added once the D405 source is available on the host.
+
 The package has three layers — `armsoft.sources` (where frames come from),
 `armsoft.core` (the model) and `armsoft.sinks` (where results go). Everything
 common is re-exported at the top level, so you can import from either place:

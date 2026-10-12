@@ -23,12 +23,22 @@ python tools/mechanical_hand_test.py \
 
 # Automated tracker checks
 python -m armsoft.tests.test_mechanical_hand
+
+# Capture an aligned RGB-D session for pose annotation
+python tools/collect_rgbd_dataset.py --source camera \
+  --purpose mechanical-hand-pose --frames 300 \
+  --out datasets/captures/hand_session_001
+
+# Preview depth/ROI filtering before producing derived masks
+python tools/preview_depth_filter.py --source camera \
+  --min-depth 0.10 --max-depth 0.80 --roi 0.1,0.1,0.9,0.9
 ```
 
 The current tracker outputs persistent `tip 1–5` IDs and 2-D pixel centres.
 The next development stages map those tracks to anatomical finger names,
 provide assisted 17-keypoint annotation, train YOLO Pose and finally add 3-D
-coordinates from the D405.
+coordinates from the D405. The shared end-to-end plan and current progress are
+tracked in [`docs/vision_training_pipeline.md`](docs/vision_training_pipeline.md).
 
 Vision-based grasp planning for the **n-pulse** soft robotic hand.
 

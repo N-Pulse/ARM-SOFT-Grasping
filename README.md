@@ -1,5 +1,35 @@
 # ARM-SOFT Grasping — standalone model
 
+> **Branch: `independent-cv` — stable RGB-D grasping baseline.**  This is the
+> integration base for camera capture, object isolation, cylinder/cuboid
+> fitting and grasp generation. Human MediaPipe experiments live on
+> `feature/mediapipe-actions`; mechanical-hand annotation and YOLO Pose work
+> live on `feature/mechanical-hand-pose`.
+
+## Quick start
+
+```bash
+# First setup on macOS/Linux
+bash setup_env.sh
+source .venv/bin/activate
+
+# Verify the complete portable pipeline
+python -m armsoft.tests.selftest
+
+# Run end-to-end without a camera
+python -m armsoft --source sim --frames 10
+
+# Check whether a RealSense camera is available
+python -c "from armsoft import camera_available; print(camera_available())"
+
+# Live D405 preview when the SDK and camera are available
+python tools/live_preview.py
+```
+
+On macOS, the simulator and replay paths work normally, but a live D405 needs
+`librealsense` with Python bindings built locally. Windows and Linux can use
+the official `pyrealsense2` package.
+
 Vision-based grasp planning for the **n-pulse** soft robotic hand.
 
 One aligned RGB-D frame goes in; the shape of the object, a grasp pose and the

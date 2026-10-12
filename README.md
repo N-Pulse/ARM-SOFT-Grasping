@@ -25,6 +25,11 @@ python tools/preprocess_rgbd_session.py datasets/captures/hand_session_001 \
 # Preview the same filter live before exporting a complete session (Q to quit)
 python tools/preview_depth_filter.py --source camera \
   --min-depth 0.10 --max-depth 0.80 --roi 0.1,0.1,0.9,0.9
+
+# Generate object segmentation proposals from a processed session
+python tools/annotate_object_segmentation.py datasets/captures/object_session_001 \
+  --derived datasets/captures/object_session_001/derived/depth_v1 \
+  --out datasets/object_segmentation/object_session_001
 ```
 
 ## Quick start

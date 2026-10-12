@@ -140,6 +140,37 @@ python tools/preprocess_rgbd_session.py datasets/captures/hand_session_001 \
 7. 在 test sessions 上测 mAP、mask IoU，并额外测试遮挡和相似背景；
 8. 合格模型用于下一轮 pseudo-label，人工只修正低置信度样本。
 
+当前分支已经实现第一个可运行闭环。Depth mask 的 connected components
+提供候选实例框；加上 `--sam-model mobile_sam.pt` 后，候选框会作为 SAM box
+prompts 精修边界。内部 JSON 保存像素 polygon、来源和审核状态，只有审核通过的
+标注默认会进入 YOLO 数据集。
+
+```bash
+# 1. 生成 proposal；不指定 SAM 时只使用 depth components
+python tools/annotate_object_segmentation.py datasets/captures/object_session_001 \
+  --derived datasets/captures/object_session_001/derived/depth_v1 \
+  --out datasets/object_segmentation/object_session_001 \
+  --class-id 0 --class-name object --sam-model mobile_sam.pt
+
+# 2. 快速审核：A 接受，R 拒绝，S 跳过，Q 退出
+python tools/review_object_annotations.py \
+  datasets/object_segmentation/object_session_001
+
+# 3. 按 session 导出。不同 session 分配到 train/val/test，不能拆连续帧
+python tools/export_yolo_segmentation.py \
+  datasets/object_segmentation/object_session_001 \
+  --out datasets/object_segmentation/exports/yolo_v1 --split train
+
+# 4. 训练并保留训练来源、参数和 best weights 路径
+python tools/train_object_segmentation.py \
+  --data datasets/object_segmentation/exports/yolo_v1/data.yaml \
+  --model yolo11n-seg.pt --epochs 100 --device cpu --name yolo_seg_v1
+```
+
+对于需要修改 polygon 边界的样本，JSON 是 annotation source of truth；可以接入
+CVAT/Label Studio 转换器。当前键盘审核器只负责接受/拒绝 proposal，不冒充完整的
+polygon editor。
+
 建议结构：
 
 ```text

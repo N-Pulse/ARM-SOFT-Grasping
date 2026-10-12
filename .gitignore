@@ -12,6 +12,7 @@ __pycache__/
 *.npz
 preview*.png
 rec/
+runs/
 
 # Local training data: keep only the documented directory skeleton in Git.
 datasets/captures/*

@@ -1,5 +1,35 @@
 # ARM-SOFT Grasping — standalone model
 
+> **Branch: `feature/mechanical-hand-pose` — mechanical-hand perception and
+> dataset mainline.**  This branch tracks the five existing orange fingertip
+> shells, defines the canonical 17-keypoint skeleton, and is the integration
+> base for assisted annotation, YOLO Pose training, pseudo-labeling, evaluation
+> and future D405 depth fusion. Human MediaPipe work stays on
+> `feature/mediapipe-actions`.
+
+## Quick start: mechanical hand
+
+```bash
+# First setup
+bash setup_env.sh
+source .venv/bin/activate
+
+# Live orange-fingertip tracking; use --camera 1 for another camera
+python tools/mechanical_hand_test.py --camera 0 --show-mask
+
+# Test one saved PNG/JPEG image
+python tools/mechanical_hand_test.py \
+    --image hand.png --output tracked.png --show-mask
+
+# Automated tracker checks
+python -m armsoft.tests.test_mechanical_hand
+```
+
+The current tracker outputs persistent `tip 1–5` IDs and 2-D pixel centres.
+The next development stages map those tracks to anatomical finger names,
+provide assisted 17-keypoint annotation, train YOLO Pose and finally add 3-D
+coordinates from the D405.
+
 Vision-based grasp planning for the **n-pulse** soft robotic hand.
 
 One aligned RGB-D frame goes in; the shape of the object, a grasp pose and the

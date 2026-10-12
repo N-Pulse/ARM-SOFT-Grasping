@@ -6,6 +6,18 @@
 > `feature/mediapipe-actions`; mechanical-hand annotation and YOLO Pose work
 > live on `feature/mechanical-hand-pose`.
 
+The shared dataset/training architecture, capture contract, assisted-labeling
+flows and branch plan are documented in
+[`docs/vision_training_pipeline.md`](docs/vision_training_pipeline.md).
+
+To create a raw RGB-D training session without running grasp inference:
+
+```bash
+python tools/collect_rgbd_dataset.py --source camera \
+  --purpose mechanical-hand-pose --frames 300 \
+  --out datasets/captures/hand_session_001
+```
+
 ## Quick start
 
 ```bash

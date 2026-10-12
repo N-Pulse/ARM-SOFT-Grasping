@@ -12,3 +12,11 @@ __pycache__/
 *.npz
 preview*.png
 rec/
+
+# Local training data: keep only the documented directory skeleton in Git.
+datasets/captures/*
+!datasets/captures/.gitkeep
+datasets/object_segmentation/*
+!datasets/object_segmentation/.gitkeep
+datasets/mechanical_hand_pose/*
+!datasets/mechanical_hand_pose/.gitkeep

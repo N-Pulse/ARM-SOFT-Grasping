@@ -192,6 +192,13 @@ grasping pipeline. On first use it downloads MediaPipe's lightweight pose model
 into `models/` and recognizes `standing`, `left_hand_up`, `right_hand_up`,
 `both_hands_up`, `t_pose`, and `squat`.
 
+The same tool combines Pose Landmarker with the two-hand Gesture Recognizer.
+It overlays all 21 landmarks per visible hand, anatomical left/right labels,
+elbow angles, arm direction/extension, and MediaPipe's built-in gestures:
+`closed_fist`, `open_palm`, `pointing_up`, `thumb_down`, `thumb_up`, `victory`,
+and `i_love_you`. Move the hands closer to the camera when finger detail is
+too small or partially hidden.
+
 ```bash
 # Built-in Mac/PC webcam. Press Q to stop.
 python tools/action_test.py --camera 0

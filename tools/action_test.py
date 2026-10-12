@@ -17,6 +17,7 @@ from armsoft.actions import PoseActionRecognizer, draw_prediction  # noqa: E402
 
 
 DEFAULT_MODEL = ROOT / "models" / "pose_landmarker_lite.task"
+DEFAULT_GESTURE_MODEL = ROOT / "models" / "gesture_recognizer.task"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="OpenCV camera index (default: 0)")
     parser.add_argument("--video", help="video file instead of a live camera")
     parser.add_argument("--model", default=str(DEFAULT_MODEL))
+    parser.add_argument("--gesture-model", default=str(DEFAULT_GESTURE_MODEL))
     parser.add_argument("--output", help="optional annotated output video")
     parser.add_argument("--headless", action="store_true",
                         help="do not open a window (use with --video)")
@@ -49,7 +51,7 @@ def main(argv=None) -> int:
     previous = None
 
     try:
-        with PoseActionRecognizer(args.model) as recognizer:
+        with PoseActionRecognizer(args.model, args.gesture_model) as recognizer:
             while args.max_frames <= 0 or frame_index < args.max_frames:
                 ok, frame = capture.read()
                 if not ok:
@@ -60,6 +62,16 @@ def main(argv=None) -> int:
                 if prediction.label != previous:
                     print(f"[{frame_index:05d}] {prediction.label} ({prediction.confidence:.0%})")
                     previous = prediction.label
+                details = []
+                for arm in prediction.arms:
+                    angle = "?" if arm.elbow_deg is None else f"{arm.elbow_deg:.0f}deg"
+                    details.append(f"{arm.side}_arm={arm.state}/{angle}")
+                for hand in prediction.hands:
+                    details.append(
+                        f"{hand.side}_hand={hand.gesture}/{hand.confidence:.0%}"
+                    )
+                if details and frame_index % 30 == 0:
+                    print("           " + "  ".join(details))
 
                 if args.output:
                     if writer is None:

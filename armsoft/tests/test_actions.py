@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass
 
-from armsoft.actions import classify_pose
+from armsoft.actions import analyze_arms, classify_pose, parse_hands
 
 
 @dataclass
@@ -65,6 +65,34 @@ class ClassifyPoseTest(unittest.TestCase):
         points[26], points[28] = Point(0.65, 0.70), Point(0.55, 0.70)
         label, _ = classify_pose(points)
         self.assertEqual(label, "squat")
+
+    def test_arm_analysis(self):
+        arms = analyze_arms(standing_pose())
+        self.assertEqual([arm.side for arm in arms], ["left", "right"])
+        self.assertTrue(all(arm.elbow_deg is not None for arm in arms))
+        self.assertTrue(all(arm.state.endswith("straight") for arm in arms))
+
+    def test_hand_result_parsing(self):
+        @dataclass
+        class Category:
+            category_name: str
+            score: float
+
+        @dataclass
+        class Result:
+            hand_landmarks: list
+            handedness: list
+            gestures: list
+
+        result = Result(
+            hand_landmarks=[[Point() for _ in range(21)]],
+            handedness=[[Category("Left", 0.99)]],
+            gestures=[[Category("Open_Palm", 0.91)]],
+        )
+        hand = parse_hands(result)[0]
+        self.assertEqual(hand.side, "left")
+        self.assertEqual(hand.gesture, "open_palm")
+        self.assertAlmostEqual(hand.confidence, 0.91)
 
 
 if __name__ == "__main__":

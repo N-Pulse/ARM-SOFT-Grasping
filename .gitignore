@@ -15,3 +15,4 @@ rec/
 
 # Downloaded on first use by tools/action_test.py.
 models/pose_landmarker_*.task
+models/gesture_recognizer.task

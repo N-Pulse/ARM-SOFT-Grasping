@@ -17,6 +17,10 @@ POSE_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
     "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
 )
+GESTURE_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/"
+    "gesture_recognizer/float16/latest/gesture_recognizer.task"
+)
 
 # MediaPipe's 33-landmark pose topology. Keeping it here avoids depending on
 # private drawing helpers that have changed between MediaPipe releases.
@@ -28,6 +32,28 @@ POSE_CONNECTIONS = (
     (24, 26), (25, 27), (26, 28), (27, 29), (28, 30), (29, 31),
     (30, 32), (27, 31), (28, 32),
 )
+HAND_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (5, 9), (9, 10), (10, 11), (11, 12),
+    (9, 13), (13, 14), (14, 15), (15, 16),
+    (13, 17), (17, 18), (18, 19), (19, 20), (0, 17),
+)
+
+
+@dataclass(frozen=True)
+class ArmAnalysis:
+    side: str
+    state: str
+    elbow_deg: float | None
+
+
+@dataclass(frozen=True)
+class HandAnalysis:
+    side: str
+    gesture: str
+    confidence: float
+    landmarks: Sequence
 
 
 @dataclass(frozen=True)
@@ -37,6 +63,8 @@ class ActionPrediction:
     label: str
     confidence: float
     landmarks: Sequence
+    arms: tuple[ArmAnalysis, ...] = ()
+    hands: tuple[HandAnalysis, ...] = ()
 
 
 def _visible(point, threshold: float = 0.45) -> bool:
@@ -98,10 +126,63 @@ def classify_pose(landmarks: Sequence) -> tuple[str, float]:
     return "standing", 0.72
 
 
-class PoseActionRecognizer:
-    """MediaPipe Pose Landmarker plus a short majority-vote stabilizer."""
+def analyze_arms(landmarks: Sequence) -> tuple[ArmAnalysis, ...]:
+    """Return readable left/right arm state and elbow angle."""
+    if len(landmarks) < 17:
+        return ()
+    analyses = []
+    for side, shoulder_i, elbow_i, wrist_i in (
+        ("left", 11, 13, 15), ("right", 12, 14, 16)
+    ):
+        shoulder, elbow, wrist = (
+            landmarks[shoulder_i], landmarks[elbow_i], landmarks[wrist_i]
+        )
+        if not all(_visible(p) for p in (shoulder, elbow, wrist)):
+            analyses.append(ArmAnalysis(side, "not_visible", None))
+            continue
+        elbow_deg = _angle(shoulder, elbow, wrist)
+        if wrist.y < shoulder.y:
+            direction = "raised"
+        elif abs(wrist.y - shoulder.y) < 0.08:
+            direction = "horizontal"
+        else:
+            direction = "lowered"
+        extension = "straight" if elbow_deg >= 155 else "bent"
+        analyses.append(ArmAnalysis(side, f"{direction}_{extension}", elbow_deg))
+    return tuple(analyses)
 
-    def __init__(self, model_path: str | Path, smoothing: int = 5):
+
+def _category_value(category, *names, default=None):
+    for name in names:
+        value = getattr(category, name, None)
+        if value is not None:
+            return value
+    return default
+
+
+def parse_hands(result) -> tuple[HandAnalysis, ...]:
+    """Convert a MediaPipe gesture result into stable application data."""
+    hands = []
+    for index, landmarks in enumerate(result.hand_landmarks):
+        handedness = result.handedness[index][0] if result.handedness[index] else None
+        gesture = result.gestures[index][0] if result.gestures[index] else None
+        side = str(_category_value(
+            handedness, "category_name", "display_name", default="unknown"
+        )).lower()
+        gesture_name = str(_category_value(
+            gesture, "category_name", "display_name", default="unknown"
+        )).lower()
+        score = float(_category_value(gesture, "score", default=0.0))
+        hands.append(HandAnalysis(side, gesture_name, score, landmarks))
+    return tuple(hands)
+
+
+class PoseActionRecognizer:
+    """Combined body pose, arm geometry and two-hand gesture recognizer."""
+
+    def __init__(self, model_path: str | Path,
+                 gesture_model_path: str | Path | None = None,
+                 smoothing: int = 5):
         try:
             import mediapipe as mp
         except ImportError as exc:
@@ -115,6 +196,14 @@ class PoseActionRecognizer:
             print(f"[actions] downloading pose model to {model_path}")
             urlretrieve(POSE_MODEL_URL, model_path)
 
+        if gesture_model_path is None:
+            gesture_model_path = model_path.parent / "gesture_recognizer.task"
+        gesture_model_path = Path(gesture_model_path)
+        if not gesture_model_path.exists():
+            gesture_model_path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"[actions] downloading gesture model to {gesture_model_path}")
+            urlretrieve(GESTURE_MODEL_URL, gesture_model_path)
+
         options = mp.tasks.vision.PoseLandmarkerOptions(
             base_options=mp.tasks.BaseOptions(model_asset_path=str(model_path)),
             running_mode=mp.tasks.vision.RunningMode.VIDEO,
@@ -125,6 +214,19 @@ class PoseActionRecognizer:
         )
         self._mp = mp
         self._landmarker = mp.tasks.vision.PoseLandmarker.create_from_options(options)
+        gesture_options = mp.tasks.vision.GestureRecognizerOptions(
+            base_options=mp.tasks.BaseOptions(
+                model_asset_path=str(gesture_model_path)
+            ),
+            running_mode=mp.tasks.vision.RunningMode.VIDEO,
+            num_hands=2,
+            min_hand_detection_confidence=0.5,
+            min_hand_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        self._gesture_recognizer = (
+            mp.tasks.vision.GestureRecognizer.create_from_options(gesture_options)
+        )
         self._labels: deque[str] = deque(maxlen=max(1, smoothing))
         self._last_timestamp = -1
 
@@ -134,19 +236,27 @@ class PoseActionRecognizer:
         rgb = np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
         result = self._landmarker.detect_for_video(image, timestamp_ms)
+        gesture_result = self._gesture_recognizer.recognize_for_video(
+            image, timestamp_ms
+        )
+        hands = parse_hands(gesture_result)
         if not result.pose_landmarks:
             self._labels.clear()
-            return ActionPrediction("no_pose", 0.0, ())
+            return ActionPrediction("no_pose", 0.0, (), (), hands)
 
         landmarks = result.pose_landmarks[0]
         label, confidence = classify_pose(landmarks)
         self._labels.append(label)
         stable_label, votes = Counter(self._labels).most_common(1)[0]
         stability = votes / len(self._labels)
-        return ActionPrediction(stable_label, confidence * stability, landmarks)
+        arms = analyze_arms(landmarks)
+        return ActionPrediction(
+            stable_label, confidence * stability, landmarks, arms, hands
+        )
 
     def close(self) -> None:
         self._landmarker.close()
+        self._gesture_recognizer.close()
 
     def __enter__(self):
         return self
@@ -156,7 +266,7 @@ class PoseActionRecognizer:
 
 
 def draw_prediction(image: np.ndarray, prediction: ActionPrediction) -> np.ndarray:
-    """Draw pose skeleton and label on a BGR image."""
+    """Draw body, arms, detailed hand skeletons and gesture labels."""
     canvas = image.copy()
     h, w = canvas.shape[:2]
     landmarks = prediction.landmarks
@@ -170,8 +280,33 @@ def draw_prediction(image: np.ndarray, prediction: ActionPrediction) -> np.ndarr
             if _visible(point):
                 cv2.circle(canvas, (int(point.x * w), int(point.y * h)),
                            3, (0, 180, 255), -1)
-    text = f"{prediction.label}  {prediction.confidence:.0%}"
-    cv2.rectangle(canvas, (10, 10), (420, 55), (0, 0, 0), -1)
-    cv2.putText(canvas, text, (20, 43), cv2.FONT_HERSHEY_SIMPLEX,
-                0.9, (255, 255, 255), 2, cv2.LINE_AA)
+
+    for hand in prediction.hands:
+        for a, b in HAND_CONNECTIONS:
+            pa, pb = hand.landmarks[a], hand.landmarks[b]
+            cv2.line(canvas, (int(pa.x * w), int(pa.y * h)),
+                     (int(pb.x * w), int(pb.y * h)), (255, 120, 20), 2)
+        for point in hand.landmarks:
+            cv2.circle(canvas, (int(point.x * w), int(point.y * h)),
+                       3, (255, 220, 40), -1)
+        wrist = hand.landmarks[0]
+        cv2.putText(canvas, f"{hand.side}: {hand.gesture} {hand.confidence:.0%}",
+                    (int(wrist.x * w), max(20, int(wrist.y * h) - 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 220, 40), 2,
+                    cv2.LINE_AA)
+
+    lines = [f"action: {prediction.label}  {prediction.confidence:.0%}"]
+    for arm in prediction.arms:
+        angle = "?" if arm.elbow_deg is None else f"{arm.elbow_deg:.0f} deg"
+        lines.append(f"{arm.side} arm: {arm.state}  elbow={angle}")
+    if not prediction.hands:
+        lines.append("hands: not detected (move closer / improve lighting)")
+    box_width = min(w - 20, 590)
+    box_height = 18 + 28 * len(lines)
+    cv2.rectangle(canvas, (10, 10), (10 + box_width, 10 + box_height),
+                  (0, 0, 0), -1)
+    for index, text in enumerate(lines):
+        cv2.putText(canvas, text, (20, 38 + index * 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2,
+                    cv2.LINE_AA)
     return canvas

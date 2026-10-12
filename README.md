@@ -185,6 +185,25 @@ python -m armsoft --source replay --replay-path rec/ --frames 0
 
 ## 5. Using it from your own code
 
+### Human-action prototype (MediaPipe)
+
+This branch also contains an independent RGB pose test. It does not change the
+grasping pipeline. On first use it downloads MediaPipe's lightweight pose model
+into `models/` and recognizes `standing`, `left_hand_up`, `right_hand_up`,
+`both_hands_up`, `t_pose`, and `squat`.
+
+```bash
+# Built-in Mac/PC webcam. Press Q to stop.
+python tools/action_test.py --camera 0
+
+# Reproducible test from a video, optionally saving annotations.
+python tools/action_test.py --video person.mp4 --output actions.mp4
+```
+
+The labels are intentionally based on readable landmark rules. They are a
+smoke test, not a trained temporal action-recognition model; recorded examples
+can later be used to replace these rules with a sequence classifier.
+
 The package has three layers — `armsoft.sources` (where frames come from),
 `armsoft.core` (the model) and `armsoft.sinks` (where results go). Everything
 common is re-exported at the top level, so you can import from either place:

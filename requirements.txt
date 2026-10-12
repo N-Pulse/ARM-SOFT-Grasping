@@ -20,6 +20,9 @@ torch>=2.0
 torchvision>=0.15
 ultralytics>=8.0
 
+# Optional human pose/action test tool (tools/action_test.py).
+mediapipe>=1.0
+
 # Optional extras, deliberately NOT installed by default:
 #   pyrealsense2   only to drive a real Intel RealSense depth camera
 #   rclpy          only for --ros2; comes from a ROS 2 installation, not pip

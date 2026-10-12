@@ -1,5 +1,5 @@
 # virtual environment (rebuild with: bash setup_env.sh)
-.venv/
+.venv
 
 # bundled OpenGL libraries (rebuild per vendor/README.md)
 vendor/usr/
@@ -12,3 +12,6 @@ __pycache__/
 *.npz
 preview*.png
 rec/
+
+# Downloaded on first use by tools/action_test.py.
+models/pose_landmarker_*.task

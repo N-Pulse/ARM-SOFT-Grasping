@@ -27,3 +27,4 @@ training/colab/*.zip
 
 # local planning docs (not versioned)
 docs/superpowers/
+training/results/dataset_preview.jpg

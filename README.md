@@ -1,5 +1,23 @@
 # ARM-SOFT Grasping — standalone model
 
+## Dataset Studio (local web capture)
+
+The web UI displays the D405 RGB feed, depth-filtered preview, mask, capture progress, and previous sessions. Run from this branch:
+
+```bash
+python tools/dataset_web.py
+```
+
+If macOS camera access requires elevated privileges, keep the active virtual
+environment and run `sudo -E "$(which python)" -u tools/dataset_web.py`.
+
+Open <http://127.0.0.1:8765>. Press `Ctrl+C` in the terminal to stop. The Studio now covers capture, preprocessing, assisted annotation, manual review, session-safe YOLO Seg export, monitored YOLO training, and live testing of trained models with RGB-D distance measurements. Training is enabled after a valid dataset has been exported from the Dataset page; Live Test becomes available after a training run produces `best.pt`. During a live test, labelled failure cases can be collected into one deduplicated RGB-D session and sent back through the same preprocessing and review workflow.
+
+All worktrees share one data root at `../ARM-SOFT-data` by default. Override it with
+`ARM_SOFT_DATA_ROOT` or `--data-root`. The capture UI skips near-identical consecutive
+frames and restores ownership to the invoking macOS user after a sudo camera session.
+See [docs/dataset_studio_user_guide.md](docs/dataset_studio_user_guide.md) for the complete workflow, storage layout, deletion order, and troubleshooting guide.
+
 > **Branch: `independent-cv` — stable RGB-D grasping baseline.**  This is the
 > integration base for camera capture, object isolation, cylinder/cuboid
 > fitting and grasp generation. Human MediaPipe experiments live on

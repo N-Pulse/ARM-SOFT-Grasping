@@ -35,18 +35,26 @@ from .sources import (
     camera_available,
     save_frame,
 )
-from .core import (
-    ObjectIsolatorRGBD,
-    Isolation,
-    build_classifier,
-    YoloShapeClassifier,
-    GeometricShapeClassifier,
-    FixedShapeClassifier,
-    GraspPipeline,
-    GraspResult,
-    SCHEMA_VERSION,
-    detect_table_plane,
-)
+
+# Core imports pull in Open3D and its visualization stack.  Loading those
+# dependencies for lightweight tools (camera checks, data collection, or the
+# Dataset Studio) makes startup unnecessarily slow.  Keep the public API but
+# resolve core symbols only when a caller actually asks for one.
+_CORE_EXPORTS = {
+    "ObjectIsolatorRGBD", "Isolation", "build_classifier",
+    "YoloShapeClassifier", "GeometricShapeClassifier",
+    "FixedShapeClassifier", "GraspPipeline", "GraspResult",
+    "SCHEMA_VERSION", "detect_table_plane",
+}
+
+
+def __getattr__(name):
+    if name in _CORE_EXPORTS:
+        from . import core
+        value = getattr(core, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __version__ = "1.0.0"
 

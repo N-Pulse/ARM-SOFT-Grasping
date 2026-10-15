@@ -9,6 +9,59 @@ import numpy as np
 from ..sources.base import CameraIntrinsics
 
 
+def estimate_table_plane(depth_m: np.ndarray, intrinsics: CameraIntrinsics,
+                         roi_xyxy=(0.03, 0.35, 0.97, 0.97), *,
+                         min_depth_m: float = 0.10,
+                         max_depth_m: float = 1.50,
+                         distance_threshold_m: float = 0.006,
+                         iterations: int = 500,
+                         seed: int = 0) -> tuple[float, float, float, float]:
+    """Fit the dominant table plane in a depth ROI with deterministic RANSAC.
+
+    The returned unit normal points towards the camera, so positive signed
+    distance means a point is above the table.
+    """
+    h, w = depth_m.shape
+    x1, y1, x2, y2 = roi_xyxy
+    left, right = int(x1 * w), int(x2 * w)
+    top, bottom = int(y1 * h), int(y2 * h)
+    points = intrinsics.deproject(depth_m)[top:bottom:2, left:right:2].reshape(-1, 3)
+    valid = (np.isfinite(points[:, 2]) & (points[:, 2] >= min_depth_m)
+             & (points[:, 2] <= max_depth_m))
+    points = points[valid]
+    if len(points) < 100:
+        raise ValueError("not enough valid depth points to estimate the table plane")
+    if len(points) > 25000:
+        rng = np.random.default_rng(seed)
+        points = points[rng.choice(len(points), 25000, replace=False)]
+    rng = np.random.default_rng(seed)
+    best = None
+    best_count = 0
+    for _ in range(iterations):
+        sample = points[rng.choice(len(points), 3, replace=False)]
+        normal = np.cross(sample[1] - sample[0], sample[2] - sample[0])
+        length = np.linalg.norm(normal)
+        if length < 1e-8:
+            continue
+        normal /= length
+        d = -float(normal @ sample[0])
+        inliers = np.abs(points @ normal + d) <= distance_threshold_m
+        count = int(inliers.sum())
+        if count > best_count:
+            best, best_count = inliers, count
+    if best is None or best_count < max(100, int(0.15 * len(points))):
+        raise ValueError("could not find a dominant table plane")
+    table = points[best]
+    centroid = table.mean(axis=0)
+    _, _, vh = np.linalg.svd(table - centroid, full_matrices=False)
+    normal = vh[-1]
+    if normal @ centroid > 0:  # point from the table towards the camera origin
+        normal = -normal
+    normal /= np.linalg.norm(normal)
+    d = -float(normal @ centroid)
+    return float(normal[0]), float(normal[1]), float(normal[2]), d
+
+
 @dataclass(frozen=True)
 class DepthFilterConfig:
     min_depth_m: float = 0.10

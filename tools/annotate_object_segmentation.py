@@ -30,20 +30,32 @@ def load_derived_masks(path: Path) -> dict[str, Path]:
     return result
 
 
-def sam_refine(model, image: np.ndarray, candidates: list[np.ndarray],
-               valid_workspace: np.ndarray) -> list[np.ndarray]:
-    boxes = [mask_bbox(mask) for mask in candidates]
+def sam_refine(model, image: np.ndarray,
+               candidates: list[np.ndarray]) -> list[np.ndarray]:
+    height, width = image.shape[:2]
+    boxes = []
+    for mask in candidates:
+        x1, y1, x2, y2 = mask_bbox(mask)
+        # Depth can be missing on dark/reflective object surfaces. Expand its
+        # component box so SAM can recover the complete RGB object boundary.
+        pad_x = max(8.0, (x2 - x1) * 0.18)
+        pad_y = max(8.0, (y2 - y1) * 0.25)
+        boxes.append([max(0.0, x1 - pad_x), max(0.0, y1 - pad_y),
+                      min(width - 1.0, x2 + pad_x),
+                      min(height - 1.0, y2 + pad_y)])
     results = model.predict(image, bboxes=boxes, verbose=False)
     if not results or results[0].masks is None:
         return candidates
     refined = results[0].masks.data.cpu().numpy()
     output = []
     for mask in refined:
-        if mask.shape != valid_workspace.shape:
+        if mask.shape != (height, width):
             mask = cv2.resize(mask.astype(np.uint8),
-                              (valid_workspace.shape[1], valid_workspace.shape[0]),
+                              (width, height),
                               interpolation=cv2.INTER_NEAREST)
-        output.append(mask.astype(bool) & valid_workspace)
+        # Do not intersect with the depth mask: that would remove exactly the
+        # RGB surfaces (black/glossy tops) that SAM is meant to recover.
+        output.append(mask.astype(bool))
     return output
 
 
@@ -92,9 +104,13 @@ def main() -> int:
     for source_record, frame in read_capture_session(args.session):
         frame_id = source_record["id"]
         destination = annotation_dir / f"{frame_id}.json"
-        if destination.exists() and not args.force:
-            skipped += 1
-            continue
+        if destination.exists():
+            existing = json.loads(destination.read_text(encoding="utf-8"))
+            # Human review decisions are canonical and must never be replaced
+            # by a new model proposal. --force only refreshes pending work.
+            if not args.force or existing.get("review_status", "pending") != "pending":
+                skipped += 1
+                continue
         mask_path = mask_paths.get(frame_id)
         if mask_path is None:
             raise KeyError(f"derived mask missing for {frame_id}")
@@ -107,7 +123,7 @@ def main() -> int:
         )
         source = "depth-components"
         if sam is not None and candidate_masks:
-            candidate_masks = sam_refine(sam, frame.color_bgr, candidate_masks, workspace)
+            candidate_masks = sam_refine(sam, frame.color_bgr, candidate_masks)
             source = f"sam-box:{args.sam_model}"
 
         objects = []
@@ -131,13 +147,16 @@ def main() -> int:
             objects=objects,
         )
         annotation.save(destination)
-        cv2.imwrite(str(preview_dir / f"{frame_id}.png"),
-                    draw_preview(frame.color_bgr, objects))
+        preview_path = preview_dir / f"{frame_id}.png"
+        if not cv2.imwrite(str(preview_path), draw_preview(frame.color_bgr, objects),
+                           [cv2.IMWRITE_PNG_COMPRESSION, 9]):
+            raise OSError(f"could not write {preview_path}")
         written += 1
 
     run = {
         "source_session": str(args.session.resolve()),
         "derived_masks": str(args.derived.resolve()),
+        "preprocessing_version": args.derived.name,
         "proposal_method": f"sam-box:{args.sam_model}" if sam else "depth-components",
         "class_id": args.class_id,
         "class_name": args.class_name,

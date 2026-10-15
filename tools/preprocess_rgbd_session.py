@@ -15,7 +15,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from armsoft.data import read_capture_session  # noqa: E402
-from armsoft.preprocessing import DepthFilterConfig, apply_depth_filter  # noqa: E402
+from armsoft.preprocessing import (DepthFilterConfig, apply_depth_filter,  # noqa: E402
+                                   estimate_table_plane)
 
 
 def floats(value: str, count: int, name: str) -> tuple[float, ...]:
@@ -38,6 +39,11 @@ def main() -> int:
                         help="normalized x1,y1,x2,y2, for example 0.1,0.1,0.9,0.9")
     parser.add_argument("--table-plane", type=lambda s: floats(s, 4, "table plane"),
                         help="nx,ny,nz,d for n·X+d=0 in camera coordinates")
+    parser.add_argument("--auto-table", action="store_true",
+                        help="fit the dominant table plane independently for every frame")
+    parser.add_argument("--table-roi", type=lambda s: floats(s, 4, "table ROI"),
+                        default=(0.03, 0.35, 0.97, 0.97),
+                        help="normalized ROI used only to fit the table plane")
     parser.add_argument("--min-table-height", type=float, default=0.005)
     args = parser.parse_args()
 
@@ -47,11 +53,19 @@ def main() -> int:
     previews = args.out / "previews"
     masks.mkdir(parents=True, exist_ok=True)
     previews.mkdir(parents=True, exist_ok=True)
+    if args.auto_table and args.table_plane is not None:
+        raise SystemExit("choose either --auto-table or --table-plane, not both")
+    rows = iter(read_capture_session(args.session))
+    try:
+        first = next(rows)
+    except StopIteration:
+        raise SystemExit("capture session contains no frames")
+    table_plane = args.table_plane
     config = DepthFilterConfig(
         min_depth_m=args.min_depth,
         max_depth_m=args.max_depth,
         roi_xyxy=args.roi,
-        table_plane=args.table_plane,
+        table_plane=table_plane,
         min_height_above_table_m=args.min_table_height,
     )
     (args.out / "config.json").write_text(
@@ -59,16 +73,33 @@ def main() -> int:
     )
 
     records = []
-    for source_record, frame in read_capture_session(args.session):
+    for source_record, frame in (first, *rows):
+        frame_config = config
+        fitted_plane = table_plane
+        if args.auto_table:
+            fitted_plane = estimate_table_plane(
+                frame.depth_m, frame.intrinsics, args.table_roi,
+                min_depth_m=args.min_depth, max_depth_m=args.max_depth,
+                seed=int(source_record["source_index"]),
+            )
+            frame_config = DepthFilterConfig(
+                min_depth_m=args.min_depth, max_depth_m=args.max_depth,
+                roi_xyxy=args.roi, table_plane=fitted_plane,
+                min_height_above_table_m=args.min_table_height,
+            )
         filtered, mask = apply_depth_filter(
-            frame.color_bgr, frame.depth_m, config, frame.intrinsics,
+            frame.color_bgr, frame.depth_m, frame_config, frame.intrinsics,
             dim_background=True,
         )
         frame_id = source_record["id"]
         mask_rel = Path("masks") / f"{frame_id}.png"
         preview_rel = Path("previews") / f"{frame_id}.png"
-        cv2.imwrite(str(args.out / mask_rel), mask.astype(np.uint8) * 255)
-        cv2.imwrite(str(args.out / preview_rel), filtered)
+        if not cv2.imwrite(str(args.out / mask_rel), mask.astype(np.uint8) * 255,
+                           [cv2.IMWRITE_PNG_COMPRESSION, 9]):
+            raise OSError(f"could not write {mask_rel}")
+        if not cv2.imwrite(str(args.out / preview_rel), filtered,
+                           [cv2.IMWRITE_PNG_COMPRESSION, 9]):
+            raise OSError(f"could not write {preview_rel}")
         records.append({
             "id": frame_id,
             "source_session": str(args.session),
@@ -77,6 +108,7 @@ def main() -> int:
             "mask": mask_rel.as_posix(),
             "preview": preview_rel.as_posix(),
             "kept_fraction": float(mask.mean()),
+            "table_plane": fitted_plane,
         })
 
     with (args.out / "manifest.jsonl").open("w", encoding="utf-8") as stream:

@@ -11,11 +11,23 @@ import cv2
 import numpy as np
 
 from ..data import CaptureSessionWriter, SESSION_SCHEMA_VERSION, read_capture_session
-from ..preprocessing import DepthFilterConfig, apply_depth_filter
+from ..preprocessing import DepthFilterConfig, apply_depth_filter, estimate_table_plane
 from ..sources import CameraIntrinsics, SimulatedSource
 
 
 class DepthFilterTests(unittest.TestCase):
+    def test_estimate_table_plane_from_depth_with_raised_object(self):
+        intr = CameraIntrinsics(80, 60, 80.0, 80.0, 40.0, 30.0)
+        # Plane z = 0.6 with a small raised object at z = 0.5.
+        depth = np.full((60, 80), 0.6, dtype=np.float32)
+        depth[30:42, 32:48] = 0.5
+        plane = estimate_table_plane(depth, intr, (0, 0, 1, 1), seed=4)
+        points = intr.deproject(depth)
+        table_height = points[10, 10] @ np.asarray(plane[:3]) + plane[3]
+        object_height = points[35, 40] @ np.asarray(plane[:3]) + plane[3]
+        self.assertAlmostEqual(float(table_height), 0.0, places=3)
+        self.assertGreater(float(object_height), 0.05)
+
     def test_filter_keeps_only_requested_distance_without_mutating_input(self):
         color = np.full((2, 3, 3), 90, dtype=np.uint8)
         depth = np.array([[0.0, 0.2, 0.9], [np.nan, 0.5, 0.8]], dtype=np.float32)

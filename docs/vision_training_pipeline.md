@@ -1,5 +1,9 @@
 # N-Pulse 视觉数据与模型训练流程
 
+> 最新进度：本地 Dataset Studio 已连接 Capture、Sessions、Preprocess、Assisted Annotation、逐帧 Review、YOLO-Seg Dataset export、Train 和 Live Test。Dataset 页面只导出 Approved 标注，按完整 session 划分 train/val/test，执行完整性与泄漏检查，并生成 `data.yaml`、labels 和 manifest。Train 页面可选择导出的 dataset、YOLO segmentation checkpoint、epochs、image size、batch 和 device，实时查看日志与进度，并保存每次实验的 metrics 与 best weights。Live Test 页面会读取完成训练的 `best.pt`，对 D405 最新帧做低延迟分割，同时显示置信度、推理速度、物体深度和 XYZ。测试者可以给失败案例选择 `missed detection`、`false positive`、`bad mask`、`wrong class` 或 `other`，补充备注，并将同一次测试中的案例集中保存回一个 Sessions 数据集；近似重复帧会自动跳过。
+>
+> 数据架构更新：所有 worktree 默认共享 `CV_Project_V2526/ARM-SOFT-data`。原始数据、derived cache、annotations、exports 和 models 分层保存，避免 branch 间复制数据。采集器会跳过高度相似的连续帧。
+
 ## 1. 最终目标
 
 建立一条可以重复运行的 RGB-D 视觉流水线，最终输出：
@@ -236,6 +240,7 @@ Branch 是一条代码开发线；workflow 是从采集、标注、训练、评�
 - 物品：自动 mask + 人工修正 + YOLO-Seg export；
 - 机械手：橙色指尖候选 + 17 点人工修正 + YOLO-Pose export；
 - annotation 工具保存版本和可见性，不只保存渲染后的图片。
+- **当前状态**：物品 mask proposal 的 Web 批处理、进度、结果预览和逐帧 Review 已完成；重新生成只覆盖 pending proposal，保留 approved/rejected 决定。Review 可重命名、删除或手动画 polygon，并重新生成 preview。
 
 ### Phase 4 — Model training
 
@@ -243,6 +248,23 @@ Branch 是一条代码开发线；workflow 是从采集、标注、训练、评�
 - 训练配置、类别/关键点 schema 和模型版本进入 Git；
 - weights 存 release/artifact storage，不直接进入 Git；
 - test set 在训练期间保持冻结。
+- **当前状态**：YOLO-Seg dataset 的 Web 校验、版本化导出和删除已完成。导出优先对 raw RGB 使用硬链接以避免重复存储，删除 export 不影响 raw data 或 canonical annotations。Train 页面已连接 YOLO segmentation 训练、实时日志、epoch 进度、metrics、best weights、停止任务和实验删除。Live Test 已连接完成的训练结果与 D405 RGB-D 流，并支持将误检或漏检现场作为新的单帧采集 session 回流。
+
+### Storage 与删除规则
+
+- `raw/` 是唯一不可重建的数据源，RGB 与 depth 各保存一次；
+- `derived/` 和 `annotations/*/previews/` 是可重建缓存，后续生成使用最高 PNG 压缩；
+- raw session 内的 `derived` 是软链接，不产生第二份数据；
+- YOLO export 的 RGB 优先使用硬链接，同一磁盘上不重复占用图片空间；
+- Sessions 页面分别显示 raw、preprocess cache、annotation cache、exports 和 training runs，并按 inode 计算真实物理占用；
+- 删除操作均要求输入完整名称。正在运行的任务及被下游 export 引用的数据禁止删除；应按 `training run → dataset export → annotation → preprocessing → raw session` 的逆序清理。
+
+### Local Web 安全边界
+
+- 默认只监听 `127.0.0.1`；非本机监听必须显式添加 `--allow-remote`，且当前没有用户认证；
+- API 拒绝跨域写请求和超过 1 MiB 的请求体，并发送 CSP、禁止 iframe 和 MIME sniffing 等浏览器安全头；
+- 所有文件标识都经过白名单和真实路径边界检查，subprocess 使用参数数组而不是 shell；
+- 服务退出时会终止预处理、标注和训练子进程，避免孤立后台任务。
 
 ### Phase 5 — RGB-D integration
 

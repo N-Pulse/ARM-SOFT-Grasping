@@ -18,6 +18,13 @@ All worktrees share one data root at `../ARM-SOFT-data` by default. Override it 
 frames and restores ownership to the invoking macOS user after a sudo camera session.
 See [docs/dataset_studio_user_guide.md](docs/dataset_studio_user_guide.md) for the complete workflow, storage layout, deletion order, and troubleshooting guide.
 
+On native Windows PowerShell, create a fresh local virtual environment (do not
+copy `.venv` from macOS/Linux), install `requirements.txt` plus
+`pyrealsense2`, and start with `python tools\dataset_web.py`. No administrator
+or `sudo` launch is required. The Studio automatically offers NVIDIA CUDA when
+the installed PyTorch build reports an available GPU; otherwise CPU remains
+available. Full commands are in the user guide above.
+
 > **Branch: `independent-cv` — stable RGB-D grasping baseline.**  This is the
 > integration base for camera capture, object isolation, cylinder/cuboid
 > fitting and grasp generation. Human MediaPipe experiments live on

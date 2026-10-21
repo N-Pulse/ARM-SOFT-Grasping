@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import cv2
@@ -59,6 +60,26 @@ def sam_refine(model, image: np.ndarray,
     return output
 
 
+def sam_automatic(model, image: np.ndarray, min_area_px: int,
+                  max_instances: int) -> list[np.ndarray]:
+    """Generate RGB-only masks when no preprocessing workspace is supplied."""
+    results = model.predict(image, verbose=False)
+    if not results or results[0].masks is None:
+        return []
+    height, width = image.shape[:2]
+    candidates = []
+    for candidate in results[0].masks.data.cpu().numpy():
+        if candidate.shape != (height, width):
+            candidate = cv2.resize(candidate.astype(np.uint8), (width, height),
+                                   interpolation=cv2.INTER_NEAREST)
+        mask = candidate.astype(bool)
+        area = int(mask.sum())
+        if area >= min_area_px:
+            candidates.append((area, mask))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [mask for _, mask in candidates[:max_instances]]
+
+
 def draw_preview(image: np.ndarray, objects: list[ObjectAnnotation]) -> np.ndarray:
     preview = image.copy()
     overlay = image.copy()
@@ -77,8 +98,10 @@ def draw_preview(image: np.ndarray, objects: list[ObjectAnnotation]) -> np.ndarr
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("session", type=Path)
-    parser.add_argument("--derived", type=Path, required=True,
+    parser.add_argument("--derived", type=Path,
                         help="output from preprocess_rgbd_session.py")
+    parser.add_argument("--raw", action="store_true",
+                        help="bypass preprocessing and annotate original RGB frames")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--class-id", type=int, default=0)
     parser.add_argument("--class-name", default="object")
@@ -88,20 +111,39 @@ def main() -> int:
                         help="optional Ultralytics SAM weights, e.g. mobile_sam.pt")
     parser.add_argument("--force", action="store_true",
                         help="replace existing pending annotations")
+    parser.add_argument("--progress-file", type=Path,
+                        help="optional JSON progress file for the Web UI")
     args = parser.parse_args()
+    if args.raw == (args.derived is not None):
+        parser.error("choose exactly one of --derived or --raw")
 
     annotation_dir = args.out / "annotations"
     preview_dir = args.out / "previews"
     annotation_dir.mkdir(parents=True, exist_ok=True)
     preview_dir.mkdir(parents=True, exist_ok=True)
-    mask_paths = load_derived_masks(args.derived)
+    mask_paths = {} if args.raw else load_derived_masks(args.derived)
     sam = None
     if args.sam_model:
         from ultralytics import SAM  # noqa: PLC0415
         sam = SAM(args.sam_model)
 
     written = skipped = 0
-    for source_record, frame in read_capture_session(args.session):
+    captured = list(read_capture_session(args.session))
+
+    def report_progress(processed: int) -> None:
+        if args.progress_file is None:
+            return
+        args.progress_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"processed": processed, "total": len(captured),
+                   "generated": written, "preserved": skipped}
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=args.progress_file.parent,
+                                         prefix=".annotation-progress-", delete=False) as stream:
+            json.dump(payload, stream)
+            temporary = Path(stream.name)
+        temporary.replace(args.progress_file)
+
+    report_progress(0)
+    for position, (source_record, frame) in enumerate(captured, start=1):
         frame_id = source_record["id"]
         destination = annotation_dir / f"{frame_id}.json"
         if destination.exists():
@@ -110,21 +152,27 @@ def main() -> int:
             # by a new model proposal. --force only refreshes pending work.
             if not args.force or existing.get("review_status", "pending") != "pending":
                 skipped += 1
+                report_progress(position)
                 continue
-        mask_path = mask_paths.get(frame_id)
-        if mask_path is None:
-            raise KeyError(f"derived mask missing for {frame_id}")
-        workspace = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-        if workspace is None:
-            raise FileNotFoundError(mask_path)
-        workspace = workspace > 0
-        candidate_masks = masks_from_components(
-            workspace, min_area_px=args.min_area, max_instances=args.max_instances
-        )
-        source = "depth-components"
-        if sam is not None and candidate_masks:
-            candidate_masks = sam_refine(sam, frame.color_bgr, candidate_masks)
-            source = f"sam-box:{args.sam_model}"
+        if args.raw:
+            candidate_masks = (sam_automatic(sam, frame.color_bgr, args.min_area,
+                                              args.max_instances) if sam is not None else [])
+            source = f"sam-auto:{args.sam_model}" if sam is not None else "manual-raw"
+        else:
+            mask_path = mask_paths.get(frame_id)
+            if mask_path is None:
+                raise KeyError(f"derived mask missing for {frame_id}")
+            workspace = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if workspace is None:
+                raise FileNotFoundError(mask_path)
+            workspace = workspace > 0
+            candidate_masks = masks_from_components(
+                workspace, min_area_px=args.min_area, max_instances=args.max_instances
+            )
+            source = "depth-components"
+            if sam is not None and candidate_masks:
+                candidate_masks = sam_refine(sam, frame.color_bgr, candidate_masks)
+                source = f"sam-box:{args.sam_model}"
 
         objects = []
         for mask in candidate_masks:
@@ -152,12 +200,15 @@ def main() -> int:
                            [cv2.IMWRITE_PNG_COMPRESSION, 9]):
             raise OSError(f"could not write {preview_path}")
         written += 1
+        report_progress(position)
 
     run = {
         "source_session": str(args.session.resolve()),
-        "derived_masks": str(args.derived.resolve()),
-        "preprocessing_version": args.derived.name,
-        "proposal_method": f"sam-box:{args.sam_model}" if sam else "depth-components",
+        "derived_masks": str(args.derived.resolve()) if args.derived else None,
+        "preprocessing_version": args.derived.name if args.derived else "raw_rgbd",
+        "proposal_method": ((f"sam-auto:{args.sam_model}" if sam else "manual-raw")
+                            if args.raw else
+                            (f"sam-box:{args.sam_model}" if sam else "depth-components")),
         "class_id": args.class_id,
         "class_name": args.class_name,
         "min_area_px": args.min_area,

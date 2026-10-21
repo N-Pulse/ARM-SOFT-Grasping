@@ -13,7 +13,7 @@ def estimate_table_plane(depth_m: np.ndarray, intrinsics: CameraIntrinsics,
                          roi_xyxy=(0.03, 0.35, 0.97, 0.97), *,
                          min_depth_m: float = 0.10,
                          max_depth_m: float = 1.50,
-                         distance_threshold_m: float = 0.006,
+                         distance_threshold_m: float = 0.008,
                          iterations: int = 500,
                          seed: int = 0) -> tuple[float, float, float, float]:
     """Fit the dominant table plane in a depth ROI with deterministic RANSAC.

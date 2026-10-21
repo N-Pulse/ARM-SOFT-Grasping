@@ -41,6 +41,23 @@ sudo -E "$(which python)" -u tools/dataset_web.py
 python tools/dataset_web.py --source sim
 ```
 
+### Windows PowerShell
+
+Windows 不要复制 macOS 的 `sudo` 命令，也不要复制别人的 `.venv`。在仓库目录中创建本机环境：
+
+```powershell
+py -3.11 -m venv .venv
+Set-ExecutionPolicy -Scope Process Bypass
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+pip install pyrealsense2
+python tools\dataset_web.py
+```
+
+然后打开 <http://127.0.0.1:8765>。D405 应连接到 USB 3 端口，并关闭 RealSense Viewer 等占用相机的程序。如果 Windows 电脑有可用的 NVIDIA/CUDA PyTorch，Train 和 Test 页会自动显示 `NVIDIA GPU / CUDA`；否则使用 CPU。
+
 ## 2. Capture：采集 RGB-D 数据
 
 1. 填写唯一的 `Dataset name`，例如 `box_normal_light_001`。
@@ -63,11 +80,15 @@ python tools/dataset_web.py --source sim
 
 1. 选择一个 raw session。
 2. 填写版本名，例如 `table_filter_v1`。
-3. 设置 near/far depth、ROI 和桌面最小高度。
-4. 点击运行并等待 `COMPLETE`。
+3. 设置 near/far depth；按需要独立开启 `Use workspace ROI` 和 `Remove table`。
+4. 开启 ROI 时填写工作区域；开启桌面移除时填写桌面最小高度，然后点击运行并等待 `COMPLETE`。
 5. 查看 `Raw / Filtered / Mask` 三栏，逐帧确认物体没有被错误切除。
 
 不同参数应使用不同版本名。删除 preprocessing version 只移除可重建的 filtered image、mask 和配置，不删除 raw RGB-D。
+
+三种过滤可以按需组合：Depth 永远启用；ROI 和桌面移除各有独立开关。只关闭 ROI 时不会裁剪画面边缘；只关闭桌面移除时不会拟合或剔除桌面；两者都关闭时只应用 near/far Depth。
+
+桌面过滤开启时，系统默认从 session 中均匀抽取多帧并估计一个稳定平面，然后用于整个 session。如果整体估计失败，系统会尝试逐帧估计；单帧失败时沿用上一帧成功的平面；仍没有可用平面时仅应用当前启用的 Depth 和 ROI。原始照片不会因为桌面拟合失败而被删除。每帧采用的策略记录在 derived `manifest.jsonl` 的 `table_plane_source` 字段中。
 
 ## 5. Annotate：生成初始分割标注
 
@@ -80,6 +101,13 @@ python tools/dataset_web.py --source sim
 系统在原始 RGB 上保存可编辑 polygon JSON。重新生成时，`Regenerate pending proposals` 只替换尚未审核的 proposal，已批准或拒绝的决定会保留。
 
 当前每个 raw session 只保留一份 canonical annotation set；再次生成会更新该 session 的现有标注，而不是复制整套 RGB 图片。
+
+如果不希望经过 Preprocess，可在 `Preprocessing version` 中选择 `No preprocessing · Raw RGB-D`：
+
+- 配合 `MobileSAM automatic masks on Raw RGB`，MobileSAM 直接在原始 RGB 上自动提出 masks；
+- 配合 `Manual blank annotations on Raw RGB`，系统为每帧建立空标注，然后在 Review 中手动画 polygon；
+- bypass 不会创建 filtered RGB、depth mask 或其副本；原始 RGB-D 仍只保存一份；
+- 直接使用 Raw 模式时没有 depth workspace 帮助排除背景，因此通常会产生更多候选，必须认真 Review。
 
 ## 6. Review：人工修正标注
 

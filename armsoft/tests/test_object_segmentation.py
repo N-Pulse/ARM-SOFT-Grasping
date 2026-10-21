@@ -5,13 +5,17 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
+from ..data import CaptureSessionWriter
+from ..sources.base import CameraIntrinsics, RGBDFrame
 from ..object_segmentation import (
     FrameAnnotation, ObjectAnnotation, mask_to_polygon, masks_from_components,
 )
 from ..object_segmentation.export import to_yolo_lines
+from tools.annotate_object_segmentation import main as annotate_main
 
 
 class ProposalTests(unittest.TestCase):
@@ -53,6 +57,35 @@ class AnnotationTests(unittest.TestCase):
         coords = [float(item) for item in values[1:]]
         self.assertTrue(all(0 <= value <= 1 for value in coords))
         self.assertEqual(coords[:2], [0.1, 0.1])
+
+    def test_raw_bypass_creates_manual_annotations_without_derived_masks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); session = root / "raw"; output = root / "annotations"
+            intrinsics = CameraIntrinsics(8, 6, 4.0, 4.0, 4.0, 3.0)
+            frame = RGBDFrame(np.zeros((6, 8, 3), dtype=np.uint8),
+                              np.ones((6, 8), dtype=np.float32), intrinsics)
+            with CaptureSessionWriter(session, purpose="object-segmentation") as writer:
+                writer.write(frame)
+            progress = root / "progress.json"
+            with patch("sys.argv", ["annotate_object_segmentation.py", str(session),
+                                     "--raw", "--out", str(output),
+                                     "--progress-file", str(progress)]):
+                self.assertEqual(annotate_main(), 0)
+            run = __import__("json").loads((output / "annotation_run.json").read_text())
+            progress_data = __import__("json").loads(progress.read_text())
+            annotation = FrameAnnotation.load(output / "annotations" / "frame_000000.json")
+            self.assertEqual(run["preprocessing_version"], "raw_rgbd")
+            self.assertIsNone(run["derived_masks"])
+            self.assertEqual(annotation.objects, [])
+            self.assertEqual(progress_data, {"processed": 1, "total": 1,
+                                             "generated": 1, "preserved": 0})
+            with patch("sys.argv", ["annotate_object_segmentation.py", str(session),
+                                     "--raw", "--out", str(output),
+                                     "--progress-file", str(progress)]):
+                self.assertEqual(annotate_main(), 0)
+            regenerated = __import__("json").loads(progress.read_text())
+            self.assertEqual(regenerated, {"processed": 1, "total": 1,
+                                           "generated": 0, "preserved": 1})
 
 
 if __name__ == "__main__":

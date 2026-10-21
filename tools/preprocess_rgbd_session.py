@@ -40,11 +40,15 @@ def main() -> int:
     parser.add_argument("--table-plane", type=lambda s: floats(s, 4, "table plane"),
                         help="nx,ny,nz,d for n·X+d=0 in camera coordinates")
     parser.add_argument("--auto-table", action="store_true",
-                        help="fit the dominant table plane independently for every frame")
+                        help="estimate one stable table plane from multiple session frames")
     parser.add_argument("--table-roi", type=lambda s: floats(s, 4, "table ROI"),
                         default=(0.03, 0.35, 0.97, 0.97),
                         help="normalized ROI used only to fit the table plane")
     parser.add_argument("--min-table-height", type=float, default=0.005)
+    parser.add_argument("--table-distance-threshold", type=float, default=0.008,
+                        help="RANSAC table inlier tolerance in metres")
+    parser.add_argument("--table-samples", type=int, default=20,
+                        help="number of evenly spaced frames used for session-level fitting")
     args = parser.parse_args()
 
     if args.out.exists() and any(args.out.iterdir()):
@@ -55,12 +59,44 @@ def main() -> int:
     previews.mkdir(parents=True, exist_ok=True)
     if args.auto_table and args.table_plane is not None:
         raise SystemExit("choose either --auto-table or --table-plane, not both")
-    rows = iter(read_capture_session(args.session))
-    try:
-        first = next(rows)
-    except StopIteration:
+    captured = list(read_capture_session(args.session))
+    if not captured:
         raise SystemExit("capture session contains no frames")
     table_plane = args.table_plane
+    session_fit_attempts = 0
+    session_fit_successes = 0
+    if args.auto_table:
+        sample_count = max(1, min(args.table_samples, len(captured)))
+        sample_indices = np.unique(np.linspace(0, len(captured) - 1, sample_count, dtype=int))
+        candidates = []
+        session_fit_attempts = len(sample_indices)
+        for index in sample_indices:
+            source_record, frame = captured[index]
+            try:
+                candidates.append(estimate_table_plane(
+                    frame.depth_m, frame.intrinsics, args.table_roi,
+                    min_depth_m=args.min_depth, max_depth_m=args.max_depth,
+                    distance_threshold_m=args.table_distance_threshold,
+                    seed=int(source_record["source_index"]),
+                ))
+            except ValueError:
+                continue
+        session_fit_successes = len(candidates)
+        if candidates:
+            planes = np.asarray(candidates, dtype=float)
+            cosine = np.cos(np.deg2rad(8.0))
+            support = []
+            for candidate in planes:
+                aligned = (planes[:, :3] @ candidate[:3]) >= cosine
+                nearby = np.abs(planes[:, 3] - candidate[3]) <= 0.04
+                support.append(aligned & nearby)
+            inliers = support[int(np.argmax([mask.sum() for mask in support]))]
+            if int(inliers.sum()) >= min(3, len(planes)):
+                cluster = planes[inliers]
+                normal = np.median(cluster[:, :3], axis=0)
+                length = float(np.linalg.norm(normal))
+                if length > 1e-9:
+                    table_plane = (*((normal / length).tolist()), float(np.median(cluster[:, 3]) / length))
     config = DepthFilterConfig(
         min_depth_m=args.min_depth,
         max_depth_m=args.max_depth,
@@ -68,25 +104,43 @@ def main() -> int:
         table_plane=table_plane,
         min_height_above_table_m=args.min_table_height,
     )
-    (args.out / "config.json").write_text(
-        json.dumps(config.to_dict(), indent=2) + "\n", encoding="utf-8"
-    )
+    config_record = config.to_dict()
+    config_record.update({
+        "table_strategy": "session_then_previous_then_depth_roi" if args.auto_table else "fixed_or_disabled",
+        "session_table_plane": table_plane,
+        "session_fit_attempts": session_fit_attempts,
+        "session_fit_successes": session_fit_successes,
+        "table_distance_threshold_m": args.table_distance_threshold,
+    })
+    (args.out / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
 
     records = []
-    for source_record, frame in (first, *rows):
+    previous_plane = table_plane
+    fallback_counts = {"session": 0, "fixed": 0, "frame": 0, "previous": 0, "depth_roi": 0}
+    for source_record, frame in captured:
         frame_config = config
         fitted_plane = table_plane
+        plane_source = ("session" if args.auto_table else "fixed") if table_plane is not None else "depth_roi"
         if args.auto_table:
-            fitted_plane = estimate_table_plane(
-                frame.depth_m, frame.intrinsics, args.table_roi,
-                min_depth_m=args.min_depth, max_depth_m=args.max_depth,
-                seed=int(source_record["source_index"]),
-            )
+            if table_plane is None:
+                try:
+                    fitted_plane = estimate_table_plane(
+                        frame.depth_m, frame.intrinsics, args.table_roi,
+                        min_depth_m=args.min_depth, max_depth_m=args.max_depth,
+                        distance_threshold_m=args.table_distance_threshold,
+                        seed=int(source_record["source_index"]),
+                    )
+                    previous_plane = fitted_plane
+                    plane_source = "frame"
+                except ValueError:
+                    fitted_plane = previous_plane
+                    plane_source = "previous" if previous_plane is not None else "depth_roi"
             frame_config = DepthFilterConfig(
                 min_depth_m=args.min_depth, max_depth_m=args.max_depth,
                 roi_xyxy=args.roi, table_plane=fitted_plane,
                 min_height_above_table_m=args.min_table_height,
             )
+        fallback_counts[plane_source] += 1
         filtered, mask = apply_depth_filter(
             frame.color_bgr, frame.depth_m, frame_config, frame.intrinsics,
             dim_background=True,
@@ -109,12 +163,14 @@ def main() -> int:
             "preview": preview_rel.as_posix(),
             "kept_fraction": float(mask.mean()),
             "table_plane": fitted_plane,
+            "table_plane_source": plane_source,
         })
 
     with (args.out / "manifest.jsonl").open("w", encoding="utf-8") as stream:
         for record in records:
             stream.write(json.dumps(record, sort_keys=True) + "\n")
     print(f"[preprocess] wrote {len(records)} derived frame(s) to {args.out}")
+    print(f"[preprocess] table strategy counts: {json.dumps(fallback_counts, sort_keys=True)}")
     return 0
 
 

@@ -18,6 +18,20 @@ from armsoft.sources.base import RGBDFrame
 
 ROOT=Path(__file__).resolve().parents[1]; WEB=ROOT/"web/dataset-console"; SAFE=re.compile(r"^(?!\.{1,2}$)(?!\.)[\w.-]{1,80}$")
 MAX_REQUEST_BYTES=1024*1024
+def sudo_owner():
+    """Return the invoking Unix user IDs, or None on Windows/non-sudo runs."""
+    if os.name!="posix" or not hasattr(os,"geteuid") or os.geteuid()!=0 or not os.environ.get("SUDO_UID"): return None
+    uid=int(os.environ["SUDO_UID"]); return uid,int(os.environ.get("SUDO_GID",uid))
+
+def compute_devices(recommended=False):
+    devices=[{"id":"cpu","label":"CPU (compatible, slower)" if recommended else "CPU"}]
+    try:
+        import torch
+        if torch.cuda.is_available(): devices.insert(0,{"id":"cuda:0","label":"NVIDIA GPU / CUDA (recommended)"})
+        elif sys.platform=="darwin" and torch.backends.mps.is_available(): devices.insert(0,{"id":"mps","label":"Apple GPU / MPS (recommended)" if recommended else "Apple GPU / MPS"})
+    except (ImportError,AttributeError): pass
+    return devices
+
 def jpeg(im):
     ok, data=cv2.imencode(".jpg", im, [cv2.IMWRITE_JPEG_QUALITY,86])
     if not ok: raise RuntimeError("JPEG encoding failed")
@@ -82,18 +96,23 @@ class State:
             self.last_capture=None
             self.last_saved_signature=None
     def finish(self):
+        completed_name=None
         with self.lock:
             if self.job:
+                completed_name=self.job["name"]
                 self.last_capture=dict(self.job)
                 self.last_capture["state"]="completed" if self.job["saved"]>=self.job["target"] else "stopped"
                 self.last_capture["progress"]=self.job["saved"]/self.job["target"]
             if self.writer: self.writer.close()
-            if self.job and os.geteuid()==0 and os.environ.get("SUDO_UID"):
-                uid=int(os.environ["SUDO_UID"]); gid=int(os.environ.get("SUDO_GID",uid)); root=self.root/self.job["name"]
+            owner=sudo_owner()
+            if self.job and owner:
+                uid,gid=owner; root=self.root/self.job["name"]
                 for path in [root,*root.rglob("*")]:
                     try: os.chown(path,uid,gid)
                     except OSError: pass
             self.writer=None; self.job=None
+        if completed_name:
+            subprocess.run([sys.executable,str(ROOT/"tools"/"build_data_catalog.py"),"--data-root",str(self.root.parents[1])],capture_output=True)
     def status(self):
         with self.lock:
             job=dict(self.job) if self.job else None
@@ -177,12 +196,14 @@ class State:
         source=(self.root/name).resolve(); data_root=self.root.parents[1]; output=data_root/"derived"/"object"/name/version
         if self.root not in source.parents or not (source/"session.json").is_file(): raise ValueError("Session not found")
         if output.exists() and any(output.iterdir()): raise ValueError("This derived version already exists; choose a new version name")
-        minimum=float(data.get("min_depth",.1)); maximum=float(data.get("max_depth",1.5)); height=float(data.get("min_table_height",.015)); roi=str(data.get("roi","0.15,0.25,0.85,0.80"))
-        if not .01<=minimum<maximum<=10 or not 0<=height<=1: raise ValueError("Invalid depth or table-height settings")
+        minimum=float(data.get("min_depth",.1)); maximum=float(data.get("max_depth",1.5)); height=float(data.get("min_table_height",.015))
+        use_roi=bool(data.get("use_roi",True)); roi=str(data.get("roi","0.15,0.25,0.85,0.80"))
+        if not .001<=minimum<maximum<=10 or not 0<=height<=1: raise ValueError("Invalid depth or table-height settings")
         with self.lock:
             if self.preprocess_job and self.preprocess_job["state"]=="running": raise ValueError("Preprocessing is already running")
             self.preprocess_job={"state":"running","session":name,"version":version,"error":"","started":time.time()}
-        command=[sys.executable,str(ROOT/"tools"/"preprocess_rgbd_session.py"),str(source),"--out",str(output),"--min-depth",str(minimum),"--max-depth",str(maximum),"--roi",roi,"--min-table-height",str(height)]
+        command=[sys.executable,str(ROOT/"tools"/"preprocess_rgbd_session.py"),str(source),"--out",str(output),"--min-depth",str(minimum),"--max-depth",str(maximum),"--min-table-height",str(height)]
+        if use_roi: command.extend(["--roi",roi])
         if bool(data.get("auto_table",True)): command.append("--auto-table")
         threading.Thread(target=self._run_preprocess,args=(command,output),daemon=True).start()
         return dict(self.preprocess_job)
@@ -193,14 +214,18 @@ class State:
         with self.lock:
             self.preprocess_job["state"]="complete" if returncode==0 else "failed"
             self.preprocess_job["error"]=(stderr or stdout).strip() if returncode else ""
+            self.preprocess_job["details"]=stdout.strip()
             self.preprocess_job["finished"]=time.time(); self.preprocess_process=None
         if returncode==0:
-            if os.geteuid()==0 and os.environ.get("SUDO_UID"):
-                uid=int(os.environ["SUDO_UID"]); gid=int(os.environ.get("SUDO_GID",uid))
+            owner=sudo_owner()
+            if owner:
+                uid,gid=owner
                 for path in [output,*output.rglob("*")]:
                     try: os.chown(path,uid,gid)
                     except OSError: pass
             subprocess.run([sys.executable,str(ROOT/"tools"/"build_data_catalog.py"),"--data-root",str(self.root.parents[1])],capture_output=True)
+        elif output.exists():
+            shutil.rmtree(output)
     def preprocess_status(self):
         with self.lock: return dict(self.preprocess_job) if self.preprocess_job else {"state":"idle"}
     def derived_result(self,name,version):
@@ -227,8 +252,8 @@ class State:
         annotation_run=data/"annotations"/"object_segmentation"/name/"annotation_run.json"
         if annotation_run.is_file():
             try:
-                source=Path(json.loads(annotation_run.read_text(encoding="utf-8")).get("derived_masks","")).resolve()
-                if source==target: raise ValueError("This version is used by saved annotations and cannot be deleted")
+                source_value=json.loads(annotation_run.read_text(encoding="utf-8")).get("derived_masks")
+                if source_value and Path(source_value).resolve()==target: raise ValueError("This version is used by saved annotations and cannot be deleted")
             except json.JSONDecodeError: pass
         shutil.rmtree(target)
         subprocess.run([sys.executable,str(ROOT/"tools"/"build_data_catalog.py"),"--data-root",str(data)],capture_output=True)
@@ -238,15 +263,21 @@ class State:
         if not SAFE.fullmatch(name) or not SAFE.fullmatch(version): raise ValueError("Invalid session or preprocessing version")
         if method not in {"depth","mobile_sam"}: raise ValueError("Unknown annotation method")
         source=(self.root/name).resolve(); data_root=self.root.parents[1]
-        derived=(data_root/"derived"/"object"/name/version).resolve()
+        raw_bypass=version=="__raw__"
+        derived=(data_root/"derived"/"object"/name/version).resolve() if not raw_bypass else None
         output=(data_root/"annotations"/"object_segmentation"/name).resolve()
         if self.root not in source.parents or not (source/"session.json").is_file(): raise ValueError("Session not found")
-        if not (derived/"manifest.jsonl").is_file(): raise ValueError("Run preprocessing for this session first")
+        if not raw_bypass and not (derived/"manifest.jsonl").is_file(): raise ValueError("Run preprocessing for this session first, or choose Raw RGB-D")
         class_id=int(data.get("class_id",0)); class_name=str(data.get("class_name","object")).strip()
         min_area=int(data.get("min_area",500)); max_instances=int(data.get("max_instances",20))
         if class_id<0 or not SAFE.fullmatch(class_name): raise ValueError("Invalid class id or class name")
         if not 1<=min_area<=10000000 or not 1<=max_instances<=100: raise ValueError("Invalid proposal settings")
-        command=[sys.executable,str(ROOT/"tools"/"annotate_object_segmentation.py"),str(source),"--derived",str(derived),"--out",str(output),"--class-id",str(class_id),"--class-name",class_name,"--min-area",str(min_area),"--max-instances",str(max_instances)]
+        command=[sys.executable,str(ROOT/"tools"/"annotate_object_segmentation.py"),str(source),"--out",str(output),"--class-id",str(class_id),"--class-name",class_name,"--min-area",str(min_area),"--max-instances",str(max_instances)]
+        command.extend(["--raw"] if raw_bypass else ["--derived",str(derived)])
+        progress_file=output/".annotation_progress.json"
+        try: progress_file.unlink()
+        except FileNotFoundError: pass
+        command.extend(["--progress-file",str(progress_file)])
         model=data_root/"models"/"annotation"/"mobile_sam.pt"
         if method=="mobile_sam":
             if not model.is_file(): raise ValueError(f"MobileSAM model not found: {model}")
@@ -255,20 +286,30 @@ class State:
         total=len(list((source/"color").glob("frame_*.png")))
         with self.lock:
             if self.annotation_job and self.annotation_job["state"]=="running": raise ValueError("Annotation is already running")
-            self.annotation_job={"state":"running","session":name,"version":version,"method":method,"output":str(output),"total":total,"error":"","started":time.time()}
+            self.annotation_job={"state":"running","session":name,"version":"raw_rgbd" if raw_bypass else version,"method":method,"output":str(output),"progress_file":str(progress_file),"completed":0,"generated":0,"preserved":0,"total":total,"error":"","started":time.time()}
         threading.Thread(target=self._run_annotation,args=(command,output),daemon=True).start()
         return self.annotation_status()
     def _run_annotation(self,command,output):
         process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         with self.lock: self.annotation_process=process
         stdout,stderr=process.communicate(); returncode=process.returncode
+        progress={}
+        progress_file=output/".annotation_progress.json"
+        try: progress=json.loads(progress_file.read_text(encoding="utf-8"))
+        except (OSError,json.JSONDecodeError): pass
+        try: progress_file.unlink()
+        except FileNotFoundError: pass
         with self.lock:
             self.annotation_job["state"]="complete" if returncode==0 else "failed"
             self.annotation_job["error"]=(stderr or stdout).strip() if returncode else ""
+            self.annotation_job["completed"]=int(progress.get("processed",self.annotation_job.get("completed",0)))
+            self.annotation_job["generated"]=int(progress.get("generated",self.annotation_job.get("generated",0)))
+            self.annotation_job["preserved"]=int(progress.get("preserved",self.annotation_job.get("preserved",0)))
             self.annotation_job["finished"]=time.time(); self.annotation_process=None
         if returncode==0:
-            if os.geteuid()==0 and os.environ.get("SUDO_UID"):
-                uid=int(os.environ["SUDO_UID"]); gid=int(os.environ.get("SUDO_GID",uid))
+            owner=sudo_owner()
+            if owner:
+                uid,gid=owner
                 for path in [output,*output.rglob("*")]:
                     try: os.chown(path,uid,gid)
                     except OSError: pass
@@ -277,7 +318,15 @@ class State:
         with self.lock:
             if not self.annotation_job: return {"state":"idle"}
             job=dict(self.annotation_job)
-        output=Path(job["output"]); job["completed"]=len(list((output/"previews").glob("frame_*.png")))
+        progress_file=Path(job.get("progress_file",""))
+        if progress_file.is_file():
+            try:
+                progress=json.loads(progress_file.read_text(encoding="utf-8"))
+                job["completed"]=int(progress.get("processed",0)); job["generated"]=int(progress.get("generated",0)); job["preserved"]=int(progress.get("preserved",0))
+                with self.lock:
+                    if self.annotation_job:
+                        self.annotation_job.update({key:job[key] for key in ("completed","generated","preserved")})
+            except (OSError,json.JSONDecodeError,TypeError,ValueError): pass
         job["progress"]=job["completed"]/job["total"] if job["total"] else 0
         return job
     def annotation_result(self,name):
@@ -295,7 +344,7 @@ class State:
         run_data=json.loads(run.read_text(encoding="utf-8"))
         run_data.setdefault("preprocessing_version",Path(run_data.get("derived_masks","")).name or "unknown")
         method=run_data.get("proposal_method","depth-components")
-        run_data["method_label"]="MobileSAM + depth proposals" if method.startswith("sam-box:") else "Depth components only"
+        run_data["method_label"]=("MobileSAM automatic masks on Raw RGB" if method.startswith("sam-auto:") else "Manual annotation on Raw RGB" if method=="manual-raw" else "MobileSAM + depth proposals" if method.startswith("sam-box:") else "Depth components only")
         return {"session":name,"run":run_data,"frames":frames,"states":states,"objects":objects}
 
     def annotation_delete(self,name,confirmation):
@@ -359,8 +408,9 @@ class State:
         if image is None: raise ValueError("Raw image cannot be read")
         preview=annotation_root/"previews"/frame; preview.parent.mkdir(parents=True,exist_ok=True)
         if not cv2.imwrite(str(preview),draw_annotation_preview(image,objects),[cv2.IMWRITE_PNG_COMPRESSION,9]): raise ValueError("Preview could not be saved")
-        if os.geteuid()==0 and os.environ.get("SUDO_UID"):
-            uid=int(os.environ["SUDO_UID"]); gid=int(os.environ.get("SUDO_GID",uid))
+        owner=sudo_owner()
+        if owner:
+            uid,gid=owner
             for item in (path,preview):
                 try: os.chown(item,uid,gid)
                 except OSError: pass
@@ -440,8 +490,9 @@ class State:
             (stage/"manifest.json").write_text(json.dumps(metadata,indent=2)+"\n",encoding="utf-8"); os.replace(stage,destination)
         except Exception:
             shutil.rmtree(stage,ignore_errors=True); raise
-        if os.geteuid()==0 and os.environ.get("SUDO_UID"):
-            uid=int(os.environ["SUDO_UID"]); gid=int(os.environ.get("SUDO_GID",uid))
+        owner=sudo_owner()
+        if owner:
+            uid,gid=owner
             for path in [destination,*destination.rglob("*")]:
                 try: os.chown(path,uid,gid)
                 except OSError: pass
@@ -466,12 +517,7 @@ class State:
 
     def training_inputs(self):
         exports=self.dataset_exports()["exports"]
-        devices=[{"id":"cpu","label":"CPU (compatible, slower)"}]
-        if sys.platform=="darwin":
-            try:
-                import torch
-                if torch.backends.mps.is_available(): devices.insert(0,{"id":"mps","label":"Apple GPU / MPS (recommended)"})
-            except (ImportError,AttributeError): pass
+        devices=compute_devices(recommended=True)
         return {"datasets":exports,"models":[
             {"id":"yolo11n-seg.pt","label":"YOLO11n Seg · fastest"},
             {"id":"yolo11s-seg.pt","label":"YOLO11s Seg · more accurate"},
@@ -485,7 +531,7 @@ class State:
         dataset=str(data.get("dataset","")); run_name=str(data.get("run_name","")); model=str(data.get("model","")); device=str(data.get("device","cpu"))
         if not SAFE.fullmatch(dataset) or not SAFE.fullmatch(run_name): raise ValueError("Dataset and run names may only contain letters, numbers, dots, dashes, and underscores")
         if model not in {"yolo11n-seg.pt","yolo11s-seg.pt","yolo11m-seg.pt"}: raise ValueError("Choose one of the supported YOLO segmentation checkpoints")
-        if device not in {"cpu","mps"}: raise ValueError("Choose CPU or Apple GPU / MPS")
+        if device not in {item["id"] for item in compute_devices()}: raise ValueError("Choose an available compute device")
         try: epochs=int(data.get("epochs",100)); imgsz=int(data.get("imgsz",640)); batch=int(data.get("batch",8))
         except (TypeError,ValueError): raise ValueError("Epochs, image size, and batch must be whole numbers")
         if not 1<=epochs<=10000: raise ValueError("Epochs must be between 1 and 10000")
@@ -521,8 +567,9 @@ class State:
             with self.lock:
                 self.training_job["state"]="failed"; self.training_job["error"]=str(exc); self.training_job["finished_utc"]=datetime.now().astimezone().isoformat(); self.training_process=None
         finally:
-            if run_dir.exists() and os.geteuid()==0 and os.environ.get("SUDO_UID"):
-                uid=int(os.environ["SUDO_UID"]); gid=int(os.environ.get("SUDO_GID",uid))
+            owner=sudo_owner()
+            if run_dir.exists() and owner:
+                uid,gid=owner
                 for path in [run_dir,*run_dir.rglob("*")]:
                     try: os.chown(path,uid,gid)
                     except OSError: pass
@@ -593,18 +640,13 @@ class State:
         runs=[]
         for run in self.training_runs()["runs"]:
             if run.get("complete") and run.get("best_weights"): runs.append({"name":run["name"],"model":run.get("base_model"),"dataset":run.get("dataset")})
-        devices=[{"id":"cpu","label":"CPU"}]
-        if sys.platform=="darwin":
-            try:
-                import torch
-                if torch.backends.mps.is_available(): devices.insert(0,{"id":"mps","label":"Apple GPU / MPS"})
-            except (ImportError,AttributeError): pass
+        devices=compute_devices()
         return {"runs":runs,"devices":devices,"camera_connected":self.connected}
 
     def test_start(self,data):
         run_name=str(data.get("run_name","")); device=str(data.get("device","cpu"))
         if not SAFE.fullmatch(run_name): raise ValueError("Select a completed training run")
-        if device not in {"cpu","mps"}: raise ValueError("Choose a supported inference device")
+        if device not in {item["id"] for item in compute_devices()}: raise ValueError("Choose an available inference device")
         try: imgsz=int(data.get("imgsz",416)); confidence=float(data.get("confidence",.25)); target_fps=float(data.get("target_fps",10))
         except (TypeError,ValueError): raise ValueError("Invalid live-test settings")
         if not 128<=imgsz<=1280 or imgsz%32: raise ValueError("Image size must be a multiple of 32 between 128 and 1280")
@@ -700,8 +742,9 @@ class State:
             self.failure_last_signature=signature
             if self.test_job: self.test_job["failure_saved"]=self.test_job.get("failure_saved",0)+1
             saved=self.test_job.get("failure_saved",count+1) if self.test_job else count+1
-        if os.geteuid()==0 and os.environ.get("SUDO_UID"):
-            uid=int(os.environ["SUDO_UID"]); gid=int(os.environ.get("SUDO_GID",uid))
+        owner=sudo_owner()
+        if owner:
+            uid,gid=owner
             for path in [target,*target.rglob("*")]:
                 try: os.chown(path,uid,gid)
                 except OSError: pass
@@ -792,7 +835,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not isinstance(d,dict): raise ValueError("JSON request body must be an object")
             if self.path=="/api/config":
                 lo,hi=float(d["min_depth"]),float(d["max_depth"])
-                if not .01<=lo<hi<=10: raise ValueError("Depth range is invalid")
+                if not .001<=lo<hi<=10: raise ValueError("Depth range is invalid")
                 with self.state.lock: self.state.config={"min_depth":lo,"max_depth":hi}
             elif self.path=="/api/capture/start": self.state.begin(str(d.get("name") or datetime.now().strftime("object_%Y%m%d_%H%M%S")),int(d.get("frames",100)),int(d.get("every",3)),str(d.get("notes","")))
             elif self.path=="/api/capture/stop": self.state.finish()

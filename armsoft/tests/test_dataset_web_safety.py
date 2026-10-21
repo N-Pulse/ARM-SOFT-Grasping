@@ -6,11 +6,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from armsoft.object_segmentation.annotations import FrameAnnotation
-from armsoft.sources.base import CameraIntrinsics
+from armsoft.sources.base import CameraIntrinsics, RGBDFrame
 from tools.dataset_web import State
 
 
@@ -104,6 +105,37 @@ class DatasetWebSafetyTests(unittest.TestCase):
         self.assertFalse(first["skipped_similar"])
         self.assertTrue(second["skipped_similar"])
         self.assertEqual(len(list((self.capture / first["session"] / "color").glob("*.png"))), 1)
+
+    def test_finishing_capture_rebuilds_catalog(self):
+        intrinsics = CameraIntrinsics(4, 3, 2.0, 2.0, 2.0, 1.5)
+        frame = RGBDFrame(np.zeros((3, 4, 3), dtype=np.uint8), np.ones((3, 4), dtype=np.float32), intrinsics)
+        self.state.begin("new_session", 1, 1, "catalog refresh test")
+        self.state.writer.write(frame)
+        self.state.job["saved"] = 1
+        self.state.finish()
+        catalog = json.loads((self.data / "catalog" / "index.json").read_text())
+        self.assertIn("new_session", [session["id"] for session in catalog["sessions"]])
+
+    def test_preprocess_roi_and_table_filters_can_be_disabled_independently(self):
+        session = self.capture / "demo"; session.mkdir(); (session / "session.json").write_text("{}")
+        with patch("tools.dataset_web.threading.Thread") as thread:
+            self.state.preprocess_start({
+                "session": "demo", "version": "depth_only",
+                "use_roi": False, "auto_table": False,
+            })
+        command = thread.call_args.kwargs["args"][0]
+        self.assertNotIn("--roi", command)
+        self.assertNotIn("--auto-table", command)
+
+        state = State("sim", self.capture)
+        with patch("tools.dataset_web.threading.Thread") as thread:
+            state.preprocess_start({
+                "session": "demo", "version": "all_filters",
+                "use_roi": True, "roi": "0.1,0.2,0.8,0.9", "auto_table": True,
+            })
+        command = thread.call_args.kwargs["args"][0]
+        self.assertEqual(command[command.index("--roi") + 1], "0.1,0.2,0.8,0.9")
+        self.assertIn("--auto-table", command)
 
 
 if __name__ == "__main__":

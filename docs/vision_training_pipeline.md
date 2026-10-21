@@ -99,11 +99,11 @@ armsoft/preprocessing/depth_filter.py
 
 建议第一版根据工作空间设置 `min_depth_m` 和 `max_depth_m`。后续可添加桌面平面消除、ROI、多帧 temporal filtering，但必须保留原始 session，通过配置可重复生成结果。
 
-当前 depth preprocessing 分支已经支持三个可以组合的过滤条件：
+当前 depth preprocessing 分支已经支持三个可以组合的过滤条件。Web 中 Depth 始终启用，ROI 与 table plane 可分别开启或关闭：
 
 1. near/far distance：保留指定相机距离；
 2. normalized ROI：用 `x1,y1,x2,y2` 限制画面工作区域；
-3. table plane：用 `nx,ny,nz,d` 和最小离桌高度去掉桌面及桌面下方点。
+3. table plane：优先从整个 session 的多帧估计稳定的 `nx,ny,nz,d`，再用最小离桌高度去掉桌面及桌面下方点。整体估计失败时按“当前帧拟合 → 上一帧平面 → 仅 Depth + ROI”降级，不删除原始帧。
 
 先用三栏实时画面检查参数（RAW / FILTERED / MASK，按 `Q` 退出）：
 
@@ -241,6 +241,7 @@ Branch 是一条代码开发线；workflow 是从采集、标注、训练、评�
 - 机械手：橙色指尖候选 + 17 点人工修正 + YOLO-Pose export；
 - annotation 工具保存版本和可见性，不只保存渲染后的图片。
 - **当前状态**：物品 mask proposal 的 Web 批处理、进度、结果预览和逐帧 Review 已完成；重新生成只覆盖 pending proposal，保留 approved/rejected 决定。Review 可重命名、删除或手动画 polygon，并重新生成 preview。
+- Annotation 也支持 `Raw RGB-D` bypass：MobileSAM 可直接在原始 RGB 上自动提议 mask，或创建空标注供 Review 手绘；该路径不创建 preprocessing 副本。
 
 ### Phase 4 — Model training
 

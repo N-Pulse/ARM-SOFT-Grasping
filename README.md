@@ -1,5 +1,13 @@
 # ARM-SOFT Grasping — standalone model
 
+## Point-cloud experiment branch
+
+`feature/point-cloud-pipeline` adds a portable RGB-D → coloured point-cloud
+pipeline for the D405, simulator, and recorded capture sessions. It supports
+optional depth/ROI/table filtering, voxel downsampling, statistical outlier
+removal, Open3D live viewing, and reproducible PLY export. See
+[`docs/point_cloud_pipeline.md`](docs/point_cloud_pipeline.md).
+
 ## Dataset Studio (local web capture)
 
 The web UI displays the D405 RGB feed, depth-filtered preview, mask, capture progress, and previous sessions. Run from this branch:

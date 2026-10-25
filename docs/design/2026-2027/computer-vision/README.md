@@ -147,7 +147,16 @@ No target produces `no_object` and an empty object list. Camera loss produces `c
 
 ### 3.3 Functionally linked systems
 
-Mechanical supports the chest mount and enclosure; Electronics supports power and USB validation. The computer powers UNO Q; D405 connects to UNO Q for data. Exact hub/cabling is unverified. Final ARM/Firmware transport and camera-to-arm transformation are deferred.
+A custom CAD GoPro adapter secures the Intel RealSense D405 and the Arduino UNO Q to the chest harness (linked below). The autonomous power system design is currently deferred. Instead, a USB-C hub bridges data between the camera and the Arduino, with power supplied externally via a PC or a standard wall charger
+
+#### List of the components to buy :
+- [Chest mounted harness](https://www.amazon.de/Suptig-Brusthalterung-verstellbarer-atmungsaktives-Action-Kameras/dp/B09KC62W7X/ref=sr_1_1_sspa?__mk_de_DE=%C3%85M%C3%85%C5%BD%C3%95%C3%91&crid=4QK87L9DQDNM&dib=eyJ2IjoiMSJ9.Oa7RsA8bUy_3G8kHURByBiI3whv6C1-5nPuNNo5GHwXZI0ae2cISr-JVY9qpDIcIccncrfvzYQ8uPRTAbZH8Yme1c6N89nVLW4kPbk85xp0P5m9G3G9BYjZGNoGxInEkdI5L9a97O6qpw_vmIfk7Q1CE91_RqL5guT8-I0ZHljo6UiQ4w9MVdMPGHmjr5xi5mxbdbWXSmBA6C1qHkwFjHZv6ZmGsW4mC9EIC_Yox06U.gtdpt7P4S76pLWJQmqQO0Dsu9tYt5qVQIe3VJJ14yUg&dib_tag=se&keywords=chest+harness+gopro&qid=1792415002&sprefix=chest+harness+gopro%2Caps%2C143&sr=8-1-spons&aref=JtzVvrsXzJ&sp_csd=d2lkZ2V0TmFtZT1zcF9hdGY&psc=1)
+- [USB-Hub for powering the system](https://www.amazon.de/Anker-Display-MacBook-Thinkpad-Laptops-Black/dp/B0BQLLB61B/ref=sr_1_1?dib=eyJ2IjoiMSJ9.dowrEZn64Jdnl-KCCi9y7soZy3MpEGTpfJ4sNuqUW4HlNS8VI_NXLkMmaGLtH4cNIfcv5hbz0sAhyAqWP1wDGDJ936PwvUncAs9Mp6ba7BsYAf1NZoGlFMwovj15cVo65MM30OJ0TdfRx-jUwNzFyZrMUVOlPNGrrIbfXGlcsRmIaHVK4JN9r7ftAZCHDiXATPJK8ERQ7W13Dvz4mHkrr06fHwcd7nqUcjthuFQqP18.zl1sXgO-qLoDFOrSJ_22GFRD9BIXSzeiIhpobccImz4&dib_tag=se&keywords=Anker%2B332%2BUSB-C%2BHub%2B(5-en-1)&qid=1790333990&sr=8-1&th=1)
+#### 3D printed model of the Gopro adaptater for the D405
+
+[3D printed gopro adaptater](https://github.com/user-attachments/assets/8e8edf0c-fffd-4498-a2f4-040edb23ba42)
+
+
 
 ### 3.4 Performance budgets and design margins
 

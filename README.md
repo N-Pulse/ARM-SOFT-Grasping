@@ -1,5 +1,86 @@
 # ARM-SOFT Grasping — standalone model
 
+## Dataset Studio (local web capture)
+
+The web UI displays the D405 RGB feed, depth-filtered preview, mask, capture progress, and previous sessions. Run from this branch:
+
+```bash
+python tools/dataset_web.py
+```
+
+If macOS camera access requires elevated privileges, keep the active virtual
+environment and run `sudo -E "$(which python)" -u tools/dataset_web.py`.
+
+Open <http://127.0.0.1:8765>. Press `Ctrl+C` in the terminal to stop. The Studio now covers capture, preprocessing, assisted annotation, manual review, session-safe YOLO Seg export, monitored YOLO training, and live testing of trained models with RGB-D distance measurements. Training is enabled after a valid dataset has been exported from the Dataset page; Live Test becomes available after a training run produces `best.pt`. During a live test, labelled failure cases can be collected into one deduplicated RGB-D session and sent back through the same preprocessing and review workflow.
+
+All worktrees share one data root at `../ARM-SOFT-data` by default. Override it with
+`ARM_SOFT_DATA_ROOT` or `--data-root`. The capture UI skips near-identical consecutive
+frames and restores ownership to the invoking macOS user after a sudo camera session.
+See [docs/dataset_studio_user_guide.md](docs/dataset_studio_user_guide.md) for the complete workflow, storage layout, deletion order, and troubleshooting guide.
+
+On native Windows PowerShell, create a fresh local virtual environment (do not
+copy `.venv` from macOS/Linux), install `requirements.txt` plus
+`pyrealsense2`, and start with `python tools\dataset_web.py`. No administrator
+or `sudo` launch is required. The Studio automatically offers NVIDIA CUDA when
+the installed PyTorch build reports an available GPU; otherwise CPU remains
+available. Full commands are in the user guide above.
+
+> **Branch: `independent-cv` — stable RGB-D grasping baseline.**  This is the
+> integration base for camera capture, object isolation, cylinder/cuboid
+> fitting and grasp generation. Human MediaPipe experiments live on
+> `feature/mediapipe-actions`; mechanical-hand annotation and YOLO Pose work
+> live on `feature/mechanical-hand-pose`.
+
+The shared dataset/training architecture, capture contract, assisted-labeling
+flows and branch plan are documented in
+[`docs/vision_training_pipeline.md`](docs/vision_training_pipeline.md).
+
+To create a raw RGB-D training session without running grasp inference:
+
+```bash
+python tools/collect_rgbd_dataset.py --source camera \
+  --purpose mechanical-hand-pose --frames 300 \
+  --out datasets/captures/hand_session_001
+
+# Create masks/previews without modifying the raw capture
+python tools/preprocess_rgbd_session.py datasets/captures/hand_session_001 \
+  --out datasets/captures/hand_session_001/derived/depth_v1 \
+  --min-depth 0.10 --max-depth 0.80 --roi 0.1,0.1,0.9,0.9
+
+# Preview the same filter live before exporting a complete session (Q to quit)
+python tools/preview_depth_filter.py --source camera \
+  --min-depth 0.10 --max-depth 0.80 --roi 0.1,0.1,0.9,0.9
+
+# Generate object segmentation proposals from a processed session
+python tools/annotate_object_segmentation.py datasets/captures/object_session_001 \
+  --derived datasets/captures/object_session_001/derived/depth_v1 \
+  --out datasets/object_segmentation/object_session_001
+```
+
+## Quick start
+
+```bash
+# First setup on macOS/Linux
+bash setup_env.sh
+source .venv/bin/activate
+
+# Verify the complete portable pipeline
+python -m armsoft.tests.selftest
+
+# Run end-to-end without a camera
+python -m armsoft --source sim --frames 10
+
+# Check whether a RealSense camera is available
+python -c "from armsoft import camera_available; print(camera_available())"
+
+# Live D405 preview when the SDK and camera are available
+python tools/live_preview.py
+```
+
+On macOS, the simulator and replay paths work normally, but a live D405 needs
+`librealsense` with Python bindings built locally. Windows and Linux can use
+the official `pyrealsense2` package.
+
 Vision-based grasp planning for the **n-pulse** soft robotic hand.
 
 One aligned RGB-D frame goes in; the shape of the object, a grasp pose and the

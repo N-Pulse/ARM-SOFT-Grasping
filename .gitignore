@@ -6,12 +6,23 @@ vendor/usr/
 
 __pycache__/
 *.py[cod]
+.DS_Store
 
 # run artefacts
 *.jsonl
 *.npz
 preview*.png
 rec/
+runs/
+mobile_sam.pt
+
+# Local training data: keep only the documented directory skeleton in Git.
+datasets/captures/*
+!datasets/captures/.gitkeep
+datasets/object_segmentation/*
+!datasets/object_segmentation/.gitkeep
+datasets/mechanical_hand_pose/*
+!datasets/mechanical_hand_pose/.gitkeep
 
 # training/ — datasets, runs and weights are large and reproducible
 training/.venv-download/

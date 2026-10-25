@@ -37,6 +37,21 @@ def jpeg(im):
     if not ok: raise RuntimeError("JPEG encoding failed")
     return data.tobytes()
 
+def box_core_depth(depth,box,fraction=.5):
+    """Return box centre (u,v) and median valid depth of its central part, so background at the edges is ignored."""
+    x1,y1,x2,y2=(float(c) for c in box); u=(x1+x2)/2; v=(y1+y2)/2
+    hw=max(.5,(x2-x1)*fraction/2); hh=max(.5,(y2-y1)*fraction/2); height,width=depth.shape[:2]
+    core=depth[max(0,int(v-hh)):min(height,int(v+hh)+1),max(0,int(u-hw)):min(width,int(u+hw)+1)]
+    valid=core[np.isfinite(core)&(core>0)]
+    return u,v,(float(np.median(valid)) if valid.size else None)
+
+def live_object(names,boxes,index,u,v,z,intrinsics):
+    """Live-test record for one detection at pixel (u,v) with depth z in metres (None if unknown)."""
+    class_id=int(boxes.cls[index].item()) if boxes is not None and index<len(boxes) else 0; score=float(boxes.conf[index].item()) if boxes is not None and index<len(boxes) else 0.0
+    xyz=[(u-intrinsics.cx)*z/intrinsics.fx,(v-intrinsics.cy)*z/intrinsics.fy,z] if z is not None else None
+    class_name=names.get(class_id,class_id) if isinstance(names,dict) else names[class_id]
+    return {"class_id":class_id,"class_name":str(class_name),"confidence":round(score,4),"distance_m":round(z,4) if z is not None else None,"xyz_m":[round(x,4) for x in xyz] if xyz else None}
+
 def draw_annotation_preview(image,objects):
     preview=image.copy(); overlay=image.copy()
     for index,obj in enumerate(objects):
@@ -685,10 +700,11 @@ class State:
                     object_mask=np.zeros(depth.shape,dtype=np.uint8); cv2.fillPoly(object_mask,[points],1)
                     valid=(object_mask>0)&np.isfinite(depth)&(depth>0); z=float(np.median(depth[valid])) if valid.any() else None
                     moments=cv2.moments(points); u=float(moments["m10"]/moments["m00"]) if moments["m00"] else float(points[:,0].mean()); v=float(moments["m01"]/moments["m00"]) if moments["m00"] else float(points[:,1].mean())
-                    class_id=int(boxes.cls[index].item()) if boxes is not None and index<len(boxes) else 0; score=float(boxes.conf[index].item()) if boxes is not None and index<len(boxes) else 0.0
-                    xyz=[(u-intrinsics.cx)*z/intrinsics.fx,(v-intrinsics.cy)*z/intrinsics.fy,z] if z is not None else None
-                    class_name=result.names.get(class_id,class_id) if isinstance(result.names,dict) else result.names[class_id]
-                    objects.append({"class_id":class_id,"class_name":str(class_name),"confidence":round(score,4),"distance_m":round(z,4) if z is not None else None,"xyz_m":[round(x,4) for x in xyz] if xyz else None})
+                    objects.append(live_object(result.names,boxes,index,u,v,z,intrinsics))
+                if result.masks is None and boxes is not None:
+                    # Detection-only model: centre of each box, depth from its central part.
+                    for index,box in enumerate(boxes.xyxy.cpu().numpy()):
+                        u,v,z=box_core_depth(depth,box); objects.append(live_object(result.names,boxes,index,u,v,z,intrinsics))
                 instantaneous=1000/latency if latency>0 else 0; fps_ema=instantaneous if not fps_ema else .8*fps_ema+.2*instantaneous
                 with self.lock:
                     if not self.test_job: break

@@ -13,8 +13,8 @@
 | Role | Name | Affiliation / handle | Date | Signature / review link |
 |---|---|---|---|---|
 | Author(s) | Haobin, Melvyn, Douaa, Yanis, Zéphir | N-Pulse CV team | 2026-10-25 | Prepared for review |
-| Reviewer (technical) | To be assigned | Technical review | Pending | Pending |
-| Concurrence (SE reviewer) | Santiago | Systems Engineering | Pending | Pending |
+| Reviewer (technical) | Haobin | TL CV team | Pending | Pending |
+| Concurrence (SE reviewer) | Santiago | Systems Engineering | 26/10/2026 | Pending |
 | Concurrence (QM reviewer) | To be assigned | Quality Management | Pending | Pending |
 | Approval | Project Manager | N-Pulse | Pending | Pending |
 
@@ -252,7 +252,11 @@ Calendar dates for implementation gates are not yet agreed. OI-01 (semester scop
 
 Yanis and Douaa collect data. Haobin coordinates requirements and documentation and temporarily covers the vacant porting/geometry roles. Final reviewers/official requirement mapping and project QM instructions remain pending.
 
-**Feedback requested at SDR:** Is the box-plus-depth approach feasible, or would masks or a different model be better? v1 iter1 mostly misses objects (low recall): is higher input resolution or more in-domain D405 data the better first lever? Which geometry methods suit bottle bodies and door-handle levers? How should centre/dimension errors and fit validity be assessed? Which simplifications should be prioritized for UNO Q? With no board yet available, concept feasibility is the primary review focus.
+**Feedback requested at SDR:** 
+- Is the box-plus-depth approach feasible, or would masks or a different model be better? 
+- v1 iter1 mostly misses objects (low recall): is higher input resolution or more in-domain D405 data the better first lever? - Which geometry methods suit bottle bodies and door-handle levers? 
+- How should centre/dimension errors and fit validity be assessed? 
+- Which simplifications should be prioritized for UNO Q? With no board yet available, concept feasibility is the primary review focus.
 
 Later extensions include battery operation, ARM/Firmware integration, motion/occlusion handling and grasp descriptors.
 

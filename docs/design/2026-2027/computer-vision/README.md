@@ -61,6 +61,8 @@ The semester demonstration shall use stationary targets and a wearer standing st
 - **ONNX:** model format selected for embedded inference.
 - **Object centre:** centre estimated from a fitted geometric primitive, not the visible point-cloud centroid.
 - **Camera frame:** +X right, +Y down, +Z forward; output units are mm.
+- **Baseline (v0):** existing complete red-object pipeline (HSV + depth isolation, shape classifier, primitive fitting); operational in real time on a live D405 and used as reference.
+- **Development version (v1):** colour-independent multi-class detector replacing the v0 isolation and classification stages; in development while the D405 dataset is being built.
 
 ## 2. Requirements and traceability
 
@@ -69,13 +71,13 @@ Local CV requirement IDs will be mapped to the project requirements with SE. “
 | Requirement ID | Requirement | Verification method | Status |
 |---|---|---|---|
 | CV-REQ-001 | Shall acquire RGB and depth with documented alignment and intrinsics | T/I: Check streams, intrinsics, units and alignment | computer capture and saving reported stable; board validation pending |
-| CV-REQ-002 | Shall recognize can, bottle, box, ball, pen/pencil (one class), and lever-style door handle, in multiple colours | T: Evaluate labelled held-out scenes by class | annotations exist for all six classes; training ongoing; real-image model testing pending |
+| CV-REQ-002 | Shall recognize can, bottle, box, ball, pen/pencil (one class), and lever-style door handle, in multiple colours | T: Evaluate labelled held-out scenes by class | v0: red objects only, shape (cylinder/cuboid) instead of semantic class. v1: 4/6 classes trained on Open Images (iter1 val mAP50 0.574); pen_pencil and door_handle annotated in the D405 dataset, included in the next training run; D405 evaluation pending |
 | CV-REQ-003 | Shall process at least two separated objects, including two of the same class, with independent associated point clouds | T: Test two separated objects, including same-class pairs | Point-cloud code passed local tests; test scope and two-object integration evidence pending |
-| CV-REQ-004 | Shall estimate shape-fitted geometric centre in camera coordinates | M/T: Compare centre against independent measurements | Geometric-centre definition agreed; quantitative real-camera validation pending |
+| CV-REQ-004 | Shall estimate shape-fitted geometric centre in camera coordinates | M/T: Compare centre against independent measurements | Geometric-centre definition agreed. v0 fits on real D405 frames; 3 hand-held trials overestimated width by 7-29 mm. Independent centre measurement at 50 cm-1 m pending |
 | CV-REQ-005 | Shall run the complete main pipeline on UNO Q | D/T: Demonstrate all stages on UNO Q; computer power/logs only | board ordered, not yet received |
 | CV-REQ-006 | Shall display and save class, shape, dimensions, centre, confidence and validity with frame metadata | I/T: Inspect terminal and per-frame JSONL fields and units | terminal and board-local JSONL; adapter verification pending |
 | CV-REQ-007 | Shall report missing/invalid results explicitly; never present old coordinates as current | T: Inject missing targets, invalid fits and camera loss | no-object, fit failure and camera-loss tests planned |
-| CV-REQ-008 | Shall meet SE-agreed accuracy, latency, coverage and sustained-run targets at 50 cm-1 m | M/T: Measure baseline, then test against SE-agreed targets | first measure baseline, then agree numerical targets |
+| CV-REQ-008 | Shall meet SE-agreed accuracy, latency, coverage and sustained-run targets at 50 cm-1 m | M/T: Measure baseline, then test against SE-agreed targets | v0: 40-60 ms/frame with a live D405 on a laptop CPU (not UNO Q). First measure baseline at 50 cm-1 m, then agree numerical targets |
 | CV-REQ-009 | Shall maintain reliable power and USB capture | T/M: Measure power/load; test USB capture and reconnect | wiring, hub and power tests pending |
 | CV-REQ-010 | Shall support repeatable evaluation with versioned data, model and configuration | I/T: Replay versioned data and compare repeat runs | historical replay tools exist; current evaluation pending |
 | CV-REQ-011 | Shall demonstrate chest-mounted wearable operation | D/I: Inspect mount and demonstrate stationary wearable use | preliminary mount/enclosure designs exist; physical verification pending |
@@ -86,18 +88,39 @@ Local CV requirement IDs will be mapped to the project requirements with SE. “
 
 The pipeline first identifies each object's semantic class, then uses depth to extract its point cloud and fit a geometric approximation. Semantic labels and geometric labels remain separate.
 
+Two versions share the same geometric back-end: a complete baseline (v0) that already runs in real time, and a development version (v1) that replaces only its front-end (isolation and classification).
+
 ```mermaid
 flowchart TD
     A[D405 RGB-D capture] --> B[Alignment and input checks]
-    B --> C[YOLO boxes and object classes]
-    C --> D[Per-box depth filtering and object separation]
-    D --> E[Shape fitting: centre and dimensions]
+    B --> V0["v0 baseline (operational): red HSV + depth isolation, cylinder/cuboid shape classifier"]
+    B --> V1["v1 development version: YOLO26n boxes and object classes, per-box depth filtering"]
+    V0 --> E[Shared: shape fitting, centre and dimensions]
+    V1 --> E
     E --> F[Validity checks, terminal output and JSONL]
 ```
 
-*Figure 3.1: Proposed CV pipeline; not a statement of completed integration.*
+*Figure 3.1: Baseline and development-version pipelines. v0 runs end to end; v1 is not yet integrated with the shared fitting stage.*
 
-**Current progress:** D405 capture/saving on a computer is reported stable. A YOLO segmentation training workflow exists, but the new model is not fully trained or tested on real images. Point-cloud-related code has been written and has passed local tests, as reported by the team. The complete required pipeline is not yet integrated/demonstrated. The local test scope and inputs remain to be documented; these results do not establish real D405 end-to-end accuracy or UNO Q operation. UNO Q is ordered; as of 2026-10-25 it has not been received and deployment has not started. Delivery is tentatively expected during 2026-10-26 to 2026-11-01; the date is unconfirmed.
+#### 3.1.1 Baseline (v0): complete pipeline, operational in real time
+
+- **What it is:** red HSV + depth isolation, YOLOv8n-cls shape classifier (cylinder vs cuboid), primitive fitting, centre and dimensions.
+- **Demonstrated:** runs end to end on a live D405 (laptop, Windows, CPU) at about 40-60 ms per frame [R4].
+- **Measured:** shape correct in 3/3 trials; width overestimated by 7-29 mm. Trials used a hand-held camera at 10-37 cm, below the 50 cm-1 m target range [R4].
+- **Limitations:** red objects only; two shapes; shape instead of semantic class.
+- **Role:** measured reference, regression test and demonstration fallback.
+
+#### 3.1.2 Development version (v1): multi-class detector, D405 dataset being built
+
+- **What it is:** YOLO26n detector (boxes and classes, COCO-pretrained, imgsz 416), colour-independent. It replaces the v0 isolation and classification and reuses the v0 fitting stage.
+- **Done:** first training (iter1) on an Open Images V7 subset, 4 classes (ball, can, box, bottle): val mAP50 0.574, mAP50-95 0.388; test mAP50 0.522, information only [R5]. Main error: missed objects (recall 0.47-0.49 on val for can, box and bottle).
+- **In progress:** D405 dataset collection and annotation for the six classes (all six already annotated), then retraining with pen_pencil and door_handle added.
+- **Pending:** D405 live tests, integration with the fitting stage, ONNX export.
+- **Replacement criterion:** v1 replaces v0 only when it performs at least as well on the same D405 scenes.
+
+#### 3.1.3 Common status
+
+D405 capture/saving on a computer is reported stable. Point-cloud-related code has been written and has passed local tests, as reported by the team. The complete required pipeline (v1 front-end with the shared fitting stage) is not yet integrated/demonstrated. The local test scope and inputs remain to be documented; these results do not establish real D405 end-to-end accuracy or UNO Q operation. UNO Q is ordered; as of 2026-10-25 it has not been received and deployment has not started. Delivery is tentatively expected during 2026-10-26 to 2026-11-01; the date is unconfirmed.
 
 ### 3.2 Main design choices
 
@@ -110,17 +133,18 @@ flowchart TD
 
 #### 3.2.2 Recognition and per-object depth processing
 
-- **Decision:** continue the YOLO segmentation training workflow, initially using boxes/classes rather than masks. Filter background/table points per box and associate an independent point cloud with each instance.
-- **Rationale:** reuses the current training workflow while retaining explicit geometric processing. Multi-colour targets rule out red-only isolation as the sole extraction method.
+- **Decision:** replace the v0 front-end with the v1 YOLO26n detector (see 3.1.1 and 3.1.2). Filter background/table points per box and associate an independent point cloud with each instance. Keep the v0 fitting stage, and keep v0 as reference and demonstration fallback.
+- **Rationale:** multi-colour targets rule out red-only isolation as the sole extraction method. Detection rather than segmentation: box labels are cheaper to produce, and detection models are expected to be smaller and faster on the UNO Q CPU (not yet measured). The YOLO26n head needs no NMS step, which simplifies ONNX export. Reusing the v0 fitting stage keeps geometry that already runs on real D405 frames.
+- **Model choice and UNO Q fit:** YOLO26n is the smallest current YOLO detector, chosen because the UNO Q has no GPU (CPU only, 4 GB RAM). The model is about 5 MB and the board software about 430 MB [R3], so a large margin is expected; memory use during inference will be measured when the board arrives (OI-06).
 - **Requirements addressed:** CV-REQ-002, 003, 004, 006.
-- **Consequences:** exact YOLO version/size and filtering method remain under evaluation. Ignoring masks does not remove their inference cost. Same-class association and geometric accuracy require integration tests.
+- **Consequences:** the current v1 live test estimates position from the median depth of the central part of each box: this is a visible-surface point, not the fitted centre required by CV-REQ-004. Box crops may include table/background points; masks remain the fallback if per-box filtering is insufficient. Same-class association and geometric accuracy require integration tests.
 
 #### 3.2.3 Data and geometry definitions
 
-- **Decision:** use self-collected/annotated D405 data plus a Google public dataset; split self-collected data by complete capture session. Fit cylinder, cuboid or sphere, otherwise report unknown.
-- **Rationale:** session grouping reduces adjacent-frame leakage; simple primitives provide interpretable centre and dimension estimates.
+- **Decision:** start from an Open Images V7 subset (Ball, Tin can, Box, Bottle; about 500 images per class), then fine-tune on self-collected/annotated D405 data; split self-collected data by complete capture session. Fit cylinder, cuboid or sphere, otherwise report unknown.
+- **Rationale:** Open Images allows training before the D405 dataset is ready. It is split randomly 70/15/15 (seed 0, test split frozen) because it has no capture sessions; model choices use the validation split only. Session grouping reduces adjacent-frame leakage in D405 data; simple primitives provide interpretable centre and dimension estimates.
 - **Requirements addressed:** CV-REQ-002, 004, 006, 007, 010.
-- **Consequences:** all six classes have annotations, but counts and public-dataset identity/license are still to attach. Cubes use cuboid and rods use cylinder. Bottles use the body only (no neck/cap); door handles use the graspable lever only (no base/plate). Required lever-shape coverage remains open for SDR advice.
+- **Consequences:** the D405 dataset is being built, and all six classes are already annotated. The first training run (iter1) used the four classes available in the Open Images subset; pen_pencil and door_handle enter at the next training run on the D405 dataset. D405 counts are still to attach. Class-to-shape mapping: can and bottle use cylinder, box uses cuboid, ball uses sphere; v0 has no sphere fitter yet. Cubes use cuboid and rods use cylinder. Bottles use the body only (no neck/cap); door handles use the graspable lever only (no base/plate). Required lever-shape coverage remains open for SDR advice.
 
 #### 3.2.4 Geometry outputs
 
@@ -153,8 +177,8 @@ Mechanical supports the chest mount and enclosure; Electronics supports power an
 
 | Budget / metric | Planned assessment | Target / status |
 |---|---|---|
-| Recognition, shape, centre and dimensions | Held-out scenes; known objects and independently measured centres | Baseline pending; targets agreed with SE afterwards |
-| Latency, FPS and valid-output rate | Timestamped complete pipeline at 50 cm-1 m | Board tests pending |
+| Recognition, shape, centre and dimensions | Held-out scenes; known objects and independently measured centres | First points: v0 width +7 to +29 mm (3 hand-held trials, 10-37 cm); v1 val mAP50 0.574 on Open Images. D405 baseline at 50 cm-1 m pending; targets agreed with SE afterwards |
+| Latency, FPS and valid-output rate | Timestamped complete pipeline at 50 cm-1 m | v0: 40-60 ms/frame on a laptop CPU. Board tests pending |
 | Compute / memory | Peak use within the 4 GB board configuration | Actual usable/application budget pending |
 | Power / temperature / mass | Complete board, camera, hub and wearable assembly | Measurements and limits pending |
 | Stability | Continuous run, USB faults and recovery | Duration/limits to agree with SE | First establish a baseline, then agree thresholds with Santiago/SE before acceptance testing. No numerical performance margin is claimed yet.
@@ -174,13 +198,14 @@ Compare functional fit, local deployment feasibility, robustness, computing reso
 | UNO Q + lightweight model + geometry | Matches team direction; reuses code; focuses on required output | Camera/runtime/resources unverified. Retained; optimize before changing platform |
 | Jetson complete system | Alternative for more demanding processing | Different procurement and integration burden. Not selected; no measured comparison claimed |
 | Remote GPU / GraspNet | Enables heavier grasp-planning experiments | Network dependence conflicts with local computation; full grasp pose outside core scope. Not retained |
-| Geometry-only classifier | Useful for debugging without learned inference | Does not identify the six semantic classes; historical classifier has limitations. Debug fallback only |
+| v0 red HSV pipeline (baseline) | Operational on a live D405 at 40-60 ms/frame; measured; same fitting stage as v1; includes a geometry-only classifier for debugging | Red objects only; shape instead of semantic class; width overestimated in real trials. Retained as reference, regression test and demonstration fallback; not the final concept |
+| Detection model (YOLO26n) versus segmentation model (YOLO-seg) | Detection: cheaper box labels, smaller and faster model, simpler export | Segmentation gives object masks at higher labelling and inference cost. Detection retained; segmentation workflow kept as an alternative |
 | D405 versus D415 | D405 available, existing code support, lightweight design direction | Final choice is D405; quantitative range/error evidence to attach |
 | Boxes + depth versus mask-based extraction | Boxes reuse current model outputs and allow geometric filtering | Background contamination and same-class association need testing. Boxes + depth retained; masks remain an alternative for expert feedback |
 
 ### 4.3 Trade-off summary
 
-Retain D405 + UNO Q + ONNX, using YOLO class/box outputs and depth-based geometry. The main unresolved trade-off is whether box-based extraction gives sufficient geometry quality on the embedded budget. No unsupported scores or completed hardware qualification are claimed.
+Retain D405 + UNO Q + ONNX, using YOLO26n class/box outputs (v1) and depth-based geometry shared with v0. Keep v0 as the measured reference until v1 matches it on the same D405 scenes. The main unresolved trade-off is whether box-based extraction gives sufficient geometry quality on the embedded budget. No unsupported scores or completed hardware qualification are claimed.
 
 ## 5. Quality management and compliance
 
@@ -188,7 +213,7 @@ The template's project-level QM framework is not finalized, and the team has not
 
 ## 6. Licensing
 
-Project licensing guidance is pending. Record licenses and sources for software, weights and datasets before redistribution. The Google dataset identity and permitted use remain to be confirmed. No final project license or compliance claim is assigned here.
+Project licensing guidance is pending. Record licenses and sources for software, weights and datasets before redistribution. The public dataset is Open Images V7: its annotations are CC BY 4.0, and its images are listed as CC BY 2.0 without verification by Google, so image-level licences must be checked before redistribution. No final project license or compliance claim is assigned here.
 
 ## 7. Open issues and future work
 
@@ -204,12 +229,16 @@ Project licensing guidance is pending. Record licenses and sources for software,
 | OI-09 | Attach dataset identity, counts, splits and reference-test procedure | Yanis + Douaa; Melvyn | Before reported evaluation | Results not reproducible |
 | OI-10 | Resolve project QM and source/data licenses | Haobin + project QM | Before approval/release | Review/redistribution unresolved |
 | OI-11 | Implement terminal/JSONL output and verify faults | Haobin, interim | Before interface tests | Output contract unverified |
+| OI-12 | Run the range test (`tools/distance_test.py`) at 50 cm-1 m with a fixed camera, v0 first, then v1 | To be assigned | Before SE target agreement | Baseline outside the required range |
+| OI-13 | Train v1 on the D405 dataset (all six classes) and compare it with v0 on the same scenes | To be assigned | Before replacing v0 | v1 benefit unproven |
+| OI-14 | Export v1 to ONNX and check parity with the PyTorch model | To be assigned | Before board tests | Embedded model unverified |
+| OI-15 | Add a sphere fitter; explain v0 width overestimation | To be assigned | Before geometry acceptance | Ball geometry missing; oversized dimensions |
 
 Calendar dates for implementation gates are not yet agreed. OI-01 (semester scope) is closed: battery and final ARM/Firmware integration are deferred.
 
 Yanis and Douaa collect data. Haobin coordinates requirements and documentation and temporarily covers the vacant porting/geometry roles. Final reviewers/official requirement mapping and project QM instructions remain pending.
 
-**Feedback requested at SDR:** Is the current model/box-plus-depth approach feasible, or would masks or a different model be better? Which geometry methods suit bottle bodies and door-handle levers? How should centre/dimension errors and fit validity be assessed? Which simplifications should be prioritized for UNO Q? With no board yet available, concept feasibility is the primary review focus.
+**Feedback requested at SDR:** Is the box-plus-depth approach feasible, or would masks or a different model be better? v1 iter1 mostly misses objects (low recall): is higher input resolution or more in-domain D405 data the better first lever? Which geometry methods suit bottle bodies and door-handle levers? How should centre/dimension errors and fit validity be assessed? Which simplifications should be prioritized for UNO Q? With no board yet available, concept feasibility is the primary review focus.
 
 Later extensions include battery operation, ARM/Firmware integration, motion/occlusion handling and grasp descriptors.
 
@@ -225,7 +254,10 @@ Later extensions include battery operation, ARM/Firmware integration, motion/occ
 - **R2:** [Historical baseline implementation and limitations](https://github.com/N-Pulse/ARM-SOFT-Grasping/blob/6d70209fd1673205bdddfbfd9b1c59adee6b8275/README.md).
 - **R3:** [Historical porting notes](https://github.com/N-Pulse/ARM-SOFT-Grasping/blob/6d70209fd1673205bdddfbfd9b1c59adee6b8275/porting/README.md), [ARM64 environment checks](https://github.com/N-Pulse/ARM-SOFT-Grasping/blob/6d70209fd1673205bdddfbfd9b1c59adee6b8275/porting/results/check_env_aarch64.json), [old-model x86 comparison](https://github.com/N-Pulse/ARM-SOFT-Grasping/blob/6d70209fd1673205bdddfbfd9b1c59adee6b8275/porting/results/classifier_x86_64.json) and [simulated replay comparison](https://github.com/N-Pulse/ARM-SOFT-Grasping/blob/6d70209fd1673205bdddfbfd9b1c59adee6b8275/porting/results/diff_x86yolo_vs_arm_lite_onnx.json).
 
-Implementation evidence is pinned to a historical code revision; it is not evidence that the 2026-2027 design is complete. Current point-cloud local-test inputs, command and result log remain to attach separately. Project-managed inputs and Slack hardware designs are not included in this single-file submission.
+- **R4:** [Baseline (v0) description, real D405 trials and known limitations](https://github.com/N-Pulse/ARM-SOFT-Grasping/blob/6f5d211f09b19fd323ae5fd58f17791f50edec14/README.md).
+- **R5:** [Development version (v1) training choices](https://github.com/N-Pulse/ARM-SOFT-Grasping/blob/6f5d211f09b19fd323ae5fd58f17791f50edec14/training/decisions.md) and [iter1 evaluation results](https://github.com/N-Pulse/ARM-SOFT-Grasping/blob/6f5d211f09b19fd323ae5fd58f17791f50edec14/training/results/evaluations.csv).
+
+Implementation evidence is pinned to code revisions; it is not evidence that the 2026-2027 design is complete. Current point-cloud local-test inputs, command and result log remain to attach separately. Project-managed inputs and Slack hardware designs are not included in this single-file submission.
 
 **Evidence boundary:** saved ARM64 emulation records include NumPy/OpenCV/ONNX Runtime checks and older-model parity tests; pyrealsense2 was missing in that environment. Old-model x86 ONNX classification decisions matched the reference on 198 crops, with probability differences. Simulated replay agreement and emulated timings do not validate the current six-class model, real-camera geometry or UNO Q performance.
 

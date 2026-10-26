@@ -23,3 +23,19 @@ datasets/object_segmentation/*
 !datasets/object_segmentation/.gitkeep
 datasets/mechanical_hand_pose/*
 !datasets/mechanical_hand_pose/.gitkeep
+
+# training/ — datasets, runs and weights are large and reproducible
+training/.venv-download/
+training/datasets/
+training/runs/
+training/weights/
+training/results/live/
+training/**/*.pt
+training/**/*.onnx
+training/**/*.tflite
+/yolo26n.pt
+training/colab/*.zip
+
+# local planning docs (not versioned)
+docs/superpowers/
+training/results/dataset_preview.jpg

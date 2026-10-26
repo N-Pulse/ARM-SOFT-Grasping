@@ -2,8 +2,8 @@
 
 > **Project:** N-Pulse · **Document ID:** DSD-001-CV
 > **Academic year:** 2026-2027 · **Team:** Computer Vision
-> **Version:** 1.2.1 · **Status:** In Review
-> **Project phase:** Proof of Concept · **Last modified:** 2026-10-25
+> **Version:** 1.2.2 · **Status:** In Review
+> **Project phase:** Proof of Concept · **Last modified:** 2026-10-26
 > **Repository path:** `docs/design/2026-2027/computer-vision/README.md`
 
 ## Document control
@@ -24,6 +24,7 @@ The document ID and CV requirement IDs are local identifiers pending project map
 
 | Version | Date | Author(s) | Main changes | PR / commit |
 |---|---|---|---|---|
+| 1.2.2 | 2026-10-26 | CV team | Chest-mount adapter, external-power architecture and initial purchase links | Pending |
 | 1.2.1 | 2026-10-25 | CV team | GitHub Markdown structure, traceability and latest local-test status | Pending |
 | 1.2.0 | 2026-10-24 | CV team | Concise review edition | Local draft |
 
@@ -147,7 +148,20 @@ No target produces `no_object` and an empty object list. Camera loss produces `c
 
 ### 3.3 Functionally linked systems
 
-Mechanical supports the chest mount and enclosure; Electronics supports power and USB validation. The computer powers UNO Q; D405 connects to UNO Q for data. Exact hub/cabling is unverified. Final ARM/Firmware transport and camera-to-arm transformation are deferred.
+Mechanical supports the chest mount and enclosure, while Electronics supports power and USB validation. The D405 connects to the Arduino UNO Q through USB for RGB-D data transfer. For the first integration version, the system uses external power supplied by either a computer or a standard wall charger through a USB-C hub. The autonomous battery-powered version is deferred to a later development stage.
+
+A custom 3D-printed GoPro adapter secures the Intel RealSense D405 and the Arduino UNO Q to a commercial chest harness. The exact hub, cabling, adapter fit and load distribution still require physical validation. Final ARM/Firmware transport and the camera-to-arm coordinate transformation are deferred.
+
+#### Initial components to purchase
+
+- [Suptig chest-mounted harness](https://www.amazon.de/dp/B09KC62W7X)
+- [Anker 332 USB-C Hub (5-in-1)](https://www.amazon.de/dp/B0BQLLB61B)
+
+These links identify the initial candidate models; availability, connector compatibility, power-delivery behaviour and final purchasing approval remain to be confirmed.
+
+#### 3D-printed GoPro adapter for the D405
+
+- [Custom adapter CAD model](https://github.com/user-attachments/assets/8e8edf0c-fffd-4498-a2f4-040edb23ba42)
 
 ### 3.4 Performance budgets and design margins
 

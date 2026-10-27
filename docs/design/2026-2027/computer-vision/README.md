@@ -2,7 +2,7 @@
 
 > **Project:** N-Pulse · **Document ID:** DSD-001-CV
 > **Academic year:** 2026-2027 · **Team:** Computer Vision
-> **Version:** 1.2.3 · **Status:** In Review
+> **Version:** 1.2.4 · **Status:** In Review
 > **Project phase:** Proof of Concept · **Last modified:** 2026-10-27
 > **Repository path:** `docs/design/2026-2027/computer-vision/README.md`
 
@@ -24,6 +24,7 @@ The document ID and CV requirement IDs are local identifiers pending project map
 
 | Version | Date | Author(s) | Main changes | PR / commit |
 |---|---|---|---|---|
+| 1.2.4 | 2026-10-27 | CV team | Document arm pose estimation as an independent exploratory workstream, separate from core acceptance | Pending |
 | 1.2.3 | 2026-10-27 | CV team | SE feedback: GPU capability, USB topology, adapter video, control-board terminology and open pose-estimation scope | Pending |
 | 1.2.2 | 2026-10-26 | CV team | Chest-mount adapter, external-power architecture and initial purchase links | Pending |
 | 1.2.1 | 2026-10-25 | CV team | GitHub Markdown structure, traceability and latest local-test status | Pending |
@@ -50,6 +51,8 @@ This Design Solution Definition (DSD) is at a Proof of Concept stage, prepared f
 The semester demonstration shall use stationary targets and a wearer standing still, under normal indoor lighting, with ordinary backgrounds and limited clutter. Targets shall be fully visible, separated and non-transparent. The intended distance is 50 cm-1 m; the team reports this range as tested usable, with quantitative evidence still to attach.
 
 **Out of scope:** battery operation, final communication integration with the prosthesis control board (Firmware team), robot control, full grasp-pose planning, occlusion handling, moving-target perception, persistent tracking and a graphical interface. A computer may supply power and display logs; all main CV processing shall run on UNO Q.
+
+Arm pose estimation is retained as an independent exploratory research workstream (Section 3.2.6). It is not a prerequisite or acceptance gate for the semester's core object-perception deliverable.
 
 ### 1.2 Responsibility and change authority
 
@@ -171,6 +174,13 @@ Retain a recognized semantic class even when geometry is invalid. Confidence des
 
 No target produces `no_object` and an empty object list. Camera loss produces `camera_error`, an empty list and a terminal message. Never reuse old coordinates. Manual restart is acceptable; test sources must be labelled.
 
+#### 3.2.6 Arm pose estimation — exploratory workstream
+
+- **Purpose:** investigate the feasibility and potential value of visual arm pose estimation for future system integration.
+- **Scope:** an independent research/prototyping activity alongside the core object-perception pipeline. The exact estimation target (human upper limb or prosthesis), method, outputs and owner remain to be agreed with SE (OI-16).
+- **Deliverable:** record the investigated approach, prototype observations, limitations and recommended next steps as evidence becomes available. No completed pose-estimation capability or quantitative performance is claimed here.
+- **Dependency boundary:** object recognition, point-cloud processing, geometric fitting and their semester acceptance shall proceed independently. Unfinished or unsuccessful pose experiments shall not block those core deliverables. Pose outputs are not required by the core pipeline or its JSONL contract.
+
 ### 3.3 Functionally linked systems
 
 Mechanical supports the chest mount and enclosure, while Electronics supports power and USB validation. UNO Q is the USB data host for the D405 and executes the CV pipeline. The hub is proposed to provide a power-input path and a USB peripheral connection at the same time through the board's USB-C interface; it is not required by the vision algorithm itself. The exact hub, USB roles, available power and continuous RGB-D transfer remain to be validated.
@@ -261,7 +271,7 @@ Project licensing guidance is pending. Record licenses and sources for software,
 | OI-13 | Train v1 on the D405 dataset (all six classes) and compare it with v0 on the same scenes | To be assigned | Before replacing v0 | v1 benefit unproven |
 | OI-14 | Export v1 to ONNX and check parity with the PyTorch model | To be assigned | Before board tests | Embedded model unverified |
 | OI-15 | Add a sphere fitter; explain v0 width overestimation | To be assigned | Before geometry acceptance | Ball geometry missing; oversized dimensions |
-| OI-16 | Clarify arm pose-estimation target (human upper limb or prosthesis), semester scope, owner and outputs; document the workstream if retained | Haobin + Santiago | Before scope freeze | Existing pose-related work omitted or scope misunderstood |
+| OI-16 | Define target, method, owner and outputs for the retained exploratory arm pose-estimation workstream | Haobin + Santiago | Before defining pose experiments; independent of core acceptance | Exploratory scope unclear; does not block core object perception |
 
 Calendar dates for implementation gates are not yet agreed. OI-01 (semester scope) is closed: battery and final communication integration with the prosthesis control board (Firmware team) are deferred.
 
@@ -275,7 +285,7 @@ Yanis and Douaa collect data. Haobin coordinates requirements and documentation 
 - How should centre/dimension errors and fit validity be assessed?
 - Which simplifications and runtime acceleration options should be prioritized for UNO Q?
 
-With no board yet available, concept feasibility is the primary review focus. Arm pose estimation is not described as abandoned: its target, role and semester scope remain to be confirmed with SE (OI-16).
+With no board yet available, concept feasibility is the primary review focus. Arm pose estimation is retained as an independent exploratory workstream; its target and experimental details remain open (OI-16), and its progress does not block core object-perception acceptance.
 
 Later extensions include battery operation, communication with the prosthesis control board (Firmware team), motion/occlusion handling and grasp descriptors.
 

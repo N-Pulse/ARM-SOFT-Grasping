@@ -2,8 +2,8 @@
 
 > **Project:** N-Pulse · **Document ID:** DSD-001-CV
 > **Academic year:** 2026-2027 · **Team:** Computer Vision
-> **Version:** 1.2.2 · **Status:** In Review
-> **Project phase:** Proof of Concept · **Last modified:** 2026-10-26
+> **Version:** 1.2.5 · **Status:** In Review
+> **Project phase:** Proof of Concept · **Last modified:** 2026-10-27
 > **Repository path:** `docs/design/2026-2027/computer-vision/README.md`
 
 ## Document control
@@ -24,6 +24,9 @@ The document ID and CV requirement IDs are local identifiers pending project map
 
 | Version | Date | Author(s) | Main changes | PR / commit |
 |---|---|---|---|---|
+| 1.2.5 | 2026-10-27 | CV team | Add shared mount-design viewer alongside the adapter demonstration video | [PR #21](https://github.com/N-Pulse/ARM-SOFT-Grasping/pull/21) |
+| 1.2.4 | 2026-10-27 | CV team | Document arm pose estimation as an independent exploratory workstream, separate from core acceptance | Pending |
+| 1.2.3 | 2026-10-27 | CV team | SE feedback: GPU capability, USB topology, adapter video, control-board terminology and open pose-estimation scope | Pending |
 | 1.2.2 | 2026-10-26 | CV team | Chest-mount adapter, external-power architecture and initial purchase links | Pending |
 | 1.2.1 | 2026-10-25 | CV team | GitHub Markdown structure, traceability and latest local-test status | Pending |
 | 1.2.0 | 2026-10-24 | CV team | Concise review edition | Local draft |
@@ -48,7 +51,9 @@ This Design Solution Definition (DSD) is at a Proof of Concept stage, prepared f
 
 The semester demonstration shall use stationary targets and a wearer standing still, under normal indoor lighting, with ordinary backgrounds and limited clutter. Targets shall be fully visible, separated and non-transparent. The intended distance is 50 cm-1 m; the team reports this range as tested usable, with quantitative evidence still to attach.
 
-**Out of scope:** battery operation, final ARM/Firmware integration, robot control, full grasp-pose planning, occlusion handling, moving-target perception, persistent tracking and a graphical interface. A computer may supply power and display logs; all main CV processing shall run on UNO Q.
+**Out of scope:** battery operation, final communication integration with the prosthesis control board (Firmware team), robot control, full grasp-pose planning, occlusion handling, moving-target perception, persistent tracking and a graphical interface. A computer may supply power and display logs; all main CV processing shall run on UNO Q.
+
+Arm pose estimation is retained as an independent exploratory research workstream (Section 3.2.6). It is not a prerequisite or acceptance gate for the semester's core object-perception deliverable.
 
 ### 1.2 Responsibility and change authority
 
@@ -135,8 +140,8 @@ D405 capture/saving on a computer is reported stable. Point-cloud-related code h
 #### 3.2.2 Recognition and per-object depth processing
 
 - **Decision:** replace the v0 front-end with the v1 YOLO26n detector (see 3.1.1 and 3.1.2). Filter background/table points per box and associate an independent point cloud with each instance. Keep the v0 fitting stage, and keep v0 as reference and demonstration fallback.
-- **Rationale:** multi-colour targets rule out red-only isolation as the sole extraction method. Detection rather than segmentation: box labels are cheaper to produce, and detection models are expected to be smaller and faster on the UNO Q CPU (not yet measured). The YOLO26n head needs no NMS step, which simplifies ONNX export. Reusing the v0 fitting stage keeps geometry that already runs on real D405 frames.
-- **Model choice and UNO Q fit:** YOLO26n is the smallest current YOLO detector, chosen because the UNO Q has no GPU (CPU only, 4 GB RAM). The model is about 5 MB and the board software about 430 MB [R3], so a large margin is expected; memory use during inference will be measured when the board arrives (OI-06).
+- **Rationale:** multi-colour targets rule out red-only isolation as the sole extraction method. Detection rather than segmentation: box labels are cheaper to produce, and the chosen detector is intended to limit compute demand; its performance relative to a comparable segmentation model on UNO Q has not yet been measured. The YOLO26n head needs no NMS step, which simplifies ONNX export. Reusing the v0 fitting stage keeps geometry that already runs on real D405 frames.
+- **Model choice and UNO Q fit:** YOLO26n is the nano-sized candidate selected for a lightweight embedded pipeline. UNO Q includes a quad-core Cortex-A53 CPU at 2.0 GHz, an Adreno GPU and two ISPs [R6]; it is not CPU-only hardware. The initial CPU inference path provides a reference, while GPU availability through the selected runtime, driver support and acceleration benefit remain to be verified. A lightweight model is still needed for latency, power and memory constraints. Model-file and installed-software sizes do not establish peak inference memory or design margin; measure the full pipeline on the 4 GB board (OI-06).
 - **Requirements addressed:** CV-REQ-002, 003, 004, 006.
 - **Consequences:** the current v1 live test estimates position from the median depth of the central part of each box: this is a visible-surface point, not the fitted centre required by CV-REQ-004. Box crops may include table/background points; masks remain the fallback if per-box filtering is insufficient. Same-class association and geometric accuracy require integration tests.
 
@@ -170,11 +175,29 @@ Retain a recognized semantic class even when geometry is invalid. Confidence des
 
 No target produces `no_object` and an empty object list. Camera loss produces `camera_error`, an empty list and a terminal message. Never reuse old coordinates. Manual restart is acceptable; test sources must be labelled.
 
+#### 3.2.6 Arm pose estimation — exploratory workstream
+
+- **Purpose:** investigate the feasibility and potential value of visual arm pose estimation for future system integration.
+- **Scope:** an independent research/prototyping activity alongside the core object-perception pipeline. The exact estimation target (human upper limb or prosthesis), method, outputs and owner remain to be agreed with SE (OI-16).
+- **Deliverable:** record the investigated approach, prototype observations, limitations and recommended next steps as evidence becomes available. No completed pose-estimation capability or quantitative performance is claimed here.
+- **Dependency boundary:** object recognition, point-cloud processing, geometric fitting and their semester acceptance shall proceed independently. Unfinished or unsuccessful pose experiments shall not block those core deliverables. Pose outputs are not required by the core pipeline or its JSONL contract.
+
 ### 3.3 Functionally linked systems
 
-Mechanical supports the chest mount and enclosure, while Electronics supports power and USB validation. The D405 connects to the Arduino UNO Q through USB for RGB-D data transfer. For the first integration version, the system uses external power supplied by either a computer or a standard wall charger through a USB-C hub. The autonomous battery-powered version is deferred to a later development stage.
+Mechanical supports the chest mount and enclosure, while Electronics supports power and USB validation. UNO Q is the USB data host for the D405 and executes the CV pipeline. The hub is proposed to provide a power-input path and a USB peripheral connection at the same time through the board's USB-C interface; it is not required by the vision algorithm itself. The exact hub, USB roles, available power and continuous RGB-D transfer remain to be validated.
 
-A custom 3D-printed GoPro adapter secures the Intel RealSense D405 and the Arduino UNO Q to a commercial chest harness. The exact hub, cabling, adapter fit and load distribution still require physical validation. Final ARM/Firmware transport and the camera-to-arm coordinate transformation are deferred.
+The proposed wall-powered arrangement is:
+
+```text
+Wall supply -> hub PD input -> hub upstream connection -> UNO Q
+D405 -> hub USB data port -> UNO Q (camera data host)
+```
+
+Computer-supplied power remains permitted, but its connection must be checked separately: do not assume a computer USB port can replace the hub's PD input or that all hubs support the required host/power roles. A computer may display logs but does not process the camera data. Battery operation is deferred.
+
+A custom 3D-printed GoPro-style adapter is proposed for the D405 on a commercial chest harness, together with a UNO Q mounting/enclosure arrangement. The shared Autodesk viewer below provides the mount-design reference; the separate video illustrates the preliminary adapter. Native CAD/export files and confirmation of which components the mount supports remain to document. Adapter fit, cable strain relief and load distribution require physical validation.
+
+Real-time communication with the prosthesis control board, coordinated with the Firmware team, is deferred this semester. The camera-to-prosthesis coordinate transformation is a separate deferred task.
 
 #### Initial components to purchase
 
@@ -183,9 +206,10 @@ A custom 3D-printed GoPro adapter secures the Intel RealSense D405 and the Ardui
 
 These links identify the initial candidate models; availability, connector compatibility, power-delivery behaviour and final purchasing approval remain to be confirmed.
 
-#### 3D-printed GoPro adapter for the D405
+#### Mount design and D405 adapter
 
-- [Custom adapter CAD model](https://github.com/user-attachments/assets/8e8edf0c-fffd-4498-a2f4-040edb23ba42)
+- [Mount design — Autodesk viewer](https://a360.co/4AibNOX)
+- [D405 adapter demonstration video](https://github.com/user-attachments/assets/8e8edf0c-fffd-4498-a2f4-040edb23ba42)
 
 ### 3.4 Performance budgets and design margins
 
@@ -195,7 +219,9 @@ These links identify the initial candidate models; availability, connector compa
 | Latency, FPS and valid-output rate | Timestamped complete pipeline at 50 cm-1 m | v0: 40-60 ms/frame on a laptop CPU. Board tests pending |
 | Compute / memory | Peak use within the 4 GB board configuration | Actual usable/application budget pending |
 | Power / temperature / mass | Complete board, camera, hub and wearable assembly | Measurements and limits pending |
-| Stability | Continuous run, USB faults and recovery | Duration/limits to agree with SE | First establish a baseline, then agree thresholds with Santiago/SE before acceptance testing. No numerical performance margin is claimed yet.
+| Stability | Continuous run, USB faults and recovery | Duration/limits to agree with SE |
+
+First establish a baseline, then agree thresholds with Santiago/SE before acceptance testing. No numerical performance margin is claimed yet.
 
 Use known-size regular objects and a fixed camera, independently measuring their camera-relative centres. Record setup, lighting, distances, configuration and measurement uncertainty. Fixed-rig tests do not replace the wearable demonstration.
 
@@ -234,7 +260,7 @@ Project licensing guidance is pending. Record licenses and sources for software,
 | ID | Issue / next step | Owner | Due / gate | Impact if unresolved |
 |---|---|---|---|---|
 | OI-02 | Confirm official requirement mapping/review roles | Haobin + Santiago | Project review | Incomplete traceability |
-| OI-03 | Attach mount/range evidence; validate chest geometry | Zéphir; Douaa + Melvyn | Before wearable acceptance | Unverified view/range |
+| OI-03 | Mount-design viewer linked in Section 3.3; attach range evidence, document CAD version/exports and validate chest geometry | Zéphir; Douaa + Melvyn | Before wearable acceptance | Unverified view/range |
 | OI-04 | Define fit thresholds, lever geometry and replay/fault timing | Haobin + SE | Before interface acceptance | Ambiguous validity/geometry |
 | OI-05 | Measure baseline and agree numerical targets | Douaa + Melvyn; Santiago | Before acceptance tests | No quantitative pass/fail |
 | OI-06 | Receive board; test current-model ONNX and camera runtime | Haobin + Yanis | After board arrival | Embedded feasibility unverified |
@@ -247,18 +273,23 @@ Project licensing guidance is pending. Record licenses and sources for software,
 | OI-13 | Train v1 on the D405 dataset (all six classes) and compare it with v0 on the same scenes | To be assigned | Before replacing v0 | v1 benefit unproven |
 | OI-14 | Export v1 to ONNX and check parity with the PyTorch model | To be assigned | Before board tests | Embedded model unverified |
 | OI-15 | Add a sphere fitter; explain v0 width overestimation | To be assigned | Before geometry acceptance | Ball geometry missing; oversized dimensions |
+| OI-16 | Define target, method, owner and outputs for the retained exploratory arm pose-estimation workstream | Haobin + Santiago | Before defining pose experiments; independent of core acceptance | Exploratory scope unclear; does not block core object perception |
 
-Calendar dates for implementation gates are not yet agreed. OI-01 (semester scope) is closed: battery and final ARM/Firmware integration are deferred.
+Calendar dates for implementation gates are not yet agreed. OI-01 (semester scope) is closed: battery and final communication integration with the prosthesis control board (Firmware team) are deferred.
 
 Yanis and Douaa collect data. Haobin coordinates requirements and documentation and temporarily covers the vacant porting/geometry roles. Final reviewers/official requirement mapping and project QM instructions remain pending.
 
-**Feedback requested at SDR:** 
-- Is the box-plus-depth approach feasible, or would masks or a different model be better? 
-- v1 iter1 mostly misses objects (low recall): is higher input resolution or more in-domain D405 data the better first lever? - Which geometry methods suit bottle bodies and door-handle levers? 
-- How should centre/dimension errors and fit validity be assessed? 
-- Which simplifications should be prioritized for UNO Q? With no board yet available, concept feasibility is the primary review focus.
+**Feedback requested at SDR:**
 
-Later extensions include battery operation, ARM/Firmware integration, motion/occlusion handling and grasp descriptors.
+- Is the box-plus-depth approach feasible, or would masks or a different model be better?
+- v1 iter1 mostly misses objects (low recall): is higher input resolution or more in-domain D405 data the better first lever?
+- Which geometry methods suit bottle bodies and door-handle levers?
+- How should centre/dimension errors and fit validity be assessed?
+- Which simplifications and runtime acceleration options should be prioritized for UNO Q?
+
+With no board yet available, concept feasibility is the primary review focus. Arm pose estimation is retained as an independent exploratory workstream; its target and experimental details remain open (OI-16), and its progress does not block core object-perception acceptance.
+
+Later extensions include battery operation, communication with the prosthesis control board (Firmware team), motion/occlusion handling and grasp descriptors.
 
 ## 8. References
 
@@ -275,6 +306,8 @@ Later extensions include battery operation, ARM/Firmware integration, motion/occ
 - **R4:** [Baseline (v0) description, real D405 trials and known limitations](https://github.com/N-Pulse/ARM-SOFT-Grasping/blob/6f5d211f09b19fd323ae5fd58f17791f50edec14/README.md).
 - **R5:** [Development version (v1) training choices](https://github.com/N-Pulse/ARM-SOFT-Grasping/blob/6f5d211f09b19fd323ae5fd58f17791f50edec14/training/decisions.md) and [iter1 evaluation results](https://github.com/N-Pulse/ARM-SOFT-Grasping/blob/6f5d211f09b19fd323ae5fd58f17791f50edec14/training/results/evaluations.csv).
 
+- **R6:** [Arduino UNO Q official product overview](https://www.arduino.cc/product-uno-q/) - CPU, Adreno GPU, ISP and USB-C hardware capabilities. Runtime acceleration and the proposed D405 hub combination still require tests.
+
 Implementation evidence is pinned to code revisions; it is not evidence that the 2026-2027 design is complete. Current point-cloud local-test inputs, command and result log remain to attach separately. Project-managed inputs and Slack hardware designs are not included in this single-file submission.
 
 **Evidence boundary:** saved ARM64 emulation records include NumPy/OpenCV/ONNX Runtime checks and older-model parity tests; pyrealsense2 was missing in that environment. Old-model x86 ONNX classification decisions matched the reference on 198 crops, with probability differences. Simulated replay agreement and emulated timings do not validate the current six-class model, real-camera geometry or UNO Q performance.
@@ -288,7 +321,7 @@ Implementation evidence is pinned to code revisions; it is not evidence that the
 | RealSense D405 | 1 | Available; attach range-test record |
 | Arduino UNO Q 4 GB | 1 | Ordered; not received as of 2026-10-25 |
 | Hub and suitable power/data cables | As required | Models/procurement and host/power topology to confirm |
-| Chest mount and board enclosure | 1 set | Preliminary Slack designs; files/materials and physical checks pending |
+| Chest mount and board enclosure | 1 set | [Mount-design viewer](https://a360.co/4AibNOX) linked; CAD version/exports, materials and physical checks pending |
 
 ### Appendix B: Output contract
 

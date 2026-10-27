@@ -2,7 +2,7 @@
 
 > **Project:** N-Pulse · **Document ID:** DSD-001-CV
 > **Academic year:** 2026-2027 · **Team:** Computer Vision
-> **Version:** 1.2.4 · **Status:** In Review
+> **Version:** 1.2.5 · **Status:** In Review
 > **Project phase:** Proof of Concept · **Last modified:** 2026-10-27
 > **Repository path:** `docs/design/2026-2027/computer-vision/README.md`
 
@@ -24,6 +24,7 @@ The document ID and CV requirement IDs are local identifiers pending project map
 
 | Version | Date | Author(s) | Main changes | PR / commit |
 |---|---|---|---|---|
+| 1.2.5 | 2026-10-27 | CV team | Add shared mount-design viewer alongside the adapter demonstration video | [PR #21](https://github.com/N-Pulse/ARM-SOFT-Grasping/pull/21) |
 | 1.2.4 | 2026-10-27 | CV team | Document arm pose estimation as an independent exploratory workstream, separate from core acceptance | Pending |
 | 1.2.3 | 2026-10-27 | CV team | SE feedback: GPU capability, USB topology, adapter video, control-board terminology and open pose-estimation scope | Pending |
 | 1.2.2 | 2026-10-26 | CV team | Chest-mount adapter, external-power architecture and initial purchase links | Pending |
@@ -194,7 +195,7 @@ D405 -> hub USB data port -> UNO Q (camera data host)
 
 Computer-supplied power remains permitted, but its connection must be checked separately: do not assume a computer USB port can replace the hub's PD input or that all hubs support the required host/power roles. A computer may display logs but does not process the camera data. Battery operation is deferred.
 
-A custom 3D-printed GoPro-style adapter is proposed for the D405 on a commercial chest harness, together with a UNO Q mounting/enclosure arrangement. The linked video illustrates the preliminary design; CAD files and confirmation of what the adapter physically supports remain to attach. Adapter fit, cable strain relief and load distribution require physical validation.
+A custom 3D-printed GoPro-style adapter is proposed for the D405 on a commercial chest harness, together with a UNO Q mounting/enclosure arrangement. The shared Autodesk viewer below provides the mount-design reference; the separate video illustrates the preliminary adapter. Native CAD/export files and confirmation of which components the mount supports remain to document. Adapter fit, cable strain relief and load distribution require physical validation.
 
 Real-time communication with the prosthesis control board, coordinated with the Firmware team, is deferred this semester. The camera-to-prosthesis coordinate transformation is a separate deferred task.
 
@@ -205,8 +206,9 @@ Real-time communication with the prosthesis control board, coordinated with the 
 
 These links identify the initial candidate models; availability, connector compatibility, power-delivery behaviour and final purchasing approval remain to be confirmed.
 
-#### 3D-printed GoPro adapter for the D405
+#### Mount design and D405 adapter
 
+- [Mount design — Autodesk viewer](https://a360.co/4AibNOX)
 - [D405 adapter demonstration video](https://github.com/user-attachments/assets/8e8edf0c-fffd-4498-a2f4-040edb23ba42)
 
 ### 3.4 Performance budgets and design margins
@@ -258,7 +260,7 @@ Project licensing guidance is pending. Record licenses and sources for software,
 | ID | Issue / next step | Owner | Due / gate | Impact if unresolved |
 |---|---|---|---|---|
 | OI-02 | Confirm official requirement mapping/review roles | Haobin + Santiago | Project review | Incomplete traceability |
-| OI-03 | Attach mount/range evidence; validate chest geometry | Zéphir; Douaa + Melvyn | Before wearable acceptance | Unverified view/range |
+| OI-03 | Mount-design viewer linked in Section 3.3; attach range evidence, document CAD version/exports and validate chest geometry | Zéphir; Douaa + Melvyn | Before wearable acceptance | Unverified view/range |
 | OI-04 | Define fit thresholds, lever geometry and replay/fault timing | Haobin + SE | Before interface acceptance | Ambiguous validity/geometry |
 | OI-05 | Measure baseline and agree numerical targets | Douaa + Melvyn; Santiago | Before acceptance tests | No quantitative pass/fail |
 | OI-06 | Receive board; test current-model ONNX and camera runtime | Haobin + Yanis | After board arrival | Embedded feasibility unverified |
@@ -319,7 +321,7 @@ Implementation evidence is pinned to code revisions; it is not evidence that the
 | RealSense D405 | 1 | Available; attach range-test record |
 | Arduino UNO Q 4 GB | 1 | Ordered; not received as of 2026-10-25 |
 | Hub and suitable power/data cables | As required | Models/procurement and host/power topology to confirm |
-| Chest mount and board enclosure | 1 set | Preliminary Slack designs; files/materials and physical checks pending |
+| Chest mount and board enclosure | 1 set | [Mount-design viewer](https://a360.co/4AibNOX) linked; CAD version/exports, materials and physical checks pending |
 
 ### Appendix B: Output contract
 

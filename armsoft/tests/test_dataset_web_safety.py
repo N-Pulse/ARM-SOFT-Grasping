@@ -129,6 +129,20 @@ class DatasetWebSafetyTests(unittest.TestCase):
         self.assertEqual(registered[0]["id"], "pose/pose_v1")
         self.assertEqual(registered[0]["task"], "pose")
 
+    def test_registered_runtime_model_is_available_to_live_test(self):
+        model = self.data / "models" / "runtime" / "seg-v2"; model.mkdir(parents=True)
+        (model / "best.pt").write_bytes(b"weights")
+        (model / "model.json").write_text(json.dumps({
+            "schema": "armsoft.runtime-model.v1", "id": "seg-v2",
+            "display_name": "Object Seg v2", "task": "segmentation",
+            "weights": "best.pt", "base_model": "best.pt", "model_version": "2.0.0",
+        }))
+        registered = self.state.test_inputs()["runs"]
+        self.assertEqual(registered[0]["id"], "runtime/seg-v2")
+        selected = self.state._test_model("runtime/seg-v2")
+        self.assertEqual(selected["task"], "segmentation")
+        self.assertTrue(selected["weights"].is_file())
+
     def test_finishing_capture_rebuilds_catalog(self):
         intrinsics = CameraIntrinsics(4, 3, 2.0, 2.0, 2.0, 1.5)
         frame = RGBDFrame(np.zeros((3, 4, 3), dtype=np.uint8), np.ones((3, 4), dtype=np.float32), intrinsics)

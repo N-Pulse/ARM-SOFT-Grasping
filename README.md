@@ -27,6 +27,12 @@ All worktrees share one data root at `../ARM-SOFT-data` by default. Override it 
 frames and restores ownership to the invoking macOS user after a sudo camera session.
 See [docs/dataset_studio_user_guide.md](docs/dataset_studio_user_guide.md) for the complete workflow, storage layout, deletion order, and troubleshooting guide.
 
+Trained team models can be added later without changing the pipeline or
+committing weights to Git. Validate and register a `.pt` checkpoint with
+`tools/register_runtime_model.py`; Dataset Studio then lists it in Live Test.
+See [docs/runtime_models.md](docs/runtime_models.md) for the folder contract and
+team hand-off checklist.
+
 On native Windows PowerShell, create a fresh local virtual environment (do not
 copy `.venv` from macOS/Linux), install `requirements.txt` plus
 `pyrealsense2`, and start with `python tools\dataset_web.py`. No administrator

@@ -89,6 +89,11 @@ def split_ids(ids: Iterable[str], fractions=(0.7, 0.15, 0.15),
             "test":  ids[n_train + n_val:]}
 
 
+def new_train_ids(candidates: Iterable[str], frozen: Iterable[str]) -> list[str]:
+    """Ids that may enlarge the train split: anything already in the base dataset stays where it is."""
+    return sorted(set(candidates) - set(frozen))
+
+
 def class_counts(lines: Iterable[str]) -> dict[str, int]:
     c = Counter(CLASSES[int(line.split()[0])] for line in lines if line.strip())
     return {cls: c.get(cls, 0) for cls in CLASSES}

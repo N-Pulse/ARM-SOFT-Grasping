@@ -1,8 +1,8 @@
 import pytest
 
 from training.data.yolo_format import (CLASSES, OI_TO_CLASS, filter_detections,
-                                       oi_box_to_yolo, oi_labels_for, split_ids,
-                                       yolo_lines)
+                                       new_train_ids, oi_box_to_yolo, oi_labels_for,
+                                       split_ids, yolo_lines)
 
 
 def test_classes_order_is_fixed():
@@ -41,6 +41,10 @@ def test_new_classes_keep_existing_ids():
     dets = [("Pen", [0.0, 0.0, 0.5, 0.5]), ("Door handle", [0.5, 0.5, 0.5, 0.5]),
             ("Bottle", [0.0, 0.0, 0.5, 0.5])]
     assert [line.split()[0] for line in yolo_lines(dets)] == ["4", "5", "3"]
+
+
+def test_extension_never_moves_a_frozen_image():
+    assert new_train_ids(["old_val", "new2", "new1", "new1"], ["old_val", "old_train"]) == ["new1", "new2"]
 
 
 def test_split_is_deterministic_disjoint_and_complete():

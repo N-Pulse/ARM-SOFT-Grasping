@@ -11,6 +11,8 @@ door_handle) with FiftyOne and write it in YOLO format:
 
     python training/data/download_openimages.py                 # ~500 img/class
     python training/data/download_openimages.py --per-class 50  # quick smoke test
+    python training/data/download_openimages.py --per-class 1500 \
+        --out training/datasets/openimages6_large --extend-from training/datasets/openimages6
 
 Images are picked per class (so every class gets ~--per-class images), but ALL
 boxes of our classes in each picked image are kept: a "Ball" image that
@@ -31,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from training.data.yolo_format import (CLASSES, OI_TO_CLASS, class_counts,  # noqa: E402
-                                       filter_detections, oi_labels_for,
+                                       filter_detections, new_train_ids, oi_labels_for,
                                        split_ids, yolo_lines)
 from training.paths import DATASETS_DIR  # noqa: E402
 
@@ -103,6 +105,29 @@ def write_yolo(images: dict, skipped: dict, out: Path, seed: int) -> dict:
     return stats
 
 
+def write_extended(images: dict, skipped: dict, base: Path, out: Path) -> dict:
+    """Copy ``base`` unchanged and add the new images to train only, so val and test stay frozen."""
+    if out.exists():
+        shutil.rmtree(out)
+    shutil.copytree(base, out, ignore=shutil.ignore_patterns("*.cache", "stats.json"))
+    frozen = [p.stem for p in (base / "images").glob("*/*.jpg")]
+    added = new_train_ids(images, frozen)
+    for image_id in added:
+        src, dets = images[image_id]
+        lines = yolo_lines(dets)
+        shutil.copy2(src, out / "images" / "train" / f"{image_id}.jpg")
+        (out / "labels" / "train" / f"{image_id}.txt").write_text(
+            "\n".join(lines) + ("\n" if lines else ""))
+    stats = {"added_to_train": len(added)}
+    for split in ("train", "val", "test"):
+        labels = sorted((out / "labels" / split).glob("*.txt"))
+        lines = [line for p in labels for line in p.read_text().splitlines()]
+        stats[split] = {"images": len(labels), "instances": class_counts(lines)}
+    stats["skipped_boxes"] = skipped
+    (out / "stats.json").write_text(json.dumps(stats, indent=2))
+    return stats
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -113,11 +138,16 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=DATASETS_DIR / "openimages6")
     ap.add_argument("--cache", type=Path, default=DATASETS_DIR / "_fiftyone_cache")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--extend-from", type=Path,
+                    help="existing dataset: keep it unchanged and add new images to train only")
     args = ap.parse_args()
 
     check_classes()
     images, skipped = collect(args.per_class, args.oi_split, args.seed, args.cache)
-    stats = write_yolo(images, skipped, args.out, args.seed)
+    if args.extend_from:
+        stats = write_extended(images, skipped, args.extend_from, args.out)
+    else:
+        stats = write_yolo(images, skipped, args.out, args.seed)
     print(json.dumps(stats, indent=2))
     print(f"YOLO dataset written to {args.out}")
 

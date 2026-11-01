@@ -1,0 +1,3 @@
+date,run,data,start_weights,imgsz,epochs,split,map50,map50_95,ap50_ball,ap50_can,ap50_box,ap50_bottle,notes
+2026-10-19,iter1,training/data/data.yaml,yolo26n.pt,416,30,val,0.5737,0.3884,0.6834,0.5226,0.5005,0.5884,baseline; trained on Colab T4
+2026-10-19,iter1,training/data/data.yaml,yolo26n.pt,416,30,test,0.5218,0.3656,0.6696,0.4778,0.4257,0.5142,baseline; trained on Colab T4; info only

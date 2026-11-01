@@ -1,0 +1,20 @@
+# What training/ needs, in TWO environments (see training/decisions.md):
+#
+# 1. Training / eval / live test: the team venv (.venv-win) already has
+#    ultralytics, torch, pyrealsense2, opencv-python; add only pytest:
+#      <python> -m pip install pytest
+#    In a fresh venv: install CPU torch first, then
+#      <python> -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#      <python> -m pip install "ultralytics>=8.4" pyrealsense2 opencv-python pyyaml pytest
+#
+# 2. Open Images download only, separate venv (fiftyone pulls
+#    opencv-python-headless, which would replace opencv-python's cv2 and
+#    break cv2.imshow in live_test.py):
+#      py -3.13 -m venv training/.venv-download
+#      training/.venv-download/Scripts/python -m pip install fiftyone pyyaml
+ultralytics>=8.4        # YOLO26 detection                      (env 1)
+pyrealsense2            # live D405 demo (training/live_test.py) (env 1)
+opencv-python           #                                        (env 1)
+pytest                  #                                        (env 1)
+pyyaml                  #                                        (env 1 and 2)
+# fiftyone>=1.0         # Open Images download                   (env 2 ONLY)

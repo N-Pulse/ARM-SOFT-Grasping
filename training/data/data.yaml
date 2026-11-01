@@ -1,0 +1,16 @@
+# Grasp-object detection dataset, YOLO format.
+#
+# To train on another dataset (e.g. the in-house D405 set), copy this file,
+# change `path`, keep the same `names` (same order), and pass the copy with
+#   python training/train.py --data training/data/<copy>.yaml
+#
+# `path` is relative to THIS file (training/paths.py resolves it).
+path: ../datasets/openimages4
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: ball
+  1: can
+  2: box
+  3: bottle

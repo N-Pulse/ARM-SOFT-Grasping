@@ -1,12 +1,13 @@
 # ARM-SOFT Grasping — standalone model
 
-## Point-cloud experiment branch
+## Unified vision integration branch
 
-`feature/point-cloud-pipeline` adds a portable RGB-D → coloured point-cloud
-pipeline for the D405, simulator, and recorded capture sessions. It supports
-optional depth/ROI/table filtering, voxel downsampling, statistical outlier
-removal, Open3D live viewing, and reproducible PLY export. See
-[`docs/point_cloud_pipeline.md`](docs/point_cloud_pipeline.md).
+`integration/unified-vision-pipeline` combines Dataset Studio object
+segmentation/detection, mechanical-hand YOLO Pose + RGB-D fusion, and the
+portable RGB-D → coloured point-cloud pipeline. The immediate integration
+contract and remaining Web Live Test work are documented in
+[`docs/unified_vision_pipeline.md`](docs/unified_vision_pipeline.md). Point-cloud
+CLI details remain in [`docs/point_cloud_pipeline.md`](docs/point_cloud_pipeline.md).
 
 ## Dataset Studio (local web capture)
 

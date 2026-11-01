@@ -85,8 +85,9 @@ class State:
                         cfg=DepthFilterConfig(self.config["min_depth"],self.config["max_depth"])
                         filtered,mask=apply_depth_filter(frame.color_bgr,frame.depth_m,cfg,frame.intrinsics,dim_background=True)
                         self.images={"raw":jpeg(frame.color_bgr),"filtered":jpeg(filtered),"mask":jpeg(cv2.cvtColor(mask.astype(np.uint8)*255,cv2.COLOR_GRAY2BGR))}
-                        if self.test_job and self.test_job.get("state") in {"loading","running"}:
-                            self.latest_frame=(frame.color_bgr.copy(),frame.depth_m.copy(),frame.intrinsics,frame.index,frame.timestamp,frame.source); self.latest_sequence+=1
+                        # Keep one current RGB-D frame ready for Live Test and point-cloud export.
+                        # This avoids a black preview while the test thread waits for a post-start frame.
+                        self.latest_frame=(frame.color_bgr.copy(),frame.depth_m.copy(),frame.intrinsics,frame.index,frame.timestamp,frame.source); self.latest_sequence+=1
                         if self.job:
                             self.job["seen"]+=1
                             if (self.job["seen"]-1)%self.job["every"]==0:
@@ -99,6 +100,9 @@ class State:
                                 if self.job["saved"]>=self.job["target"]: self.finish()
                     count+=1; now=time.monotonic()
                     if now-tick>=1: self.fps=count/(now-tick); tick=now; count=0
+                    # The synthetic renderer has no hardware frame clock. Limit it so
+                    # it cannot consume every CPU core and starve the inference thread.
+                    if self.source_name=="sim": self.stop.wait(1/30)
         except Exception as e: self.error=str(e)
         finally: self.connected=False; self.finish()
     def begin(self,name,target,every,notes):
@@ -706,7 +710,7 @@ class State:
             if not self.connected: raise ValueError("Connect the camera before starting live testing")
             if self.training_job and self.training_job.get("state") in {"running","stopping"}: raise ValueError("Wait for training to finish before live testing")
             if self.test_job and self.test_job.get("state") in {"loading","running","stopping"}: raise ValueError("Live testing is already running or stopping")
-            self.test_stop.clear(); self.test_image=None; self.latest_frame=None
+            self.test_stop.clear(); self.test_image=None
             self.failure_session=None; self.failure_last_signature=None
             self.test_job={"state":"loading","model_id":model_id,"run_name":model_record["name"],"task":model_record["task"],"base_model":model_record["base_model"],"device":device,"imgsz":imgsz,"confidence":confidence,"target_fps":target_fps,"frames":0,"fps":0.0,"latency_ms":0.0,"objects":[],"error":"","failure_saved":0,"failure_skipped_similar":0,"started_utc":datetime.now().astimezone().isoformat()}
             self.test_thread=threading.Thread(target=self._run_live_test,args=(model_record["weights"],),daemon=True); self.test_thread.start()
@@ -718,12 +722,16 @@ class State:
             model=YOLO(str(weights))
             with self.lock:
                 if self.test_job: self.test_job["state"]="running"
-            last_sequence=-1; fps_ema=0.0
+            last_sequence=-1; fps_ema=0.0; last_camera_frame=time.monotonic()
             while not self.test_stop.is_set():
                 with self.lock:
-                    item=self.latest_frame; sequence=self.latest_sequence; job=dict(self.test_job or {})
-                if item is None or sequence==last_sequence: time.sleep(.005); continue
+                    item=self.latest_frame; sequence=self.latest_sequence; job=dict(self.test_job or {}); connected=self.connected
+                if item is None or sequence==last_sequence:
+                    if not connected and time.monotonic()-last_camera_frame>2: raise RuntimeError("Camera disconnected. Reconnect the D405 and restart Live Test.")
+                    if time.monotonic()-last_camera_frame>5: raise RuntimeError("Camera is connected but no new RGB-D frames arrived. Stop other camera apps, reconnect the D405, and retry.")
+                    time.sleep(.005); continue
                 last_sequence=sequence; color,depth,intrinsics,_,_,_=item; started=time.perf_counter()
+                last_camera_frame=started
                 result=model.predict(source=color,imgsz=job["imgsz"],conf=job["confidence"],device=job["device"],verbose=False)[0]
                 latency=(time.perf_counter()-started)*1000; overlay=result.plot(); objects=[]
                 polygons=result.masks.xy if result.masks is not None else []

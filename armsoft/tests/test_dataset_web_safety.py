@@ -79,6 +79,18 @@ class DatasetWebSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "best.pt"):
             self.state.test_start({"run_name": "missing", "device": "cpu"})
 
+    def test_starting_live_test_preserves_latest_camera_frame(self):
+        model = self.data / "models" / "runtime" / "detect-v1"; model.mkdir(parents=True)
+        (model / "best.pt").write_bytes(b"weights")
+        (model / "model.json").write_text(json.dumps({
+            "schema": "armsoft.runtime-model.v1", "id": "detect-v1",
+            "task": "detection", "weights": "best.pt",
+        }))
+        marker = object(); self.state.latest_frame = marker; self.state.connected = True
+        with patch("tools.dataset_web.threading.Thread"):
+            self.state.test_start({"model_id": "runtime/detect-v1", "device": "cpu"})
+        self.assertIs(self.state.latest_frame, marker)
+
     def test_failure_case_is_saved_as_normal_rgbd_session(self):
         intrinsics = CameraIntrinsics(4, 3, 2.0, 2.0, 2.0, 1.5)
         self.state.latest_frame = (

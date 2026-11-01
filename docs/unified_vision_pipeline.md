@@ -79,8 +79,12 @@ the same frame's camera intrinsics.
   fusion: integrated and tested.
 - RGB-D point-cloud generation, filtering, PLY/JSON export, and CLI viewing:
   integrated and tested.
-- One Web Live Test selector for segmentation/detection/pose models: next.
-- On-demand scene/selected-instance point-cloud export from Web Live Test: next.
+- One Web Live Test selector for segmentation/detection/pose training runs:
+  integrated. Pose results include visible/total keypoint counts.
+- On-demand filtered scene point-cloud export from Web Live Test: integrated.
+  Each export writes `scene.ply`, a point-cloud summary, and `metadata.json`
+  under `ARM-SOFT-data/derived/pointcloud/live_<timestamp>/`.
+- Selected-instance-only point-cloud export: optional future refinement.
 
 ## Acceptance checks for the Web integration
 

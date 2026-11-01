@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from armsoft.data import CaptureSessionWriter, SESSION_SCHEMA_VERSION, data_root
 from armsoft.object_segmentation.annotations import FrameAnnotation, ObjectAnnotation
 from armsoft.object_segmentation.export import to_yolo_lines
+from armsoft.pointcloud import PointCloudConfig, PointCloudPipeline, save_ply
 from armsoft.preprocessing import DepthFilterConfig, apply_depth_filter
 from armsoft.sources import create_frame_source
 from armsoft.sources.base import RGBDFrame
@@ -654,28 +655,48 @@ class State:
     def test_inputs(self):
         runs=[]
         for run in self.training_runs()["runs"]:
-            if run.get("complete") and run.get("best_weights"): runs.append({"name":run["name"],"model":run.get("base_model"),"dataset":run.get("dataset")})
+            if run.get("complete") and run.get("best_weights"):
+                base=str(run.get("base_model") or "")
+                task="detection" if "-seg" not in base else "segmentation"
+                runs.append({"id":f"object/{run['name']}","name":run["name"],"model":base,"dataset":run.get("dataset"),"task":task})
+        pose_root=self.root.parents[1]/"runs"/"mechanical_hand_pose"
+        if pose_root.exists():
+            for path in sorted((p for p in pose_root.iterdir() if p.is_dir()),key=lambda p:p.stat().st_mtime,reverse=True):
+                weights=path/"weights"/"best.pt"; metadata=path/"armsoft_training.json"
+                if not weights.is_file() or not metadata.is_file(): continue
+                try: details=json.loads(metadata.read_text(encoding="utf-8"))
+                except (OSError,json.JSONDecodeError): continue
+                runs.append({"id":f"pose/{path.name}","name":path.name,"model":details.get("base_model","YOLO Pose"),"dataset":details.get("dataset",""),"task":"pose"})
         devices=compute_devices()
         return {"runs":runs,"devices":devices,"camera_connected":self.connected}
 
+    def _test_model(self,model_id):
+        if not isinstance(model_id,str) or "/" not in model_id: raise ValueError("Select a completed training run with best.pt")
+        family,name=model_id.split("/",1)
+        if family not in {"object","pose"} or not SAFE.fullmatch(name): raise ValueError("Select a valid local model")
+        relative=Path("runs")/("object_segmentation" if family=="object" else "mechanical_hand_pose")/name
+        root=self.root.parents[1].resolve(); run=(root/relative).resolve(); weights=run/"weights"/"best.pt"; metadata=run/"armsoft_training.json"
+        if root not in run.parents or not weights.is_file() or not metadata.is_file(): raise ValueError("Completed best.pt not found for this model")
+        details=json.loads(metadata.read_text(encoding="utf-8")); base=str(details.get("base_model") or "")
+        task="pose" if family=="pose" else ("segmentation" if "-seg" in base else "detection")
+        return {"id":model_id,"name":name,"task":task,"weights":weights,"base_model":base}
+
     def test_start(self,data):
-        run_name=str(data.get("run_name","")); device=str(data.get("device","cpu"))
-        if not SAFE.fullmatch(run_name): raise ValueError("Select a completed training run")
+        model_id=str(data.get("model_id") or (f"object/{data.get('run_name')}" if data.get("run_name") else "")); device=str(data.get("device","cpu"))
+        model_record=self._test_model(model_id)
         if device not in {item["id"] for item in compute_devices()}: raise ValueError("Choose an available inference device")
         try: imgsz=int(data.get("imgsz",416)); confidence=float(data.get("confidence",.25)); target_fps=float(data.get("target_fps",10))
         except (TypeError,ValueError): raise ValueError("Invalid live-test settings")
         if not 128<=imgsz<=1280 or imgsz%32: raise ValueError("Image size must be a multiple of 32 between 128 and 1280")
         if not .01<=confidence<=1 or not 1<=target_fps<=30: raise ValueError("Confidence or FPS limit is invalid")
-        root=(self.root.parents[1]/"runs"/"object_segmentation").resolve(); run=(root/run_name).resolve(); weights=run/"weights"/"best.pt"
-        if root not in run.parents or not weights.is_file() or not (run/"armsoft_training.json").is_file(): raise ValueError("Completed best.pt not found for this run")
         with self.lock:
             if not self.connected: raise ValueError("Connect the camera before starting live testing")
             if self.training_job and self.training_job.get("state") in {"running","stopping"}: raise ValueError("Wait for training to finish before live testing")
             if self.test_job and self.test_job.get("state") in {"loading","running","stopping"}: raise ValueError("Live testing is already running or stopping")
             self.test_stop.clear(); self.test_image=None; self.latest_frame=None
             self.failure_session=None; self.failure_last_signature=None
-            self.test_job={"state":"loading","run_name":run_name,"device":device,"imgsz":imgsz,"confidence":confidence,"target_fps":target_fps,"frames":0,"fps":0.0,"latency_ms":0.0,"objects":[],"error":"","failure_saved":0,"failure_skipped_similar":0,"started_utc":datetime.now().astimezone().isoformat()}
-            self.test_thread=threading.Thread(target=self._run_live_test,args=(weights,),daemon=True); self.test_thread.start()
+            self.test_job={"state":"loading","model_id":model_id,"run_name":model_record["name"],"task":model_record["task"],"base_model":model_record["base_model"],"device":device,"imgsz":imgsz,"confidence":confidence,"target_fps":target_fps,"frames":0,"fps":0.0,"latency_ms":0.0,"objects":[],"error":"","failure_saved":0,"failure_skipped_similar":0,"started_utc":datetime.now().astimezone().isoformat()}
+            self.test_thread=threading.Thread(target=self._run_live_test,args=(model_record["weights"],),daemon=True); self.test_thread.start()
         return self.test_status()
 
     def _run_live_test(self,weights):
@@ -705,6 +726,18 @@ class State:
                     # Detection-only model: centre of each box, depth from its central part.
                     for index,box in enumerate(boxes.xyxy.cpu().numpy()):
                         u,v,z=box_core_depth(depth,box); objects.append(live_object(result.names,boxes,index,u,v,z,intrinsics))
+                if result.keypoints is not None and boxes is not None:
+                    objects=[]
+                    xy=result.keypoints.xy.cpu().numpy(); conf=result.keypoints.conf
+                    confidence=conf.cpu().numpy() if conf is not None else np.ones(xy.shape[:2],dtype=np.float32)
+                    for index,points in enumerate(xy):
+                        visible=confidence[index]>=.25
+                        if visible.any(): u,v=np.median(points[visible],axis=0).tolist()
+                        else:
+                            box=boxes.xyxy[index].cpu().numpy(); u=(box[0]+box[2])/2; v=(box[1]+box[3])/2
+                        _,_,z=box_core_depth(depth,boxes.xyxy[index].cpu().numpy(),fraction=.35)
+                        item=live_object(result.names,boxes,index,float(u),float(v),z,intrinsics)
+                        item["keypoints_visible"]=int(visible.sum()); item["keypoints_total"]=int(len(points)); objects.append(item)
                 instantaneous=1000/latency if latency>0 else 0; fps_ema=instantaneous if not fps_ema else .8*fps_ema+.2*instantaneous
                 with self.lock:
                     if not self.test_job: break
@@ -725,6 +758,24 @@ class State:
             if not self.test_job or self.test_job.get("state") not in {"loading","running"}: raise ValueError("Live testing is not running")
             self.test_stop.set(); self.test_job["state"]="stopping"
         return self.test_status()
+
+    def test_export_pointcloud(self,data):
+        with self.lock: item=self.latest_frame; job=dict(self.test_job or {})
+        if item is None: raise ValueError("No RGB-D frame is available for point-cloud export")
+        try:
+            voxel=float(data.get("voxel_size_m",.005)); max_points=int(data.get("max_points",100000))
+        except (TypeError,ValueError): raise ValueError("Point-cloud settings are invalid")
+        if not 0<=voxel<=.05 or not 100<=max_points<=500000: raise ValueError("Point-cloud settings are outside safe limits")
+        color,depth,intrinsics,index,timestamp,source=item
+        frame=RGBDFrame(color.copy(),depth.copy(),intrinsics,index,timestamp,source)
+        config=PointCloudConfig(min_depth_m=self.config["min_depth"],max_depth_m=self.config["max_depth"],voxel_size_m=voxel,max_points=max_points)
+        result=PointCloudPipeline(config).process(frame)
+        root=(self.root.parents[1]/"derived"/"pointcloud").resolve(); stamp=datetime.now().strftime("live_%Y%m%d_%H%M%S_%f"); target=(root/stamp).resolve()
+        if root not in target.parents or target.exists(): raise ValueError("Could not create a unique point-cloud artifact")
+        target.mkdir(parents=True); ply=save_ply(target/"scene.ply",result)
+        metadata={"schema":"armsoft.live-pointcloud.v1","created_utc":datetime.now().astimezone().isoformat(),"frame":{"index":index,"timestamp":timestamp,"source":source},"model":{"id":job.get("model_id"),"task":job.get("task"),"objects":job.get("objects",[])},"config":config.to_dict(),**result.summary()}
+        (target/"metadata.json").write_text(json.dumps(metadata,indent=2)+"\n",encoding="utf-8")
+        return {"artifact":stamp,"ply":str(ply),"metadata":str(target/"metadata.json"),"summary":result.summary()}
 
     def test_save_failure(self,data):
         failure_type=str(data.get("failure_type","other")); note=str(data.get("note","")).strip()
@@ -870,6 +921,7 @@ class Handler(SimpleHTTPRequestHandler):
             elif self.path=="/api/test/start": return self.reply({"ok":True,"job":self.state.test_start(d)})
             elif self.path=="/api/test/stop": return self.reply({"ok":True,"job":self.state.test_stop_live()})
             elif self.path=="/api/test/save-failure": return self.reply({"ok":True,"result":self.state.test_save_failure(d)})
+            elif self.path=="/api/test/export-pointcloud": return self.reply({"ok":True,"result":self.state.test_export_pointcloud(d)})
             else: return self.send_error(404)
             return self.reply({"ok":True})
         except Exception as e: return self.reply({"ok":False,"error":str(e)},400)

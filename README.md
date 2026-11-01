@@ -20,7 +20,7 @@ python tools/dataset_web.py
 If macOS camera access requires elevated privileges, keep the active virtual
 environment and run `sudo -E "$(which python)" -u tools/dataset_web.py`.
 
-Open <http://127.0.0.1:8765>. Press `Ctrl+C` in the terminal to stop. The Studio now covers capture, preprocessing, assisted annotation, manual review, session-safe YOLO Seg export, monitored YOLO training, and live testing of trained models with RGB-D distance measurements. Training is enabled after a valid dataset has been exported from the Dataset page; Live Test becomes available after a training run produces `best.pt`. During a live test, labelled failure cases can be collected into one deduplicated RGB-D session and sent back through the same preprocessing and review workflow.
+Open <http://127.0.0.1:8765>. Press `Ctrl+C` in the terminal to stop. The Studio now covers capture, preprocessing, assisted annotation, manual review, session-safe YOLO Seg export, monitored YOLO training, and live testing of trained segmentation, detection, and mechanical-hand pose models with RGB-D centre distance and XYZ measurements. Live Test also exports the current filtered scene as PLY + metadata on request. Training is enabled after a valid dataset has been exported from the Dataset page; Live Test becomes available after a training run produces `best.pt`. During a live test, labelled failure cases can be collected into one deduplicated RGB-D session and sent back through the same preprocessing and review workflow.
 
 All worktrees share one data root at `../ARM-SOFT-data` by default. Override it with
 `ARM_SOFT_DATA_ROOT` or `--data-root`. The capture UI skips near-identical consecutive

@@ -106,6 +106,29 @@ class DatasetWebSafetyTests(unittest.TestCase):
         self.assertTrue(second["skipped_similar"])
         self.assertEqual(len(list((self.capture / first["session"] / "color").glob("*.png"))), 1)
 
+    def test_live_pointcloud_export_stays_in_shared_derived_root(self):
+        intrinsics = CameraIntrinsics(4, 3, 2.0, 2.0, 2.0, 1.5)
+        self.state.latest_frame = (
+            np.zeros((3, 4, 3), dtype=np.uint8),
+            np.ones((3, 4), dtype=np.float32),
+            intrinsics, 9, 321.0, "test-camera",
+        )
+        self.state.test_job = {"model_id": "object/demo", "task": "segmentation", "objects": []}
+        result = self.state.test_export_pointcloud({"voxel_size_m": 0, "max_points": 100})
+        ply = Path(result["ply"])
+        self.assertTrue(ply.is_file())
+        self.assertEqual(ply.parents[1], (self.data / "derived" / "pointcloud").resolve())
+        self.assertTrue(Path(result["metadata"]).is_file())
+
+    def test_pose_run_is_registered_for_live_test(self):
+        run = self.data / "runs" / "mechanical_hand_pose" / "pose_v1"
+        (run / "weights").mkdir(parents=True)
+        (run / "weights" / "best.pt").write_bytes(b"weights")
+        (run / "armsoft_training.json").write_text(json.dumps({"base_model": "yolo11n-pose.pt", "dataset": "pose.yaml"}))
+        registered = self.state.test_inputs()["runs"]
+        self.assertEqual(registered[0]["id"], "pose/pose_v1")
+        self.assertEqual(registered[0]["task"], "pose")
+
     def test_finishing_capture_rebuilds_catalog(self):
         intrinsics = CameraIntrinsics(4, 3, 2.0, 2.0, 2.0, 1.5)
         frame = RGBDFrame(np.zeros((3, 4, 3), dtype=np.uint8), np.ones((3, 4), dtype=np.float32), intrinsics)

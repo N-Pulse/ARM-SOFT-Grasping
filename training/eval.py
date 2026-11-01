@@ -124,6 +124,11 @@ def read_run_args(weights) -> dict:
     return yaml.safe_load(p.read_text()) if p.exists() else {}
 
 
+def resolve_imgsz(requested, run_args: dict) -> int:
+    """Explicit --imgsz, else the training size, so a 640 run is not evaluated at 416."""
+    return requested or run_args.get("imgsz") or 416
+
+
 def _rel(path) -> str:
     p = Path(path).resolve()
     try:
@@ -139,7 +144,7 @@ def main(argv=None) -> None:
     ap.add_argument("--data", type=Path, default=DEFAULT_DATA)
     ap.add_argument("--split", default="val", choices=["train", "val", "test"],
                     help="val for every decision; test is reported for information")
-    ap.add_argument("--imgsz", type=int, default=416)
+    ap.add_argument("--imgsz", type=int, help="default: the size the run was trained at")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--tag", help="results sub-folder (default: run name)")
     ap.add_argument("--notes", default="", help="free text for the evaluations.csv row")
@@ -147,18 +152,28 @@ def main(argv=None) -> None:
                     help="do not append to evaluations.csv (smoke runs only)")
     args = ap.parse_args(argv)
     tag = args.tag or args.weights.resolve().parent.parent.name
+    run_args = read_run_args(args.weights)
+    imgsz = resolve_imgsz(args.imgsz, run_args)
 
     from ultralytics import YOLO
-    r = YOLO(str(args.weights)).val(
+    model = YOLO(str(args.weights))
+    n_params = sum(p.numel() for p in model.model.parameters())
+    r = model.val(
         data=str(resolve_data_yaml(args.data)), split=args.split,
-        imgsz=args.imgsz, device=args.device, batch=16, plots=True,
+        imgsz=imgsz, device=args.device, batch=16, plots=True,
         project=str(RUNS_DIR / "eval"), name=f"{tag}-{args.split}", exist_ok=True)
 
     names = [r.names[i] for i in range(len(r.names))]
     per_class = {int(c): r.box.class_result(j) for j, c in enumerate(r.box.ap_class_index)}
     summary = summarise(names, r.box.map50, r.box.map, per_class)
     confusions = top_confusions(r.confusion_matrix.matrix, names)
-    summary.update(split=args.split, weights=str(args.weights), imgsz=args.imgsz,
+    summary.update(split=args.split, weights=str(args.weights), imgsz=imgsz,
+                   eval_data=_rel(args.data), device=args.device,
+                   start_weights=run_args.get("model", args.weights.name),
+                   train_data=Path(str(run_args.get("data", ""))).name.replace(".resolved", ""),
+                   seed=run_args.get("seed"), n_params=n_params,
+                   weights_mb=round(args.weights.stat().st_size / 1e6, 2),
+                   inference_ms=round(float(r.speed["inference"]), 2),
                    top_confusions=[list(c) for c in confusions])
 
     out = RESULTS_DIR / tag / args.split
@@ -171,11 +186,10 @@ def main(argv=None) -> None:
             shutil.copy2(Path(r.save_dir) / png, out / png)
 
     if not args.no_record:
-        run_args = read_run_args(args.weights)
         append_evaluation_row(EVALUATIONS_CSV, evaluation_row(
             summary, run=tag, data=_rel(args.data),
             start_weights=run_args.get("model", args.weights.name),
-            imgsz=args.imgsz, epochs=run_args.get("epochs", ""),
+            imgsz=imgsz, epochs=run_args.get("epochs", ""),
             split=args.split, notes=args.notes))
     print(to_markdown(summary, confusions))
     print(f"results saved to {out}"

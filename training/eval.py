@@ -106,6 +106,11 @@ def append_evaluation_row(csv_path, row: dict) -> None:
     csv_path = Path(csv_path)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     new = not csv_path.exists() or csv_path.stat().st_size == 0
+    if not new:
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            header = next(csv.reader(f))
+        if header != EVAL_COLUMNS:                 # would shift every value silently
+            raise ValueError(f"{csv_path} columns differ from {EVAL_COLUMNS}")
     with csv_path.open("a", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=EVAL_COLUMNS)
         if new:

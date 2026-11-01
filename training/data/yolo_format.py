@@ -14,15 +14,17 @@ import random
 from collections import Counter
 from typing import Iterable, Mapping, Sequence
 
-CLASSES = ["ball", "can", "box", "bottle"]   # must match data.yaml `names`
+CLASSES = ["ball", "can", "box", "bottle", "pen_pencil", "door_handle"]   # must match openimages6.yaml `names`
 
 # Open Images V7 boxable label → our class.  Several OI labels may map to the
 # same class (e.g. add "Football" → "ball" if "Ball" alone is too scarce).
 OI_TO_CLASS = {
-    "Ball":    "ball",
-    "Tin can": "can",
-    "Box":     "box",
-    "Bottle":  "bottle",
+    "Ball":        "ball",
+    "Tin can":     "can",
+    "Box":         "box",
+    "Bottle":      "bottle",
+    "Pen":         "pen_pencil",
+    "Door handle": "door_handle",
 }
 
 

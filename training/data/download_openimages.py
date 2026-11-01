@@ -1,10 +1,10 @@
 """
 training/data/download_openimages.py
 ====================================
-Download a 4-class subset of Open Images V7 (ball, can, box, bottle) with
-FiftyOne and write it in YOLO format:
+Download a 6-class subset of Open Images V7 (ball, can, box, bottle, pen_pencil,
+door_handle) with FiftyOne and write it in YOLO format:
 
-    training/datasets/openimages4/
+    training/datasets/openimages6/
         images/{train,val,test}/<id>.jpg
         labels/{train,val,test}/<id>.txt
         stats.json
@@ -13,7 +13,7 @@ FiftyOne and write it in YOLO format:
     python training/data/download_openimages.py --per-class 50  # quick smoke test
 
 Images are picked per class (so every class gets ~--per-class images), but ALL
-boxes of our four classes in each picked image are kept: a "Ball" image that
+boxes of our classes in each picked image are kept: a "Ball" image that
 also shows a bottle gets both labels.  Detections flagged IsGroupOf or
 IsDepiction are skipped (training/decisions.md); the image is kept, and an
 image left with no box becomes a background-only example.  The first run downloads Open
@@ -65,7 +65,7 @@ def collect(per_class: int, oi_split: str, seed: int, cache: Path):
             "open-images-v7", split=oi_split, label_types=["detections"],
             classes=oi_labels_for(cls), only_matching=False,  # keep every box
             max_samples=per_class, shuffle=True, seed=seed,
-            dataset_name=f"oi4-{cls}", drop_existing_dataset=True)
+            dataset_name=f"oi6-{cls}", drop_existing_dataset=True)
         field = "ground_truth" if ds.has_sample_field("ground_truth") else "detections"
         for sample in ds:
             image_id = Path(sample.filepath).stem
@@ -110,7 +110,7 @@ def main() -> None:
     ap.add_argument("--oi-split", default="train",
                     choices=["train", "validation", "test"],
                     help="Open Images split to sample from (we re-split ourselves)")
-    ap.add_argument("--out", type=Path, default=DATASETS_DIR / "openimages4")
+    ap.add_argument("--out", type=Path, default=DATASETS_DIR / "openimages6")
     ap.add_argument("--cache", type=Path, default=DATASETS_DIR / "_fiftyone_cache")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()

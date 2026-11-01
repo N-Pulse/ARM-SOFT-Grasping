@@ -1,4 +1,4 @@
-# training/ — multi-class object detector (ball, can, box, bottle)
+# training/ — multi-class object detector (ball, can, box, bottle, pen_pencil, door_handle)
 
 YOLO26n detection, fine-tuned from COCO. It will replace (in a later step) the
 red-HSV segmentation + cylinder/cuboid classifier in `armsoft/`, which is not
@@ -36,10 +36,10 @@ never pip-installs packages on its own; ONNX export then needs `onnx` installed 
     training/.venv-download/Scripts/python training/data/download_openimages.py   # ~500 img/class
     python training/data/preview_dataset.py                                       # visual check
 
-Classes: Ball→ball, Tin can→can, Box→box, Bottle→bottle (`training/data/yolo_format.py`).
+Classes: Ball→ball, Tin can→can, Box→box, Bottle→bottle, Pen→pen_pencil, Door handle→door_handle (`training/data/yolo_format.py`).
 Detections flagged IsGroupOf or IsDepiction are skipped; the image is kept.
 Split 70/15/15, fixed by seed 0 (the test split is frozen).
-Output: `training/datasets/openimages4/` (git-ignored) + `stats.json`; preview in
+Output: `training/datasets/openimages6/` (git-ignored) + `stats.json`; preview in
 `training/results/dataset_preview.jpg`. First run downloads ~4.8 GB of Open Images metadata
 into `training/datasets/_fiftyone_cache/` (~12 min in total on 2026-10-10).
 
@@ -57,10 +57,10 @@ Estimated from a 1-epoch smoke test on an Intel Core Ultra 5 225H: ~2 min/epoch,
 1. **Make the zips** (Git Bash, repo root):
 
        bash training/colab/make_code_zip.sh                # -> training/colab/training_code.zip
-       bash training/colab/make_data_zip.sh openimages4    # -> training/colab/openimages4.zip
+       bash training/colab/make_data_zip.sh openimages6    # -> training/colab/openimages6.zip
 
 2. **Upload to Google Drive**: `training_code.zip` → `MyDrive/npulse/` (again after each code
-   change); `openimages4.zip` → `MyDrive/npulse/data/` (once; future datasets, e.g. the in-house
+   change); `openimages6.zip` → `MyDrive/npulse/data/` (once; future datasets, e.g. the in-house
    D405 one, get their own zip there).
 3. **Run the notebook** `training/colab/colab_train.ipynb` in Colab:
    *Runtime > Change runtime type > T4 GPU*, set `RUN_NAME` / `DATA_ZIPS` / `EPOCHS` / `IMGSZ` /
@@ -94,7 +94,7 @@ only; the final test numbers are those of the best-on-val iteration.
 ## 7. Switch to the in-house dataset
 
 Put it in YOLO format (`images/{train,val,test}`, `labels/{train,val,test}`) under
-`training/datasets/<name>/`, copy `training/data/data.yaml` to e.g. `training/data/inhouse.yaml`,
+`training/datasets/<name>/`, copy `training/data/openimages6.yaml` to e.g. `training/data/inhouse.yaml`,
 change `path:` (relative to the yaml), keep `names` identical, then pass
 `--data training/data/inhouse.yaml` to train.py and eval.py (on Colab: add `--data ...` to
 `EXTRA_ARGS` and the dataset zip to `DATA_ZIPS`). To start from the Open Images model:

@@ -6,7 +6,7 @@ from training.data.yolo_format import (CLASSES, OI_TO_CLASS, filter_detections,
 
 
 def test_classes_order_is_fixed():
-    assert CLASSES == ["ball", "can", "box", "bottle"]
+    assert CLASSES == ["ball", "can", "box", "bottle", "pen_pencil", "door_handle"]
 
 
 def test_every_class_has_an_open_images_label():
@@ -35,6 +35,12 @@ def test_yolo_lines_maps_classes_and_drops_others():
             ("Tin can", [0.5, 0.5, 0.5, 0.5])]
     assert yolo_lines(dets) == ["3 0.250000 0.250000 0.500000 0.500000",
                                 "1 0.750000 0.750000 0.500000 0.500000"]
+
+
+def test_new_classes_keep_existing_ids():
+    dets = [("Pen", [0.0, 0.0, 0.5, 0.5]), ("Door handle", [0.5, 0.5, 0.5, 0.5]),
+            ("Bottle", [0.0, 0.0, 0.5, 0.5])]
+    assert [line.split()[0] for line in yolo_lines(dets)] == ["4", "5", "3"]
 
 
 def test_split_is_deterministic_disjoint_and_complete():

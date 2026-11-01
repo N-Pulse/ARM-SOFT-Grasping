@@ -32,3 +32,10 @@ def test_append_writes_header_once_and_rows_in_order(tmp_path):
 def test_append_rejects_unknown_column(tmp_path):
     with pytest.raises(ValueError):
         append_evaluation_row(tmp_path / "evaluations.csv", {**_row(), "oops": 1})
+
+
+def test_append_refuses_a_csv_with_other_columns(tmp_path):
+    path = tmp_path / "evaluations.csv"
+    path.write_text("date,run,notes\n2026-01-01,old,x\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        append_evaluation_row(path, {"run": "new"})

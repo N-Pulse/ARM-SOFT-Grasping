@@ -5,7 +5,7 @@ Visual check of a YOLO dataset before training: one row per class, N random
 images of the split that contain that class, with ALL their boxes drawn
 (each class in its own colour, so wrong / missing labels stand out).
 
-    python training/data/preview_dataset.py                       # openimages4, train, 6/class
+    python training/data/preview_dataset.py                       # openimages6, train, 6/class
     python training/data/preview_dataset.py --dataset training/datasets/oi4_smoke
 
 Writes training/results/dataset_preview.jpg (JPEG q=85, deterministic for a given --seed).
@@ -26,7 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from training.data.yolo_format import CLASSES  # noqa: E402
 from training.paths import DATASETS_DIR, RESULTS_DIR  # noqa: E402
 
-COLORS = [(0, 165, 255), (255, 80, 0), (0, 200, 0), (200, 0, 200)]  # BGR per class
+COLORS = [(0, 165, 255), (255, 80, 0), (0, 200, 0), (200, 0, 200),
+          (0, 0, 220), (160, 160, 0)]  # BGR per class
 TILE = 260
 LABEL_W = 110
 
@@ -63,7 +64,7 @@ def tile(img_path: Path, labels) -> np.ndarray:
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dataset", type=Path, default=DATASETS_DIR / "openimages4")
+    ap.add_argument("--dataset", type=Path, default=DATASETS_DIR / "openimages6")
     ap.add_argument("--split", default="train")
     ap.add_argument("--per-class", type=int, default=6)
     ap.add_argument("--seed", type=int, default=0)

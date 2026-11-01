@@ -29,6 +29,12 @@ def test_runs_on_other_evaluation_data_are_skipped(tmp_path):
     assert load_runs(tmp_path, "val") == {}
 
 
+def test_d405_fine_tuning_runs_stay_out_of_the_benchmark(tmp_path):
+    for train_data in ("d405.yaml", "openimages6_d405.yaml"):
+        _write(tmp_path, train_data, {**_metrics(NEAR_DATA), "train_data": train_data})
+    assert load_runs(tmp_path, "val") == {}
+
+
 def test_far_tag_evaluated_on_near_data_is_skipped(tmp_path):
     _write(tmp_path, "a__far", _metrics(NEAR_DATA))
     assert load_runs(tmp_path, "val") == {}

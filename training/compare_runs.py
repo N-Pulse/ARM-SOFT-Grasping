@@ -27,6 +27,8 @@ from training.paths import RESULTS_DIR  # noqa: E402
 FAR_SUFFIX = "__far"
 NEAR_DATA = "training/data/openimages6.yaml"
 FAR_DATA = "training/data/openimages6_far.yaml"
+# D405 fine-tuning runs are reported apart, by eval_d405.py.
+BENCHMARK_TRAIN_DATA = {"openimages6.yaml", "openimages6_large.yaml", "openimages6_far.yaml"}
 
 
 def load_runs(results_dir: Path, split: str) -> dict[str, dict]:
@@ -35,6 +37,8 @@ def load_runs(results_dir: Path, split: str) -> dict[str, dict]:
     for path in sorted(results_dir.glob(f"*/{split}/metrics.json")):
         tag = path.parent.parent.name
         metrics = json.loads(path.read_text(encoding="utf-8"))
+        if metrics.get("train_data") not in BENCHMARK_TRAIN_DATA:
+            continue
         if tag.endswith(FAR_SUFFIX) and metrics.get("eval_data") == FAR_DATA:
             runs.setdefault(tag[:-len(FAR_SUFFIX)], {})["far"] = metrics
         elif not tag.endswith(FAR_SUFFIX) and metrics.get("eval_data") == NEAR_DATA:

@@ -1,0 +1,12 @@
+# openimages6 assembled into grids: apparent size of objects at 50 cm-1 m (derive_far_dataset.py).
+path: ../datasets/openimages6_far
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: ball
+  1: can
+  2: box
+  3: bottle
+  4: pen_pencil
+  5: door_handle

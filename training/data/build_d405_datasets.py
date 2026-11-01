@@ -8,7 +8,8 @@ Build two YOLO datasets from a downloaded Dataset Studio data root:
     training/datasets/d405              approved D405 frames only, split by session
     training/datasets/openimages6_d405  openimages6 + D405 train (repeated) and val
 
-Only approved frames of the sessions in studio_format.SESSION_SPLITS are used.
+Only approved frames of the sessions in studio_format.SESSION_SPLITS are used,
+minus studio_format.EXCLUDED_FRAMES (rejected after visual control).
 The mixed dataset keeps every class present while the model adapts to D405 images.
 The D405 test split stays out of it and is used for evaluation only.
 """
@@ -23,8 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from training.data.studio_format import (SESSION_SPLITS, frame_lines,  # noqa: E402
-                                         raw_session_name, sessions_are_disjoint)
+from training.data.studio_format import (EXCLUDED_FRAMES, SESSION_SPLITS, frame_lines,  # noqa: E402
+                                         is_excluded, raw_session_name, sessions_are_disjoint)
 from training.data.yolo_format import class_counts  # noqa: E402
 from training.paths import DATASETS_DIR  # noqa: E402
 
@@ -38,7 +39,7 @@ def approved_frames(root: Path, session: str):
         raise SystemExit(f"no annotation for session {session} under {folder}")
     for path in paths:
         annotation = json.loads(path.read_text(encoding="utf-8"))
-        if annotation["review_status"] == "approved":
+        if annotation["review_status"] == "approved" and not is_excluded(session, annotation["frame_id"]):
             raw = raw_session_name(annotation["source_session"])
             yield root / "raw" / "object" / raw / annotation["source_color"], annotation
 
@@ -91,6 +92,7 @@ def main(argv=None) -> None:
         stats[split] = {"images": frames, "sessions": sessions,
                         "instances": class_counts(all_lines)}
         print(f"[{split}] {stats[split]}")
+    stats["excluded_frames"] = EXCLUDED_FRAMES
     download = args.root / "DOWNLOAD.json"
     if download.exists():
         stats["source"] = json.loads(download.read_text(encoding="utf-8"))

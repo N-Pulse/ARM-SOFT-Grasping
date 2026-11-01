@@ -24,6 +24,20 @@ SESSION_SPLITS = {
 }
 
 
+# Approved in the Studio but rejected after visual control of every box.
+EXCLUDED_FRAMES = {
+    "can_4": {"frame_000007": "3 of its 4 boxes are on the empty table",
+              "frame_000008": "box cuts the top of the can",
+              "frame_000009": "box cuts the top of the can"},
+    "can_5": {f"frame_{n:06d}": "box cuts the top of the can"
+              for n in (4, 8, 9, 10, 11, 13, 14)},
+}
+
+
+def is_excluded(session: str, frame_id: str) -> bool:
+    return frame_id in EXCLUDED_FRAMES.get(session, {})
+
+
 def box_line(class_name: str, bbox_xyxy, width: int, height: int) -> str:
     x1, y1, x2, y2 = bbox_xyxy
     x1, x2 = max(0.0, x1), min(float(width), x2)

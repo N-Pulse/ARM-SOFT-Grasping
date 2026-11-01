@@ -1,6 +1,6 @@
 import pytest
 
-from training.data.studio_format import (SESSION_SPLITS, box_line, frame_lines,
+from training.data.studio_format import (SESSION_SPLITS, box_line, frame_lines, is_excluded,
                                          raw_session_name, sessions_are_disjoint)
 
 
@@ -35,6 +35,14 @@ def test_unknown_class_is_an_error_not_a_silent_gap():
 
 def test_raw_session_comes_from_the_windows_path():
     assert raw_session_name("C:\\npulse_cv\\ARM-SOFT-data\\raw\\object\\can") == "can"
+
+
+def test_rejected_frames_are_excluded_per_session():
+    assert is_excluded("can_4", "frame_000007")
+    assert is_excluded("can_5", "frame_000014")
+    assert not is_excluded("can_4", "frame_000010")
+    assert not is_excluded("can_5", "frame_000012")
+    assert not is_excluded("can_2", "frame_000007")
 
 
 def test_no_session_is_in_two_splits():

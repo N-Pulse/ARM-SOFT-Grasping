@@ -1,13 +1,26 @@
 # ARM-SOFT Grasping — standalone model
 
-## Unified vision integration branch
+## Team entry point: `main`
 
-`integration/unified-vision-pipeline` combines Dataset Studio object
-segmentation/detection, mechanical-hand YOLO Pose + RGB-D fusion, and the
-portable RGB-D → coloured point-cloud pipeline. The immediate integration
-contract and remaining Web Live Test work are documented in
-[`docs/unified_vision_pipeline.md`](docs/unified_vision_pipeline.md). Point-cloud
-CLI details remain in [`docs/point_cloud_pipeline.md`](docs/point_cloud_pipeline.md).
+`main` is now the integrated team baseline. It contains Dataset Studio,
+object detection/segmentation, mechanical-hand YOLO Pose + RGB-D fusion,
+coloured point-cloud export, the training/comparison tools, and the versioned
+team model catalog. Start new work from an up-to-date `main`; do not merge old
+feature branches into each other.
+
+| Need | Start here |
+| --- | --- |
+| Capture, preprocess, annotate, review, export, train, live-test | `python tools/dataset_web.py` |
+| Use the bundled team model | Web **Live Test** or `models/catalog/` |
+| Compare/train object models | `training/README.md` |
+| Mechanical-hand pose + metric 3-D points | `docs/vision_training_pipeline.md` |
+| RGB-D point clouds | `docs/point_cloud_pipeline.md` |
+| Add a model without committing weights | `docs/runtime_models.md` |
+| Git rules and complete feature map | `docs/team_git_and_features.md` |
+
+The first bundled checkpoint, **YOLO26s Open Images + D405 v1**, is marked
+experimental. Dataset Studio discovers it automatically; validate it on real
+D405 scenes and save failure cases before using it for deployment.
 
 ## Dataset Studio (local web capture)
 
@@ -27,8 +40,8 @@ All worktrees share one data root at `../ARM-SOFT-data` by default. Override it 
 frames and restores ownership to the invoking macOS user after a sudo camera session.
 See [docs/dataset_studio_user_guide.md](docs/dataset_studio_user_guide.md) for the complete workflow, storage layout, deletion order, and troubleshooting guide.
 
-Trained team models can be added later without changing the pipeline or
-committing weights to Git. Validate and register a `.pt` checkpoint with
+Additional team models can be added without changing the pipeline or
+committing weights to ordinary Git. Validate and register a `.pt` checkpoint with
 `tools/register_runtime_model.py`; Dataset Studio then lists it in Live Test.
 See [docs/runtime_models.md](docs/runtime_models.md) for the folder contract and
 team hand-off checklist.
@@ -40,11 +53,9 @@ or `sudo` launch is required. The Studio automatically offers NVIDIA CUDA when
 the installed PyTorch build reports an available GPU; otherwise CPU remains
 available. Full commands are in the user guide above.
 
-> **Branch: `independent-cv` — stable RGB-D grasping baseline.**  This is the
-> integration base for camera capture, object isolation, cylinder/cuboid
-> fitting and grasp generation. Human MediaPipe experiments live on
-> `feature/mediapipe-actions`; mechanical-hand annotation and YOLO Pose work
-> live on `feature/mechanical-hand-pose`.
+Historical feature branches remain useful for archaeology, but `main` is the
+only supported integration base. Once a feature has been merged and verified,
+new development should not continue on its old branch.
 
 The shared dataset/training architecture, capture contract, assisted-labeling
 flows and branch plan are documented in

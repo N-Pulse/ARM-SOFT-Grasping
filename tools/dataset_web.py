@@ -655,6 +655,9 @@ class State:
 
     def test_inputs(self):
         runs=[]
+        bundled_root=ROOT/"models"/"catalog"
+        for model in discover_runtime_models(bundled_root):
+            runs.append({"id":f"bundled/{model.id}","name":model.display_name,"model":model.base_model,"dataset":model.dataset_version,"task":model.task,"version":model.model_version,"source":"bundled"})
         runtime_root=self.root.parents[1]/"models"/"runtime"
         for model in discover_runtime_models(runtime_root):
             runs.append({"id":f"runtime/{model.id}","name":model.display_name,"model":model.base_model,"dataset":model.dataset_version,"task":model.task,"version":model.model_version,"source":"runtime"})
@@ -677,11 +680,12 @@ class State:
     def _test_model(self,model_id):
         if not isinstance(model_id,str) or "/" not in model_id: raise ValueError("Select a completed training run with best.pt")
         family,name=model_id.split("/",1)
-        if family not in {"object","pose","runtime"} or not SAFE.fullmatch(name): raise ValueError("Select a valid local model")
-        if family=="runtime":
-            records={model.id:model for model in discover_runtime_models(self.root.parents[1]/"models"/"runtime")}
+        if family not in {"object","pose","runtime","bundled"} or not SAFE.fullmatch(name): raise ValueError("Select a valid local model")
+        if family in {"runtime","bundled"}:
+            model_root=self.root.parents[1]/"models"/"runtime" if family=="runtime" else ROOT/"models"/"catalog"
+            records={model.id:model for model in discover_runtime_models(model_root)}
             model=records.get(name)
-            if model is None: raise ValueError("Registered runtime model is missing or invalid")
+            if model is None: raise ValueError("Registered model is missing or invalid")
             return {"id":model_id,"name":model.display_name,"task":model.task,"weights":model.weights,"base_model":model.base_model,"version":model.model_version}
         relative=Path("runs")/("object_segmentation" if family=="object" else "mechanical_hand_pose")/name
         root=self.root.parents[1].resolve(); run=(root/relative).resolve(); weights=run/"weights"/"best.pt"; metadata=run/"armsoft_training.json"

@@ -126,8 +126,8 @@ class DatasetWebSafetyTests(unittest.TestCase):
         (run / "weights" / "best.pt").write_bytes(b"weights")
         (run / "armsoft_training.json").write_text(json.dumps({"base_model": "yolo11n-pose.pt", "dataset": "pose.yaml"}))
         registered = self.state.test_inputs()["runs"]
-        self.assertEqual(registered[0]["id"], "pose/pose_v1")
-        self.assertEqual(registered[0]["task"], "pose")
+        pose = next(item for item in registered if item["id"] == "pose/pose_v1")
+        self.assertEqual(pose["task"], "pose")
 
     def test_registered_runtime_model_is_available_to_live_test(self):
         model = self.data / "models" / "runtime" / "seg-v2"; model.mkdir(parents=True)
@@ -138,9 +138,25 @@ class DatasetWebSafetyTests(unittest.TestCase):
             "weights": "best.pt", "base_model": "best.pt", "model_version": "2.0.0",
         }))
         registered = self.state.test_inputs()["runs"]
-        self.assertEqual(registered[0]["id"], "runtime/seg-v2")
+        self.assertIn("runtime/seg-v2", [item["id"] for item in registered])
         selected = self.state._test_model("runtime/seg-v2")
         self.assertEqual(selected["task"], "segmentation")
+        self.assertTrue(selected["weights"].is_file())
+
+    def test_bundled_catalog_model_is_available_to_live_test(self):
+        repository = Path(self.temp.name) / "repository"
+        model = repository / "models" / "catalog" / "detect-v1"; model.mkdir(parents=True)
+        (model / "best.pt").write_bytes(b"weights")
+        (model / "model.json").write_text(json.dumps({
+            "schema": "armsoft.runtime-model.v1", "id": "detect-v1",
+            "display_name": "D405 Detect v1", "task": "detection",
+            "weights": "best.pt", "base_model": "YOLO26s", "model_version": "1.0.0",
+        }))
+        with patch("tools.dataset_web.ROOT", repository):
+            registered = self.state.test_inputs()["runs"]
+            self.assertEqual(registered[0]["id"], "bundled/detect-v1")
+            selected = self.state._test_model("bundled/detect-v1")
+        self.assertEqual(selected["task"], "detection")
         self.assertTrue(selected["weights"].is_file())
 
     def test_finishing_capture_rebuilds_catalog(self):

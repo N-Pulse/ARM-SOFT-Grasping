@@ -1,7 +1,13 @@
-# Runtime model registry
+# Runtime and bundled model registry
 
-Dataset Studio discovers deployable models from the shared data root rather
-than storing large weights in Git:
+Models committed as a reviewed team release live under `models/catalog/` and
+appear automatically in Dataset Studio **Live Test**. Each version is
+immutable and contains `best.pt`, `model.json`, and a README. See
+`models/catalog/README.md` for the contract.
+
+For additional large or machine-local models, Dataset Studio discovers
+deployable models from the shared data root rather than storing weights in
+ordinary Git:
 
 ```text
 ARM-SOFT-data/models/runtime/<model-id>/

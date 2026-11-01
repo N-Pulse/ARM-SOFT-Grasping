@@ -2,7 +2,8 @@ import csv
 
 import pytest
 
-from training.eval import EVAL_COLUMNS, append_evaluation_row, evaluation_row, summarise
+from training.eval import (EVAL_COLUMNS, append_evaluation_row, evaluation_row,
+                           resolve_imgsz, summarise)
 
 NAMES = ["ball", "can", "box", "bottle"]
 
@@ -32,3 +33,16 @@ def test_append_writes_header_once_and_rows_in_order(tmp_path):
 def test_append_rejects_unknown_column(tmp_path):
     with pytest.raises(ValueError):
         append_evaluation_row(tmp_path / "evaluations.csv", {**_row(), "oops": 1})
+
+
+def test_eval_size_follows_the_run_unless_requested():
+    assert resolve_imgsz(None, {"imgsz": 640}) == 640
+    assert resolve_imgsz(320, {"imgsz": 640}) == 320
+    assert resolve_imgsz(None, {}) == 416
+
+
+def test_append_refuses_a_csv_with_other_columns(tmp_path):
+    path = tmp_path / "evaluations.csv"
+    path.write_text("date,run,notes\n2026-01-01,old,x\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        append_evaluation_row(path, {"run": "new"})

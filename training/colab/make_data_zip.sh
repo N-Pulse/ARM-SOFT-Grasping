@@ -3,7 +3,7 @@
 # The zip root is <name>/, so the notebook unzips it straight into training/datasets/.
 # Upload the result ONCE to Google Drive: MyDrive/npulse/data/<name>.zip
 #
-#   bash training/colab/make_data_zip.sh                 # openimages4 (default)
+#   bash training/colab/make_data_zip.sh                 # openimages6 (default)
 #   bash training/colab/make_data_zip.sh inhouse_d405    # any other dataset folder
 #
 # Needs only Python (zipfile is in the standard library); set PYTHON=... to pick one.
@@ -11,7 +11,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && (pwd -W 2>/dev/null || pwd))"
 TRAINING="$(dirname "$HERE")"
-NAME="${1:-openimages4}"
+NAME="${1:-openimages6}"
 SRC="$TRAINING/datasets/$NAME"
 OUT="$HERE/$NAME.zip"
 PY="${PYTHON:-python}"

@@ -22,7 +22,7 @@ RUNS_DIR     = TRAINING_DIR / "runs"       # git-ignored
 WEIGHTS_DIR  = TRAINING_DIR / "weights"    # git-ignored
 RESULTS_DIR  = TRAINING_DIR / "results"    # committed (small files only)
 
-DEFAULT_DATA  = TRAINING_DIR / "data" / "data.yaml"
+DEFAULT_DATA  = TRAINING_DIR / "data" / "openimages6.yaml"
 DEFAULT_MODEL = "yolo26n.pt"               # COCO-pretrained, auto-downloaded
 
 

@@ -1,7 +1,7 @@
 """
 training/train.py
 =================
-Fine-tune YOLO26n (COCO-pretrained) on a 4-class YOLO dataset.
+Fine-tune YOLO26n (COCO-pretrained) on a YOLO dataset (default: 6 classes).
 
     python training/train.py --name iter1                       # defaults (CPU)
     python training/train.py --epochs 1 --fraction 0.05 --name smoke

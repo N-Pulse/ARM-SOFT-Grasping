@@ -1,4 +1,5 @@
-# Grasp-object detection dataset, YOLO format.
+# 4-class Open Images dataset used by iter1; kept so its results stay reproducible.
+# New runs use openimages6.yaml.
 #
 # To train on another dataset (e.g. the in-house D405 set), copy this file,
 # change `path`, keep the same `names` (same order), and pass the copy with

@@ -14,15 +14,17 @@ import random
 from collections import Counter
 from typing import Iterable, Mapping, Sequence
 
-CLASSES = ["ball", "can", "box", "bottle"]   # must match data.yaml `names`
+CLASSES = ["ball", "can", "box", "bottle", "pen_pencil", "door_handle"]   # must match openimages6.yaml `names`
 
 # Open Images V7 boxable label → our class.  Several OI labels may map to the
 # same class (e.g. add "Football" → "ball" if "Ball" alone is too scarce).
 OI_TO_CLASS = {
-    "Ball":    "ball",
-    "Tin can": "can",
-    "Box":     "box",
-    "Bottle":  "bottle",
+    "Ball":        "ball",
+    "Tin can":     "can",
+    "Box":         "box",
+    "Bottle":      "bottle",
+    "Pen":         "pen_pencil",
+    "Door handle": "door_handle",
 }
 
 
@@ -85,6 +87,11 @@ def split_ids(ids: Iterable[str], fractions=(0.7, 0.15, 0.15),
     return {"train": ids[:n_train],
             "val":   ids[n_train:n_train + n_val],
             "test":  ids[n_train + n_val:]}
+
+
+def new_train_ids(candidates: Iterable[str], frozen: Iterable[str]) -> list[str]:
+    """Ids that may enlarge the train split: anything already in the base dataset stays where it is."""
+    return sorted(set(candidates) - set(frozen))
 
 
 def class_counts(lines: Iterable[str]) -> dict[str, int]:

@@ -1,4 +1,4 @@
-# training/ — multi-class object detector (ball, can, box, bottle)
+# training/ — multi-class object detector (ball, can, box, bottle, pen_pencil, door_handle)
 
 YOLO26n detection, fine-tuned from COCO. It will replace (in a later step) the
 red-HSV segmentation + cylinder/cuboid classifier in `armsoft/`, which is not
@@ -36,10 +36,10 @@ never pip-installs packages on its own; ONNX export then needs `onnx` installed 
     training/.venv-download/Scripts/python training/data/download_openimages.py   # ~500 img/class
     python training/data/preview_dataset.py                                       # visual check
 
-Classes: Ball→ball, Tin can→can, Box→box, Bottle→bottle (`training/data/yolo_format.py`).
+Classes: Ball→ball, Tin can→can, Box→box, Bottle→bottle, Pen→pen_pencil, Door handle→door_handle (`training/data/yolo_format.py`).
 Detections flagged IsGroupOf or IsDepiction are skipped; the image is kept.
 Split 70/15/15, fixed by seed 0 (the test split is frozen).
-Output: `training/datasets/openimages4/` (git-ignored) + `stats.json`; preview in
+Output: `training/datasets/openimages6/` (git-ignored) + `stats.json`; preview in
 `training/results/dataset_preview.jpg`. First run downloads ~4.8 GB of Open Images metadata
 into `training/datasets/_fiftyone_cache/` (~12 min in total on 2026-10-10).
 
@@ -57,10 +57,10 @@ Estimated from a 1-epoch smoke test on an Intel Core Ultra 5 225H: ~2 min/epoch,
 1. **Make the zips** (Git Bash, repo root):
 
        bash training/colab/make_code_zip.sh                # -> training/colab/training_code.zip
-       bash training/colab/make_data_zip.sh openimages4    # -> training/colab/openimages4.zip
+       bash training/colab/make_data_zip.sh openimages6    # -> training/colab/openimages6.zip
 
 2. **Upload to Google Drive**: `training_code.zip` → `MyDrive/npulse/` (again after each code
-   change); `openimages4.zip` → `MyDrive/npulse/data/` (once; future datasets, e.g. the in-house
+   change); `openimages6.zip` → `MyDrive/npulse/data/` (once; future datasets, e.g. the in-house
    D405 one, get their own zip there).
 3. **Run the notebook** `training/colab/colab_train.ipynb` in Colab:
    *Runtime > Change runtime type > T4 GPU*, set `RUN_NAME` / `DATA_ZIPS` / `EPOCHS` / `IMGSZ` /
@@ -94,7 +94,7 @@ only; the final test numbers are those of the best-on-val iteration.
 ## 7. Switch to the in-house dataset
 
 Put it in YOLO format (`images/{train,val,test}`, `labels/{train,val,test}`) under
-`training/datasets/<name>/`, copy `training/data/data.yaml` to e.g. `training/data/inhouse.yaml`,
+`training/datasets/<name>/`, copy `training/data/openimages6.yaml` to e.g. `training/data/inhouse.yaml`,
 change `path:` (relative to the yaml), keep `names` identical, then pass
 `--data training/data/inhouse.yaml` to train.py and eval.py (on Colab: add `--data ...` to
 `EXTRA_ARGS` and the dataset zip to `DATA_ZIPS`). To start from the Open Images model:
@@ -105,3 +105,36 @@ change `path:` (relative to the yaml), keep `names` identical, then pass
     python -c "from ultralytics import YOLO; YOLO('training/runs/detect/<best>/weights/best.pt').export(format='onnx', imgsz=416)"
 
 Needs `onnx` (not installed in the team venv yet). TFLite: see `porting/export_tflite.py`.
+
+## 9. Benchmark: models and datasets
+
+Every run is judged on the same frozen images, twice: **near** (`openimages6`, Open Images sizes)
+and **far** (`openimages6_far`, same images in grids, apparent size at 50 cm-1 m). Web photos only:
+this ranks the options; the D405 verdict comes later.
+
+Train datasets: D1 `openimages6`, D2 `openimages6_large` (more train images), D3 `openimages6_far`.
+
+**Colab settings** (Section 4; `EPOCHS 30`, `BATCH 32`, `PATIENCE 10`, `IMGSZ 416` unless stated):
+
+| Step | `RUN_NAME` | `DATA_ZIPS` | `EXTRA_ARGS` |
+|---|---|---|---|
+| 1 | `b1_yolo26n_d1` | `openimages6.zip` | `""` |
+| 1 | `b1_yolo11n_d1` | `openimages6.zip` | `"--model yolo11n.pt"` |
+| 1 | `b1_yolov8n_d1` | `openimages6.zip` | `"--model yolov8n.pt"` |
+| 1 | `b1_yolo26s_d1` | `openimages6.zip` | `"--model yolo26s.pt"` |
+| 2 | `b2_<model>_d2` (best 2) | `openimages6_large.zip` | `"--model <model>.pt --data training/data/openimages6_large.yaml"` |
+| 2 | `b2_<model>_d3` (best 2) | `openimages6_far.zip` | `"--model <model>.pt --data training/data/openimages6_far.yaml"` |
+| 3 | `b3_<best>_640` (`IMGSZ 640`) | best dataset | as its best run |
+| 4 | `b4_<best>_seed1` (best 2) | as the run | as the run, plus `--seed 1` |
+
+**Evaluate each run on the PC**, near then far (the size follows the run):
+
+    python training/eval.py --weights training/runs/detect/<run>/weights/best.pt --split val --notes "trained on Colab T4"
+    python training/eval.py --weights training/runs/detect/<run>/weights/best.pt --split val --data training/data/openimages6_far.yaml --tag <run>__far --notes "far; trained on Colab T4"
+
+**Table:** `python training/compare_runs.py` writes `training/results/benchmark_val.md`.
+
+**Decision rule, fixed in advance:** keep the lightest model, unless another one gains more recall
+on the far set than the gap between the two seeds of step 4, at an acceptable CPU time. Use val for
+every decision; evaluate test only for the chosen run (`--split test`, then
+`compare_runs.py --split test`).

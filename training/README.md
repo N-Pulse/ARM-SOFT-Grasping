@@ -5,6 +5,7 @@ red-HSV segmentation + cylinder/cuboid classifier in `armsoft/`, which is not
 modified here. Works on any object colour, several objects per image.
 
 Design choices and their reasons: [`decisions.md`](decisions.md).
+Current status, results and next steps: [`docs/object_detection_handover.md`](../docs/object_detection_handover.md).
 
 ## 1. Environments (native Windows; not WSL: it cannot see the D405)
 
@@ -116,16 +117,16 @@ Train datasets: D1 `openimages6`, D2 `openimages6_large` (more train images), D3
 
 **Colab settings** (Section 4; `EPOCHS 30`, `BATCH 32`, `PATIENCE 10`, `IMGSZ 416` unless stated):
 
-| Step | `RUN_NAME` | `DATA_ZIPS` | `EXTRA_ARGS` |
-|---|---|---|---|
-| 1 | `b1_yolo26n_d1` | `openimages6.zip` | `""` |
-| 1 | `b1_yolo11n_d1` | `openimages6.zip` | `"--model yolo11n.pt"` |
-| 1 | `b1_yolov8n_d1` | `openimages6.zip` | `"--model yolov8n.pt"` |
-| 1 | `b1_yolo26s_d1` | `openimages6.zip` | `"--model yolo26s.pt"` |
-| 2 | `b2_<model>_d2` (best 2) | `openimages6_large.zip` | `"--model <model>.pt --data training/data/openimages6_large.yaml"` |
-| 2 | `b2_<model>_d3` (best 2) | `openimages6_far.zip` | `"--model <model>.pt --data training/data/openimages6_far.yaml"` |
-| 3 | `b3_<best>_640` (`IMGSZ 640`) | best dataset | as its best run |
-| 4 | `b4_<best>_seed1` (best 2) | as the run | as the run, plus `--seed 1` |
+| Step | `RUN_NAME`                    | `DATA_ZIPS`             | `EXTRA_ARGS`                                                       |
+| ---- | ----------------------------- | ----------------------- | ------------------------------------------------------------------ |
+| 1    | `b1_yolo26n_d1`               | `openimages6.zip`       | `""`                                                               |
+| 1    | `b1_yolo11n_d1`               | `openimages6.zip`       | `"--model yolo11n.pt"`                                             |
+| 1    | `b1_yolov8n_d1`               | `openimages6.zip`       | `"--model yolov8n.pt"`                                             |
+| 1    | `b1_yolo26s_d1`               | `openimages6.zip`       | `"--model yolo26s.pt"`                                             |
+| 2    | `b2_<model>_d2` (best 2)      | `openimages6_large.zip` | `"--model <model>.pt --data training/data/openimages6_large.yaml"` |
+| 2    | `b2_<model>_d3` (best 2)      | `openimages6_far.zip`   | `"--model <model>.pt --data training/data/openimages6_far.yaml"`   |
+| 3    | `b3_<best>_640` (`IMGSZ 640`) | best dataset            | as its best run                                                    |
+| 4    | `b4_<best>_seed1` (best 2)    | as the run              | as the run, plus `--seed 1`                                        |
 
 **Evaluate each run on the PC**, near then far (the size follows the run):
 

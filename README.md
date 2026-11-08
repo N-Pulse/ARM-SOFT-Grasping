@@ -13,6 +13,7 @@ feature branches into each other.
 | Capture, preprocess, annotate, review, export, train, live-test | `python tools/dataset_web.py` |
 | Use the bundled team model | Web **Live Test** or `models/catalog/` |
 | Compare/train object models | `training/README.md` |
+| Object detection status, results and handover | `docs/object_detection_handover.md` |
 | Mechanical-hand pose + metric 3-D points | `docs/vision_training_pipeline.md` |
 | RGB-D point clouds | `docs/point_cloud_pipeline.md` |
 | Add a model without committing weights | `docs/runtime_models.md` |

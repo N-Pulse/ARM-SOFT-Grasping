@@ -122,6 +122,18 @@ Numbers marked *log* come from the Colab end-of-training validation; the others 
 | `b2_yolo26s_d405` | `b1_yolo26s_d1` | `d405` only, 50 epochs | Forgets the other classes (section 5) |
 | `b2_yolo26s_mix` | `b1_yolo26s_d1` | `openimages6_d405` (D405 train repeated 5 times) | Stopped at epoch 11, **best epoch 1**; published as the catalog model |
 
+**Expectation (not measured yet):** on a live demo with Open Images-style objects (can, box,
+bottle, pen, ball, door_handle at typical distances), `b1_yolo26s_d1` is likely to perform better
+than the published `b2_yolo26s_mix`. The mix regressed from `b1_yolo26s_d1` on Open Images, with
+the best epoch coming at 1 of 11, for two reasons: (a) the D405 train set is much smaller and
+visually different (white-table scenes at 20-35 cm, no ball or bottle, limited objects) than Open
+Images web photos, so training on the mix pulls the model toward D405 scenes; and (b) at the
+learning rate used (`optimizer=auto` -> AdamW lr 0.001, see section 7), that pull is aggressive
+enough to erase Open Images features from the start. The mix was published for its D405 coverage
+but at a visible cost on confidence (observed live: 0.40 to 0.42 on some detections).
+`b1_yolo26s_d1` has never been evaluated live: a side-by-side, once its weights are on the team
+Drive, would settle it.
+
 Comparison of the three `b1` runs: [`training/results/benchmark_preliminary_colab.md`](../training/results/benchmark_preliminary_colab.md).
 `yolov8n` was not run. `openimages6_far` and `openimages6_large` were built but never trained.
 

@@ -13,6 +13,7 @@ feature branches into each other.
 | Capture, preprocess, annotate, review, export, train, live-test | `python tools/dataset_web.py` |
 | Use the bundled team model | Web **Live Test** or `models/catalog/` |
 | Compare/train object models | `training/README.md` |
+| Download Open Images + HF D405 data, build the training set | `python training/data/prepare_dataset.py all` ([details](docs/dataset_pipeline_handover.md)) |
 | Object detection status, results and handover | `docs/object_detection_handover.md` |
 | Mechanical-hand pose + metric 3-D points | `docs/vision_training_pipeline.md` |
 | RGB-D point clouds | `docs/point_cloud_pipeline.md` |
@@ -22,6 +23,33 @@ feature branches into each other.
 The first bundled checkpoint, **YOLO26s Open Images + D405 v1**, is marked
 experimental. Dataset Studio discovers it automatically; validate it on real
 D405 scenes and save failure cases before using it for deployment.
+
+## Training dataset: Open Images + Hugging Face D405
+
+One command downloads Open Images (6 classes, 500/class) and the team's D405
+captures from Hugging Face (`DouaaKDR/Npulse`, pinned revision), then builds,
+validates and publishes a YOLO detection dataset. Inputs are pinned in
+`configs/datasets/openimages_d405_v1.yaml`.
+
+```bash
+# one-time setup
+python -m pip install huggingface_hub
+python3 -m venv training/.venv-download
+training/.venv-download/bin/python -m pip install fiftyone pyyaml
+hf auth login            # request access on the HF dataset page first
+
+python training/data/prepare_dataset.py check                # environment + outputs
+python training/data/prepare_dataset.py all --per-class 50   # quick run (_pc50 names)
+python training/data/prepare_dataset.py all                  # full dataset
+python training/data/prepare_dataset.py validate             # re-check, prints counts
+```
+
+Output: `training/datasets/openimages6_d405_v1/` (train), `training/datasets/d405_v1/`
+(D405-only evaluation) and `training/data/openimages6_d405_v1.yaml` (pass to
+`training/train.py --data`). Existing datasets are never overwritten without `--force`.
+New HF uploads need a new config (`..._v2.yaml`) with the new revision, a new
+`huggingface.output` folder and the new sessions in `d405.session_splits`.
+Full options: `training/README.md` §2; handover: `docs/dataset_pipeline_handover.md`.
 
 ## Dataset Studio (local web capture)
 

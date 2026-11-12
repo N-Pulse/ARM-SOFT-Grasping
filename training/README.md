@@ -34,6 +34,50 @@ never pip-installs packages on its own; ONNX export then needs `onnx` installed 
 
 ## 2. Dataset (Open Images V7 → YOLO)
 
+### One-command Open Images + Hugging Face D405 pipeline
+
+`training/data/prepare_dataset.py` downloads both sources, converts the Dataset Studio
+annotations, builds the D405-only and mixed YOLO detection datasets in a staging directory,
+validates them, and publishes them only if every check passes. All pinned inputs (classes,
+Open Images count and seed, Hugging Face revision, session splits, excluded frames, class
+mapping, D405 repeat factor) live in `configs/datasets/openimages_d405_v1.yaml`.
+
+**One-time setup** (macOS/Linux; on Windows use `Scripts\python`):
+
+    python -m pip install huggingface_hub                 # in the normal training .venv
+    python3 -m venv training/.venv-download               # FiftyOne must stay out of .venv
+    training/.venv-download/bin/python -m pip install fiftyone pyyaml
+    huggingface-cli login                                 # only if the HF dataset is private
+
+**Run:**
+
+    python training/data/prepare_dataset.py check                  # environment + outputs
+    python training/data/prepare_dataset.py all --per-class 50     # quick run (_pc50 names)
+    python training/data/prepare_dataset.py all                    # pinned full dataset
+    python training/data/prepare_dataset.py validate               # re-check, no download
+
+Steps can also run one at a time: `download-openimages`, `download-hf`, `build`.
+
+| Behaviour | Detail |
+|---|---|
+| Quick run | `--per-class N` different from the config adds `_pcN` to every output (source, datasets, yaml), so it never touches the full dataset |
+| Sources | reused when their `DOWNLOAD.json` matches the config; otherwise the run stops. `--refresh-sources` downloads again |
+| Existing datasets | never overwritten. `--force` moves them to `training/datasets/.previous/<name>-<time>/` and publishes both new datasets together (rolled back if a move fails) |
+| Failed validation | nothing is published; the partial build and both `validation_report.json` are kept in `training/datasets/.failed/<time>/` |
+| D405 repeats | hard links by default (one copy on disk). Use `--link-mode copy` before zipping for Colab |
+| Checks | every image has a label and vice versa, class ids 0-5, coordinates in [0, 1], non-empty boxes, every image decodes (OpenCV or Pillow), no identical image in two splits; D405 sessions are split whole |
+
+Outputs: `training/datasets/d405_v1/`, `training/datasets/openimages6_d405_v1/` (each with
+`dataset_manifest.json`, `validation_report.json`, `stats.json`), and the trainable
+`training/data/openimages6_d405_v1.yaml`. The manifest records the git revision and the
+settings actually used to download each source. The command ends by printing a ready-to-run
+`training/train.py` command.
+
+To change any pinned input, copy the config to a new version (`..._v2.yaml`) with new
+`name` and output names instead of editing v1, so earlier results stay reproducible.
+
+### Open Images only
+
     training/.venv-download/Scripts/python training/data/download_openimages.py   # ~500 img/class
     python training/data/preview_dataset.py                                       # visual check
 

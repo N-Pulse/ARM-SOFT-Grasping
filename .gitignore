@@ -27,6 +27,7 @@ datasets/mechanical_hand_pose/*
 # training/ — datasets, runs and weights are large and reproducible
 training/.venv-download/
 training/datasets/
+training/sources/
 training/runs/
 training/weights/
 training/results/live/

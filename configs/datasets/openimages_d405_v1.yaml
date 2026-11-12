@@ -1,0 +1,56 @@
+# Pinned inputs of the Open Images + D405 detection dataset.
+# Build with: python training/data/prepare_dataset.py all
+# Change any value below -> bump `name` (and the output names) to a new version.
+version: 1
+name: openimages6_d405_v1
+classes:            # fixed order = YOLO class ids 0-5
+  - ball
+  - can
+  - box
+  - bottle
+  - pen_pencil
+  - door_handle
+
+openimages:
+  output: training/datasets/openimages6
+  per_class: 500
+  seed: 0
+
+huggingface:
+  repo_id: DouaaKDR/Npulse
+  repo_type: dataset
+  revision: ac4f808d4b7d8f2eeed19821ccd2c4417c022a7b
+  output: training/sources/npulse-ac4f808
+
+d405:
+  output_name: d405_v1
+  train_repeat: 5           # D405 train frames appear 5 times in the mixed train split
+  link_mode: hardlink       # hardlink = one copy on disk; use --link-mode copy before zipping
+  # Dataset Studio class name -> YOLO class. Studio IDs differ between sessions: match by name.
+  class_map:
+    can: can
+    box: box
+    ball-pen: pen_pencil
+  # Whole sessions per split. Test holds objects absent from train and val.
+  session_splits:
+    train: [can_1, can_2, can_3, can_4, can_6, test-black-box-3, stylo_green_1]
+    val: [can_5, box-beige-1]
+    test: [can_7, test-box-2]
+  # Approved in the Studio but rejected after visual control of every box.
+  excluded_frames:
+    can_4:
+      frame_000007: 3 of its 4 boxes are on the empty table
+      frame_000008: box cuts the top of the can
+      frame_000009: box cuts the top of the can
+    can_5:
+      frame_000004: box cuts the top of the can
+      frame_000008: box cuts the top of the can
+      frame_000009: box cuts the top of the can
+      frame_000010: box cuts the top of the can
+      frame_000011: box cuts the top of the can
+      frame_000013: box cuts the top of the can
+      frame_000014: box cuts the top of the can
+
+mixed:
+  output_name: openimages6_d405_v1
+  yaml: training/data/openimages6_d405_v1.yaml

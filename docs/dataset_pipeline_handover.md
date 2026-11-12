@@ -44,6 +44,9 @@ Behaviour to know:
 - Sources are reused only if their `DOWNLOAD.json` matches the config (`--refresh-sources`
   to force). `dataset_manifest.json` records git revision and the settings actually used.
 - D405 repeats are hard links; use `--link-mode copy` before zipping for Colab.
+- `training/colab/colab_train.ipynb` is preconfigured for the versioned mixed dataset and the
+  published catalog checkpoint. It validates GPU, Drive inputs, split counts, class order and the
+  packaged validation report before starting, then saves each epoch under `MyDrive/npulse/runs/`.
 
 ## Data locations
 

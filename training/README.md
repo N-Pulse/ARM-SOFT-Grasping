@@ -97,20 +97,28 @@ Weights: `training/runs/detect/<name>/weights/best.pt` (git-ignored).
 Estimated from a 1-epoch smoke test on an Intel Core Ultra 5 225H: ~2 min/epoch, so ~1 h for
 30 epochs at imgsz 416 (±30 %). Training is done on Colab instead (next section).
 
-## 4. Training on Colab (free T4 GPU)
+## 4. Continue training on Colab GPU
 
 1. **Make the zips** (Git Bash, repo root):
 
        bash training/colab/make_code_zip.sh                # -> training/colab/training_code.zip
-       bash training/colab/make_data_zip.sh openimages6    # -> training/colab/openimages6.zip
+       bash training/colab/make_data_zip.sh openimages6_d405_v1
 
-2. **Upload to Google Drive**: `training_code.zip` → `MyDrive/npulse/` (again after each code
-   change); `openimages6.zip` → `MyDrive/npulse/data/` (once; future datasets, e.g. the in-house
-   D405 one, get their own zip there).
+2. **Upload to Google Drive** using this layout:
+
+       MyDrive/npulse/training_code.zip
+       MyDrive/npulse/data/openimages6_d405_v1.zip
+       MyDrive/npulse/models/yolo26s-mix-openimages-d405-v1.0.0/best.pt
+
+   `MyDrive/npulse/data/openimages6_d405_v1.yaml` is optional: the notebook generates the fixed
+   six-class YAML when it is absent.
 3. **Run the notebook** `training/colab/colab_train.ipynb` in Colab:
-   *Runtime > Change runtime type > T4 GPU*, set `RUN_NAME` / `DATA_ZIPS` / `EPOCHS` / `IMGSZ` /
-   `BATCH` / `PATIENCE` / `EXTRA_ARGS` in the first cell, then *Run all*. Checkpoints are written to
-   `MyDrive/npulse/runs/<RUN_NAME>/` after every epoch (a resume cell is included).
+   *Runtime > Change runtime type > GPU*, edit only the first parameter cell, then *Run all*.
+   Defaults continue from the published mixed `best.pt` with AdamW, `lr0=0.0002`,
+   `openimages6_d405_v1`, 416 px and batch 32. The notebook refuses to start without CUDA, checks
+   every uploaded file, verifies image/label counts and the six-class order, and prevents accidental
+   run-name reuse. Checkpoints are written to `MyDrive/npulse/runs/<RUN_NAME>/` after every epoch;
+   an optional resume cell is included.
 4. **Download** `MyDrive/npulse/runs/<RUN_NAME>/` into `training/runs/detect/<RUN_NAME>/` locally.
 5. **Evaluate locally**, so all numbers come from the same environment:
 

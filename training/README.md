@@ -34,6 +34,50 @@ never pip-installs packages on its own; ONNX export then needs `onnx` installed 
 
 ## 2. Dataset (Open Images V7 → YOLO)
 
+### One-command Open Images + Hugging Face D405 pipeline
+
+`training/data/prepare_dataset.py` downloads both sources, converts the Dataset Studio
+annotations, builds the D405-only and mixed YOLO detection datasets in a staging directory,
+validates them, and publishes them only if every check passes. All pinned inputs (classes,
+Open Images count and seed, Hugging Face revision, session splits, excluded frames, class
+mapping, D405 repeat factor) live in `configs/datasets/openimages_d405_v1.yaml`.
+
+**One-time setup** (macOS/Linux; on Windows use `Scripts\python`):
+
+    python -m pip install huggingface_hub                 # in the normal training .venv
+    python3 -m venv training/.venv-download               # FiftyOne must stay out of .venv
+    training/.venv-download/bin/python -m pip install fiftyone pyyaml
+    huggingface-cli login                                 # only if the HF dataset is private
+
+**Run:**
+
+    python training/data/prepare_dataset.py check                  # environment + outputs
+    python training/data/prepare_dataset.py all --per-class 50     # quick run (_pc50 names)
+    python training/data/prepare_dataset.py all                    # pinned full dataset
+    python training/data/prepare_dataset.py validate               # re-check, no download
+
+Steps can also run one at a time: `download-openimages`, `download-hf`, `build`.
+
+| Behaviour | Detail |
+|---|---|
+| Quick run | `--per-class N` different from the config adds `_pcN` to every output (source, datasets, yaml), so it never touches the full dataset |
+| Sources | reused when their `DOWNLOAD.json` matches the config; otherwise the run stops. `--refresh-sources` downloads again |
+| Existing datasets | never overwritten. `--force` moves them to `training/datasets/.previous/<name>-<time>/` and publishes both new datasets together (rolled back if a move fails) |
+| Failed validation | nothing is published; the partial build and both `validation_report.json` are kept in `training/datasets/.failed/<time>/` |
+| D405 repeats | hard links by default (one copy on disk). Use `--link-mode copy` before zipping for Colab |
+| Checks | every image has a label and vice versa, class ids 0-5, coordinates in [0, 1], non-empty boxes, every image decodes (OpenCV or Pillow), no identical image in two splits; D405 sessions are split whole |
+
+Outputs: `training/datasets/d405_v1/`, `training/datasets/openimages6_d405_v1/` (each with
+`dataset_manifest.json`, `validation_report.json`, `stats.json`), and the trainable
+`training/data/openimages6_d405_v1.yaml`. The manifest records the git revision and the
+settings actually used to download each source. The command ends by printing a ready-to-run
+`training/train.py` command.
+
+To change any pinned input, copy the config to a new version (`..._v2.yaml`) with new
+`name` and output names instead of editing v1, so earlier results stay reproducible.
+
+### Open Images only
+
     training/.venv-download/Scripts/python training/data/download_openimages.py   # ~500 img/class
     python training/data/preview_dataset.py                                       # visual check
 
@@ -53,20 +97,28 @@ Weights: `training/runs/detect/<name>/weights/best.pt` (git-ignored).
 Estimated from a 1-epoch smoke test on an Intel Core Ultra 5 225H: ~2 min/epoch, so ~1 h for
 30 epochs at imgsz 416 (±30 %). Training is done on Colab instead (next section).
 
-## 4. Training on Colab (free T4 GPU)
+## 4. Continue training on Colab GPU
 
 1. **Make the zips** (Git Bash, repo root):
 
        bash training/colab/make_code_zip.sh                # -> training/colab/training_code.zip
-       bash training/colab/make_data_zip.sh openimages6    # -> training/colab/openimages6.zip
+       bash training/colab/make_data_zip.sh openimages6_d405_v1
 
-2. **Upload to Google Drive**: `training_code.zip` → `MyDrive/npulse/` (again after each code
-   change); `openimages6.zip` → `MyDrive/npulse/data/` (once; future datasets, e.g. the in-house
-   D405 one, get their own zip there).
+2. **Upload to Google Drive** using this layout:
+
+       MyDrive/npulse/training_code.zip
+       MyDrive/npulse/data/openimages6_d405_v1.zip
+       MyDrive/npulse/models/yolo26s-mix-openimages-d405-v1.0.0/best.pt
+
+   `MyDrive/npulse/data/openimages6_d405_v1.yaml` is optional: the notebook generates the fixed
+   six-class YAML when it is absent.
 3. **Run the notebook** `training/colab/colab_train.ipynb` in Colab:
-   *Runtime > Change runtime type > T4 GPU*, set `RUN_NAME` / `DATA_ZIPS` / `EPOCHS` / `IMGSZ` /
-   `BATCH` / `PATIENCE` / `EXTRA_ARGS` in the first cell, then *Run all*. Checkpoints are written to
-   `MyDrive/npulse/runs/<RUN_NAME>/` after every epoch (a resume cell is included).
+   *Runtime > Change runtime type > GPU*, edit only the first parameter cell, then *Run all*.
+   Defaults continue from the published mixed `best.pt` with AdamW, `lr0=0.0002`,
+   `openimages6_d405_v1`, 416 px and batch 32. The notebook refuses to start without CUDA, checks
+   every uploaded file, verifies image/label counts and the six-class order, and prevents accidental
+   run-name reuse. Checkpoints are written to `MyDrive/npulse/runs/<RUN_NAME>/` after every epoch;
+   an optional resume cell is included.
 4. **Download** `MyDrive/npulse/runs/<RUN_NAME>/` into `training/runs/detect/<RUN_NAME>/` locally.
 5. **Evaluate locally**, so all numbers come from the same environment:
 

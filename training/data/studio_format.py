@@ -34,24 +34,29 @@ EXCLUDED_FRAMES = {
 }
 
 
-def is_excluded(session: str, frame_id: str) -> bool:
-    return frame_id in EXCLUDED_FRAMES.get(session, {})
+def is_excluded(session: str, frame_id: str,
+                excluded: Mapping[str, Mapping[str, str]] | None = None) -> bool:
+    excluded = EXCLUDED_FRAMES if excluded is None else excluded
+    return frame_id in excluded.get(session, {})
 
 
-def box_line(class_name: str, bbox_xyxy, width: int, height: int) -> str:
+def box_line(class_name: str, bbox_xyxy, width: int, height: int,
+             class_map: Mapping[str, str] | None = None) -> str:
     x1, y1, x2, y2 = bbox_xyxy
     x1, x2 = max(0.0, x1), min(float(width), x2)
     y1, y2 = max(0.0, y1), min(float(height), y2)
     if x2 <= x1 or y2 <= y1:
         raise ValueError(f"empty box {bbox_xyxy}")
-    cls = CLASSES.index(STUDIO_TO_CLASS[class_name])
+    class_map = STUDIO_TO_CLASS if class_map is None else class_map
+    cls = CLASSES.index(class_map[class_name])
     return (f"{cls} {(x1 + x2) / 2 / width:.6f} {(y1 + y2) / 2 / height:.6f} "
             f"{(x2 - x1) / width:.6f} {(y2 - y1) / height:.6f}")
 
 
-def frame_lines(annotation: Mapping) -> list[str]:
+def frame_lines(annotation: Mapping, class_map: Mapping[str, str] | None = None) -> list[str]:
     """YOLO lines of one frame; a frame with an unknown class is an error, not a silent gap."""
-    return [box_line(o["class_name"], o["bbox_xyxy"], annotation["width"], annotation["height"])
+    return [box_line(o["class_name"], o["bbox_xyxy"], annotation["width"], annotation["height"],
+                     class_map)
             for o in annotation["objects"]]
 
 

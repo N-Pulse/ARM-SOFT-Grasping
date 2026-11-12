@@ -34,6 +34,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--patience", type=int, default=10, help="early-stopping epochs")
+    ap.add_argument("--optimizer", default="auto",
+                    help="Ultralytics optimizer, for example auto, SGD, Adam or AdamW")
+    ap.add_argument("--lr0", type=float,
+                    help="initial learning rate; omit to use the Ultralytics default")
     ap.add_argument("--fraction", type=float, default=1.0,
                     help="fraction of the train split to use (smoke tests)")
     ap.add_argument("--seed", type=int, default=0)
@@ -43,11 +47,15 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def build_train_kwargs(args: argparse.Namespace, data_path) -> dict:
-    return dict(data=str(data_path), epochs=args.epochs, imgsz=args.imgsz,
-                batch=args.batch, device=args.device, workers=args.workers,
-                patience=args.patience, fraction=args.fraction, seed=args.seed,
-                deterministic=True, project=str(RUNS_DIR / "detect"),
-                name=args.name, exist_ok=args.exist_ok, plots=True)
+    kwargs = dict(data=str(data_path), epochs=args.epochs, imgsz=args.imgsz,
+                  batch=args.batch, device=args.device, workers=args.workers,
+                  patience=args.patience, fraction=args.fraction, seed=args.seed,
+                  optimizer=args.optimizer, deterministic=True,
+                  project=str(RUNS_DIR / "detect"), name=args.name,
+                  exist_ok=args.exist_ok, plots=True)
+    if args.lr0 is not None:
+        kwargs["lr0"] = args.lr0
+    return kwargs
 
 
 def main(argv=None) -> None:

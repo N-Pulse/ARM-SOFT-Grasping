@@ -3,13 +3,12 @@
 Scope: only the training-data download/build feature. For the detector itself see
 `docs/object_detection_handover.md`.
 
-## Branch and status
+## Status
 
-- Branch `feature/dataset-bootstrap-pipeline`, created from `main` at `81c75f1`, pushed.
-  - `11408ab` feat(training): add optimizer and lr0 options (`train.py --optimizer --lr0`)
-  - `8f7fbd0` feat(training): one-command versioned Open Images + D405 dataset pipeline
-  - follow-up: README section, this page, `.gitignore` for generated yaml files
-- Next: merge into `main` through a PR after `python -m pytest -q armsoft/tests training/tests`.
+- Merged into `main` through PR #22 (`db3ef61`).
+- Main implementation commits: `11408ab`, `8f7fbd0`, `3078602`, `71372cd`.
+- Teammate instructions: [`reproduce_training_dataset.md`](reproduce_training_dataset.md)
+  and [`colab_training_tutorial.md`](colab_training_tutorial.md).
 - Verified on a Mac (2026-11-12): full build valid, 0 corrupt images.
   Mixed `openimages6_d405_v1`: train 2686 / val 473 / test 445 images.
   `d405_v1`: train 122 / val 28 / test 30 frames (190 approved - 10 excluded).

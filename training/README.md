@@ -6,6 +6,8 @@ modified here. Works on any object colour, several objects per image.
 
 Design choices and their reasons: [`decisions.md`](decisions.md).
 Current status, results and next steps: [`docs/object_detection_handover.md`](../docs/object_detection_handover.md).
+Team tutorials: [reproduce the training dataset](../docs/reproduce_training_dataset.md) and
+[continue training on Google Colab](../docs/colab_training_tutorial.md).
 
 ## 1. Environments (native Windows; not WSL: it cannot see the D405)
 
@@ -47,7 +49,7 @@ mapping, D405 repeat factor) live in `configs/datasets/openimages_d405_v1.yaml`.
     python -m pip install huggingface_hub                 # in the normal training .venv
     python3 -m venv training/.venv-download               # FiftyOne must stay out of .venv
     training/.venv-download/bin/python -m pip install fiftyone pyyaml
-    huggingface-cli login                                 # only if the HF dataset is private
+    hf auth login                                         # gated dataset access required
 
 **Run:**
 

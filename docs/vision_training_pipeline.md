@@ -171,6 +171,28 @@ python tools/train_object_segmentation.py \
   --model yolo11n-seg.pt --epochs 100 --device cpu --name yolo_seg_v1
 ```
 
+For RGB-D experiments, use `armsoft.augmentation.RGBDAugmentor` before export
+or inside a dataset loader. It applies one geometric transform to colour,
+depth, and masks, preserves each annotation's `class_id`/`class_name`, uses
+nearest neighbour for depth and masks, and returns updated intrinsics for
+scale, translation, and horizontal flip. The default profile is conservative:
+no vertical flips or large rotations, small colour changes, and RealSense-like
+depth dropout/noise. Copy-paste and background replacement are intentionally
+not included because they require a curated object/background library.
+
+```python
+from armsoft.augmentation import RGBDAugmentor
+
+augmented = RGBDAugmentor(seed=7).augment(
+    frame, masks=[object_mask], annotations=[frame_annotation.objects[0]]
+)
+augmented.frame.color_bgr       # augmented RGB
+augmented.frame.depth_m         # aligned augmented depth
+augmented.masks                 # transformed binary masks
+augmented.annotations           # same classes, transformed polygons/boxes
+augmented.frame.intrinsics      # calibration for supported pixel transforms
+```
+
 对于需要修改 polygon 边界的样本，JSON 是 annotation source of truth；可以接入
 CVAT/Label Studio 转换器。当前键盘审核器只负责接受/拒绝 proposal，不冒充完整的
 polygon editor。

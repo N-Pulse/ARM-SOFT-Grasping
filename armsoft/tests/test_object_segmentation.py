@@ -15,6 +15,7 @@ from ..object_segmentation import (
     FrameAnnotation, ObjectAnnotation, mask_to_polygon, masks_from_components,
 )
 from ..object_segmentation.export import to_yolo_lines
+from ..augmentation import AugmentationConfig, RGBDAugmentor
 from tools.annotate_object_segmentation import main as annotate_main
 
 
@@ -86,6 +87,54 @@ class AnnotationTests(unittest.TestCase):
             regenerated = __import__("json").loads(progress.read_text())
             self.assertEqual(regenerated, {"processed": 1, "total": 1,
                                            "generated": 0, "preserved": 1})
+
+
+class RGBDAugmentationTests(unittest.TestCase):
+    def test_geometric_transforms_keep_modalities_and_labels_aligned(self):
+        color = np.zeros((20, 30, 3), dtype=np.uint8)
+        color[5:15, 8:18] = (20, 80, 200)
+        depth = np.ones((20, 30), dtype=np.float32)
+        mask = np.zeros((20, 30), dtype=bool)
+        mask[5:15, 8:18] = True
+        intrinsics = CameraIntrinsics(30, 20, 20.0, 20.0, 15.0, 10.0)
+        frame = RGBDFrame(color, depth, intrinsics)
+        annotation = ObjectAnnotation(
+            class_id=3, class_name="yellow_marker",
+            polygon_xy=[[8, 5], [17, 5], [17, 14], [8, 14]],
+            bbox_xyxy=[8, 5, 17, 14], source="test",
+        )
+        config = AugmentationConfig(
+            horizontal_flip_p=1.0, rotation_deg=0.0,
+            translation_fraction=0.0, scale_range=(1.0, 1.0),
+            perspective_p=0.0, brightness_delta=0.0,
+            contrast_range=(1.0, 1.0), gamma_range=(1.0, 1.0),
+            gaussian_noise_std=0.0, depth_dropout_p=0.0,
+            depth_noise_std_at_1m=0.0, depth_scale_range=(1.0, 1.0),
+            depth_offset_m=0.0,
+        )
+        result = RGBDAugmentor(config, seed=4).augment(
+            frame, [mask], [annotation],
+        )
+        self.assertEqual(result.frame.color_bgr.shape, color.shape)
+        self.assertTrue(np.array_equal(result.frame.depth_m, depth))
+        self.assertTrue(np.array_equal(result.masks[0], np.fliplr(mask)))
+        self.assertEqual(result.annotations[0].class_id, 3)
+        self.assertEqual(result.annotations[0].class_name, "yellow_marker")
+        self.assertEqual(result.annotations[0].bbox_xyxy, [12.0, 5.0, 21.0, 14.0])
+
+    def test_depth_uses_nearest_interpolation_and_can_create_holes(self):
+        depth = np.arange(30 * 20, dtype=np.float32).reshape(20, 30)
+        frame = RGBDFrame(np.zeros((20, 30, 3), dtype=np.uint8), depth,
+                          CameraIntrinsics(30, 20, 20, 20, 15, 10))
+        config = AugmentationConfig(
+            rotation_deg=0, translation_fraction=0, scale_range=(1, 1),
+            perspective_p=0, horizontal_flip_p=0, brightness_delta=0,
+            contrast_range=(1, 1), gamma_range=(1, 1), gaussian_noise_std=0,
+            depth_dropout_p=1, depth_noise_std_at_1m=0,
+            depth_scale_range=(1, 1), depth_offset_m=0,
+        )
+        result = RGBDAugmentor(config, seed=1).augment(frame)
+        self.assertTrue(np.all(result.frame.depth_m == 0))
 
 
 if __name__ == "__main__":

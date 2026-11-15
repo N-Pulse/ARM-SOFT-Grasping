@@ -3,9 +3,8 @@
 from __future__ import annotations
 import argparse, csv, json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time
 from datetime import datetime
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 import cv2
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -13,10 +12,14 @@ from armsoft.data import CaptureSessionWriter, SESSION_SCHEMA_VERSION, data_root
 from armsoft.models import discover_runtime_models
 from armsoft.object_segmentation.annotations import FrameAnnotation, ObjectAnnotation
 from armsoft.object_segmentation.export import to_yolo_lines
+from armsoft.perception import adapt_ultralytics_result
+from armsoft.perception import box_core_depth as perception_box_core_depth
+from armsoft.perception import deproject_pixel
 from armsoft.pointcloud import PointCloudConfig, PointCloudPipeline, save_ply
 from armsoft.preprocessing import DepthFilterConfig, apply_depth_filter
 from armsoft.sources import create_frame_source
 from armsoft.sources.base import RGBDFrame
+from armsoft.studio import create_studio_handler
 
 ROOT=Path(__file__).resolve().parents[1]; WEB=ROOT/"web/dataset-console"; SAFE=re.compile(r"^(?!\.{1,2}$)(?!\.)[\w.-]{1,80}$")
 MAX_REQUEST_BYTES=1024*1024
@@ -40,17 +43,13 @@ def jpeg(im):
     return data.tobytes()
 
 def box_core_depth(depth,box,fraction=.5):
-    """Return box centre (u,v) and median valid depth of its central part, so background at the edges is ignored."""
-    x1,y1,x2,y2=(float(c) for c in box); u=(x1+x2)/2; v=(y1+y2)/2
-    hw=max(.5,(x2-x1)*fraction/2); hh=max(.5,(y2-y1)*fraction/2); height,width=depth.shape[:2]
-    core=depth[max(0,int(v-hh)):min(height,int(v+hh)+1),max(0,int(u-hw)):min(width,int(u+hw)+1)]
-    valid=core[np.isfinite(core)&(core>0)]
-    return u,v,(float(np.median(valid)) if valid.size else None)
+    """Compatibility wrapper for the shared perception depth fusion."""
+    return perception_box_core_depth(depth,box,fraction)
 
 def live_object(names,boxes,index,u,v,z,intrinsics):
     """Live-test record for one detection at pixel (u,v) with depth z in metres (None if unknown)."""
     class_id=int(boxes.cls[index].item()) if boxes is not None and index<len(boxes) else 0; score=float(boxes.conf[index].item()) if boxes is not None and index<len(boxes) else 0.0
-    xyz=[(u-intrinsics.cx)*z/intrinsics.fx,(v-intrinsics.cy)*z/intrinsics.fy,z] if z is not None else None
+    xyz=deproject_pixel(u,v,z,intrinsics)
     class_name=names.get(class_id,class_id) if isinstance(names,dict) else names[class_id]
     return {"class_id":class_id,"class_name":str(class_name),"confidence":round(score,4),"distance_m":round(z,4) if z is not None else None,"xyz_m":[round(x,4) for x in xyz] if xyz else None}
 
@@ -733,32 +732,8 @@ class State:
                 last_sequence=sequence; color,depth,intrinsics,_,_,_=item; started=time.perf_counter()
                 last_camera_frame=started
                 result=model.predict(source=color,imgsz=job["imgsz"],conf=job["confidence"],device=job["device"],verbose=False)[0]
-                latency=(time.perf_counter()-started)*1000; overlay=result.plot(); objects=[]
-                polygons=result.masks.xy if result.masks is not None else []
-                boxes=result.boxes
-                for index,polygon in enumerate(polygons):
-                    points=np.asarray(polygon,dtype=np.int32)
-                    if len(points)<3: continue
-                    object_mask=np.zeros(depth.shape,dtype=np.uint8); cv2.fillPoly(object_mask,[points],1)
-                    valid=(object_mask>0)&np.isfinite(depth)&(depth>0); z=float(np.median(depth[valid])) if valid.any() else None
-                    moments=cv2.moments(points); u=float(moments["m10"]/moments["m00"]) if moments["m00"] else float(points[:,0].mean()); v=float(moments["m01"]/moments["m00"]) if moments["m00"] else float(points[:,1].mean())
-                    objects.append(live_object(result.names,boxes,index,u,v,z,intrinsics))
-                if result.masks is None and boxes is not None:
-                    # Detection-only model: centre of each box, depth from its central part.
-                    for index,box in enumerate(boxes.xyxy.cpu().numpy()):
-                        u,v,z=box_core_depth(depth,box); objects.append(live_object(result.names,boxes,index,u,v,z,intrinsics))
-                if result.keypoints is not None and boxes is not None:
-                    objects=[]
-                    xy=result.keypoints.xy.cpu().numpy(); conf=result.keypoints.conf
-                    confidence=conf.cpu().numpy() if conf is not None else np.ones(xy.shape[:2],dtype=np.float32)
-                    for index,points in enumerate(xy):
-                        visible=confidence[index]>=.25
-                        if visible.any(): u,v=np.median(points[visible],axis=0).tolist()
-                        else:
-                            box=boxes.xyxy[index].cpu().numpy(); u=(box[0]+box[2])/2; v=(box[1]+box[3])/2
-                        _,_,z=box_core_depth(depth,boxes.xyxy[index].cpu().numpy(),fraction=.35)
-                        item=live_object(result.names,boxes,index,float(u),float(v),z,intrinsics)
-                        item["keypoints_visible"]=int(visible.sum()); item["keypoints_total"]=int(len(points)); objects.append(item)
+                latency=(time.perf_counter()-started)*1000; overlay=result.plot()
+                objects=[instance.to_dict() for instance in adapt_ultralytics_result(result,depth,intrinsics)]
                 instantaneous=1000/latency if latency>0 else 0; fps_ema=instantaneous if not fps_ema else .8*fps_ema+.2*instantaneous
                 with self.lock:
                     if not self.test_job: break
@@ -839,113 +814,7 @@ class State:
         subprocess.run([sys.executable,str(ROOT/"tools"/"build_data_catalog.py"),"--data-root",str(self.root.parents[1])],capture_output=True)
         return {"session":name,"saved":saved,"skipped_similar":False,"failure_type":failure_type}
 
-class Handler(SimpleHTTPRequestHandler):
-    state=None
-    def __init__(self,*a,**kw): super().__init__(*a,directory=str(WEB),**kw)
-    def end_headers(self):
-        if not any(header.lower().startswith(b"cache-control:") for header in self._headers_buffer):
-            self.send_header("Cache-Control","no-store, max-age=0")
-        self.send_header("Content-Security-Policy","default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
-        self.send_header("X-Content-Type-Options","nosniff")
-        self.send_header("X-Frame-Options","DENY")
-        self.send_header("Referrer-Policy","no-referrer")
-        super().end_headers()
-    def log_message(self,fmt,*a):
-        if not self.path.startswith("/api/frame/"): super().log_message(fmt,*a)
-    def reply(self,data,code=200,typ="application/json; charset=utf-8"):
-        if not isinstance(data,bytes): data=json.dumps(data,ensure_ascii=False).encode()
-        self.send_response(code); self.send_header("Content-Type",typ); self.send_header("Content-Length",str(len(data))); self.send_header("Cache-Control","no-store"); self.end_headers(); self.wfile.write(data)
-    def do_GET(self):
-        u=urlparse(self.path)
-        if u.path=="/api/status": return self.reply(self.state.status())
-        if u.path=="/api/sessions": return self.reply({"sessions":self.state.sessions()})
-        if u.path=="/api/session":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.session_detail(q["name"][0]))
-            except Exception: return self.send_error(404,"Session not found")
-        if u.path=="/api/catalog":
-            catalog=self.state.root.parents[1]/"catalog"/"index.json"
-            try: return self.reply(json.loads(catalog.read_text(encoding="utf-8")))
-            except (OSError,json.JSONDecodeError): return self.reply({"sessions":[]})
-        if u.path=="/api/storage": return self.reply(self.state.storage_report())
-        if u.path=="/api/preprocess/status": return self.reply(self.state.preprocess_status())
-        if u.path=="/api/annotation/status": return self.reply(self.state.annotation_status())
-        if u.path=="/api/annotation/result":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.annotation_result(q["session"][0]))
-            except Exception: return self.send_error(404,"Annotation result not found")
-        if u.path=="/api/annotation-image":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.annotation_image(q["session"][0],q["frame"][0]).read_bytes(),200,"image/png")
-            except Exception: return self.send_error(404)
-        if u.path=="/api/review/session":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.review_session(q["name"][0]))
-            except Exception: return self.send_error(404,"Review session not found")
-        if u.path=="/api/review/frame":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.review_frame(q["session"][0],q["frame"][0]))
-            except Exception: return self.send_error(404,"Review frame not found")
-        if u.path=="/api/dataset/inputs": return self.reply(self.state.dataset_inputs())
-        if u.path=="/api/dataset/exports": return self.reply(self.state.dataset_exports())
-        if u.path=="/api/train/inputs": return self.reply(self.state.training_inputs())
-        if u.path=="/api/train/status": return self.reply(self.state.training_status())
-        if u.path=="/api/train/runs": return self.reply(self.state.training_runs())
-        if u.path=="/api/test/inputs": return self.reply(self.state.test_inputs())
-        if u.path=="/api/test/status": return self.reply(self.state.test_status())
-        if u.path=="/api/test/frame":
-            with self.state.lock: data=self.state.test_image
-            return self.reply(data,200,"image/jpeg") if data else self.send_error(503,"No inference frame")
-        if u.path=="/api/preprocess/result":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.derived_result(q["session"][0],q["version"][0]))
-            except Exception: return self.send_error(404,"Derived result not found")
-        if u.path=="/api/derived-image":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.derived_image(q["session"][0],q["version"][0],q["kind"][0],q["frame"][0]).read_bytes(),200,"image/png")
-            except Exception: return self.send_error(404)
-        if u.path.startswith("/api/frame/"):
-            with self.state.lock: data=self.state.images.get(u.path.rsplit('/',1)[-1])
-            return self.reply(data,200,"image/jpeg") if data else self.send_error(503,"No frame")
-        if u.path=="/api/session-image":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.image(q["session"][0],q["frame"][0]).read_bytes(),200,"image/png")
-            except Exception: return self.send_error(404)
-        if u.path=="/": self.path="/index.html"
-        return super().do_GET()
-    def do_POST(self):
-        try:
-            origin=self.headers.get("Origin")
-            if origin and urlparse(origin).netloc!=self.headers.get("Host"): return self.reply({"ok":False,"error":"Cross-origin requests are not allowed"},403)
-            length=int(self.headers.get("Content-Length",0))
-            if length<0 or length>MAX_REQUEST_BYTES: return self.reply({"ok":False,"error":"Request body is too large"},413)
-            d=json.loads(self.rfile.read(length) or b"{}")
-            if not isinstance(d,dict): raise ValueError("JSON request body must be an object")
-            if self.path=="/api/config":
-                lo,hi=float(d["min_depth"]),float(d["max_depth"])
-                if not .001<=lo<hi<=10: raise ValueError("Depth range is invalid")
-                with self.state.lock: self.state.config={"min_depth":lo,"max_depth":hi}
-            elif self.path=="/api/capture/start": self.state.begin(str(d.get("name") or datetime.now().strftime("object_%Y%m%d_%H%M%S")),int(d.get("frames",100)),int(d.get("every",3)),str(d.get("notes","")))
-            elif self.path=="/api/capture/stop": self.state.finish()
-            elif self.path=="/api/session/delete": return self.reply({"ok":True,"result":self.state.delete_session(str(d.get("name","")),str(d.get("confirmation","")))})
-            elif self.path=="/api/preprocess/start": return self.reply({"ok":True,"job":self.state.preprocess_start(d)})
-            elif self.path=="/api/preprocess/delete": return self.reply({"ok":True,"result":self.state.preprocess_delete(str(d.get("session","")),str(d.get("version","")),str(d.get("confirmation","")))})
-            elif self.path=="/api/annotation/start": return self.reply({"ok":True,"job":self.state.annotation_start(d)})
-            elif self.path=="/api/annotation/delete": return self.reply({"ok":True,"result":self.state.annotation_delete(str(d.get("session","")),str(d.get("confirmation","")))})
-            elif self.path=="/api/review/save": return self.reply({"ok":True,"result":self.state.review_save(d)})
-            elif self.path=="/api/dataset/validate": return self.reply({"ok":True,"report":self.state.dataset_validate(d)})
-            elif self.path=="/api/dataset/export": return self.reply({"ok":True,"result":self.state.dataset_export(d)})
-            elif self.path=="/api/dataset/delete": return self.reply({"ok":True,"result":self.state.dataset_delete(str(d.get("version","")),str(d.get("confirmation","")))})
-            elif self.path=="/api/train/start": return self.reply({"ok":True,"job":self.state.training_start(d)})
-            elif self.path=="/api/train/stop": return self.reply({"ok":True,"job":self.state.training_stop()})
-            elif self.path=="/api/train/delete": return self.reply({"ok":True,"result":self.state.training_delete(str(d.get("name","")),str(d.get("confirmation","")))})
-            elif self.path=="/api/test/start": return self.reply({"ok":True,"job":self.state.test_start(d)})
-            elif self.path=="/api/test/stop": return self.reply({"ok":True,"job":self.state.test_stop_live()})
-            elif self.path=="/api/test/save-failure": return self.reply({"ok":True,"result":self.state.test_save_failure(d)})
-            elif self.path=="/api/test/export-pointcloud": return self.reply({"ok":True,"result":self.state.test_export_pointcloud(d)})
-            else: return self.send_error(404)
-            return self.reply({"ok":True})
-        except Exception as e: return self.reply({"ok":False,"error":str(e)},400)
+Handler=create_studio_handler(WEB,MAX_REQUEST_BYTES)
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument("--host",default="127.0.0.1"); p.add_argument("--port",type=int,default=8765); p.add_argument("--source",choices=("camera","sim"),default="camera"); p.add_argument("--data-root",type=Path,default=data_root()); p.add_argument("--capture-root",type=Path); p.add_argument("--allow-remote",action="store_true",help="allow binding beyond localhost; there is no authentication"); a=p.parse_args()

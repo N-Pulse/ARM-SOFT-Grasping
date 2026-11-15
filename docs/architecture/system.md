@@ -31,7 +31,7 @@ RealSense D405 / simulator / replay
 ## Code boundaries
 
 ```text
-armsoft/       reusable camera, data, preprocessing, models, geometry, and output code
+armsoft/       reusable camera, data, preprocessing, models, perception, geometry, and output code
 tools/         executable command-line entry points
 web/           Dataset Studio static frontend
 training/      detector data preparation, training, evaluation, and Colab workflow
@@ -41,7 +41,7 @@ docs/          stable guides, architecture, and future proposals
 porting/       target-device compatibility experiments
 ```
 
-`tools/dataset_web.py` owns the camera and serves Dataset Studio. Model workers consume the same latest RGB-D frame; they must not open a second RealSense connection.
+`tools/dataset_web.py` remains the stable Dataset Studio entry point and owns the camera. HTTP transport lives in `armsoft/studio/`; task-independent model results and 2-D-to-3-D fusion live in `armsoft/perception/`. Model workers consume the same latest RGB-D frame and must not open a second RealSense connection.
 
 ## Model policy
 
@@ -58,6 +58,8 @@ Each live result may include:
 - segmentation polygon, detection box, or pose keypoints;
 - centre pixel, valid depth, and XYZ in the D405 camera frame;
 - an explicit invalid-depth state instead of a fabricated zero distance.
+
+Detection, segmentation, and pose adapters now emit the same `PerceptionInstance` contract. This allows later dual-model fusion without making the web layer understand framework-specific result objects.
 
 Coordinate convention:
 

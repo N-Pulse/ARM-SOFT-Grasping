@@ -9,6 +9,7 @@ An idea listed here is not an implementation commitment. Before development, it 
 | Idea | Status | Document |
 | --- | --- | --- |
 | Fuse object detection and mechanical-arm pose over time | Proposed | [RGB-D interaction tracking](rgbd_interaction_tracking.md) |
+| Continue modularizing the backend and runtime contracts | Incremental | [Code structure roadmap](code_structure_roadmap.md) |
 
 ## Adding a new idea
 

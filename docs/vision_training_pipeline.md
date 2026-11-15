@@ -193,6 +193,18 @@ augmented.annotations           # same classes, transformed polygons/boxes
 augmented.frame.intrinsics      # calibration for supported pixel transforms
 ```
 
+For fixed-angle camera rotations, set `rotation_choices`, for example
+`AugmentationConfig(rotation_choices=(-45, -30, -15, 15, 30, 45))`. This is
+opt-in; the default remains the small random rotation range. To rotate only a
+segmented object while leaving its scene background unchanged, call
+`RGBDAugmentor.rotate_object(frame, mask, annotation, angle_deg)`. The mask is
+required so RGB, depth, and the annotation move together. The original object
+region plus a configurable safety margin is inpainted/fill-replaced before
+compositing, so object pixels omitted by an imperfect mask do not remain
+underneath the rotated object. A value of `90` rotates an upright object into a
+horizontal orientation. The camera intrinsics remain unchanged because the
+image coordinate system stays fixed.
+
 对于需要修改 polygon 边界的样本，JSON 是 annotation source of truth；可以接入
 CVAT/Label Studio 转换器。当前键盘审核器只负责接受/拒绝 proposal，不冒充完整的
 polygon editor。

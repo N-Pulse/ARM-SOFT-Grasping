@@ -23,6 +23,7 @@ class AugmentationConfig:
 
     horizontal_flip_p: float = 0.5
     rotation_deg: float = 12.0
+    rotation_choices: tuple[float, ...] = ()
     translation_fraction: float = 0.08
     scale_range: tuple[float, float] = (0.90, 1.15)
     perspective_p: float = 0.15
@@ -108,10 +109,94 @@ class RGBDAugmentor:
             annotations=transformed_annotations,
         )
 
+    def rotate_object(
+        self,
+        frame: RGBDFrame,
+        mask: np.ndarray,
+        annotation: ObjectAnnotation,
+        angle_deg: float,
+        cleanup_margin_px: int = 18,
+    ) -> AugmentedSample:
+        """Rotate one segmented object while keeping the scene background fixed.
+
+        The object RGB, depth, mask, polygon, and box share one transform.
+        Camera intrinsics remain unchanged because the image coordinate system
+        itself is not transformed.
+        """
+        self._validate_frame(frame)
+        height, width = frame.depth_m.shape
+        object_mask = self._validate_mask(mask, height, width).astype(bool)
+        ys, xs = np.nonzero(object_mask)
+        if not len(xs):
+            raise ValueError("object mask must contain at least one pixel")
+        if cleanup_margin_px < 0:
+            raise ValueError("cleanup_margin_px must be non-negative")
+        cleanup_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2 * cleanup_margin_px + 1, 2 * cleanup_margin_px + 1),
+        )
+        cleanup_mask = cv2.dilate(
+            object_mask.astype(np.uint8), cleanup_kernel,
+        ).astype(bool)
+        center = (float(xs.mean()), float(ys.mean()))
+        matrix_2d = cv2.getRotationMatrix2D(center, float(angle_deg), 1.0)
+        matrix = np.vstack([matrix_2d, [0.0, 0.0, 1.0]])
+        rotated_mask = cv2.warpPerspective(
+            object_mask.astype(np.uint8), matrix, (width, height),
+            flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
+        ).astype(bool)
+        rotated_color = cv2.warpPerspective(
+            frame.color_bgr, matrix, (width, height),
+            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+        )
+        rotated_depth = cv2.warpPerspective(
+            frame.depth_m.astype(np.float32), matrix, (width, height),
+            flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
+        )
+        color = cv2.inpaint(
+            frame.color_bgr,
+            cleanup_mask.astype(np.uint8),
+            max(3, cleanup_margin_px),
+            cv2.INPAINT_TELEA,
+        )
+        depth = frame.depth_m.astype(np.float32, copy=True)
+        background_depth = self._background_depth(
+            depth, cleanup_mask, rotated_mask,
+        )
+        depth[cleanup_mask] = background_depth[cleanup_mask]
+        color[rotated_mask] = rotated_color[rotated_mask]
+        depth[rotated_mask] = rotated_depth[rotated_mask]
+        transformed = self._transform_annotation(
+            annotation, matrix, width, height,
+        )
+        return AugmentedSample(
+            frame=replace(frame, color_bgr=color, depth_m=depth),
+            masks=[rotated_mask],
+            annotations=[transformed],
+        )
+
+    @staticmethod
+    def _background_depth(
+        depth: np.ndarray,
+        original_mask: np.ndarray,
+        rotated_mask: np.ndarray,
+    ) -> np.ndarray:
+        """Fill the removed object with nearby scene depth."""
+        ring = cv2.dilate(original_mask.astype(np.uint8), np.ones((5, 5), np.uint8))
+        ring = ring.astype(bool) & ~original_mask & (depth > 0)
+        values = depth[ring]
+        fill = float(np.median(values)) if values.size else 0.0
+        result = depth.copy()
+        result[original_mask] = fill
+        return result
+
     def _geometric_matrix(self, width: int, height: int) -> np.ndarray:
         config = self.config
         center = (width / 2.0, height / 2.0)
-        angle = float(self.rng.uniform(-config.rotation_deg, config.rotation_deg))
+        if config.rotation_choices:
+            angle = float(self.rng.choice(config.rotation_choices))
+        else:
+            angle = float(self.rng.uniform(-config.rotation_deg, config.rotation_deg))
         scale = float(self.rng.uniform(*config.scale_range))
         affine = cv2.getRotationMatrix2D(center, angle, scale)
         affine[0, 2] += self.rng.uniform(

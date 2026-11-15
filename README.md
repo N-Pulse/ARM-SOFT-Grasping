@@ -73,7 +73,7 @@ Camera notes:
 
 - Use a USB 3 port and close RealSense Viewer or any process using the camera.
 - On Windows, run directly in PowerShell; administrator mode is not required.
-- On macOS, follow the librealsense setup in the [Dataset Studio guide](docs/dataset_studio_user_guide.md).
+- On macOS, follow the librealsense setup in the [Dataset Studio guide](docs/guides/dataset-studio.md).
 
 ## 3. Build the training dataset
 
@@ -103,7 +103,7 @@ Outputs:
 - `training/datasets/d405_v1/` — D405-only evaluation dataset;
 - `training/data/openimages6_d405_v1.yaml` — YOLO training configuration.
 
-Generated data is ignored by Git. Follow the [team reproduction guide](docs/reproduce_training_dataset.md) for the complete setup and build procedure. The [dataset pipeline handover](docs/dataset_pipeline_handover.md) documents implementation details and versioning.
+Generated data is ignored by Git. Follow the [training-data guide](docs/guides/training-data.md) for setup, build, validation, and versioning.
 
 ## 4. Train a detector
 
@@ -126,7 +126,7 @@ python training/train.py \
 
 Results go to `training/runs/detect/<run-name>/`; the best checkpoint is `weights/best.pt`.
 
-For faster cloud training, follow the [Google Colab training tutorial](docs/colab_training_tutorial.md). The notebook mounts Drive, validates the dataset/model, continues from the team checkpoint and saves runs to `MyDrive/npulse/runs`.
+For faster cloud training, follow the [Google Colab training guide](docs/guides/colab-training.md). The notebook mounts Drive, validates the dataset/model, continues from the team checkpoint and saves runs to `MyDrive/npulse/runs`.
 
 Full options are in [training/README.md](training/README.md).
 
@@ -139,14 +139,10 @@ Full options are in [training/README.md](training/README.md).
 | `configs/datasets/` | Versioned dataset definitions |
 | `training/` | Dataset preparation, training, tests and Colab notebook |
 | `models/catalog/` | Versioned team models |
-| `docs/dataset_studio_user_guide.md` | Web workflow and troubleshooting |
-| `docs/reproduce_training_dataset.md` | Reproduce Open Images + Hugging Face D405 data |
-| `docs/colab_training_tutorial.md` | Prepare, run, resume and evaluate Colab training |
-| `docs/dataset_pipeline_handover.md` | Open Images + Hugging Face pipeline |
-| `docs/object_detection_handover.md` | Detector status and training handover |
-| `docs/point_cloud_pipeline.md` | RGB-D point-cloud workflow |
-| `docs/future_work/` | Proposed ideas for future development |
-| `docs/team_git_and_features.md` | Git workflow and feature map |
+| `docs/README.md` | Documentation index |
+| `docs/guides/` | Stable user instructions |
+| `docs/architecture/` | Current system design and model status |
+| `docs/future_work/` | Proposed ideas not yet implemented |
 
 ## 6. Team Git workflow
 

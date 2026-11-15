@@ -5,7 +5,7 @@ This tutorial continues training from the team's published YOLO26s checkpoint us
 ## What you need
 
 - the latest `main` branch;
-- a completed full dataset build from [the dataset reproduction guide](reproduce_training_dataset.md);
+- a completed full dataset build from [the dataset reproduction guide](training-data.md);
 - access to Google Drive and Google Colab;
 - the team checkpoint:
   `models/catalog/yolo26s-mix-openimages-d405-v1.0.0/best.pt`.

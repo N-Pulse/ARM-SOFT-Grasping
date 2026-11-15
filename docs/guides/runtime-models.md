@@ -3,7 +3,7 @@
 Models committed as a reviewed team release live under `models/catalog/` and
 appear automatically in Dataset Studio **Live Test**. Each version is
 immutable and contains `best.pt`, `model.json`, and a README. See
-`models/catalog/README.md` for the contract.
+[`models/catalog/README.md`](../../models/catalog/README.md) for the contract.
 
 For additional large or machine-local models, Dataset Studio discovers
 deployable models from the shared data root rather than storing weights in

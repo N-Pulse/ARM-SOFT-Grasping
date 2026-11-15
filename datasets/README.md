@@ -7,5 +7,7 @@ exports and weights are intentionally ignored by Git.
 - `object_segmentation/`: object masks, splits and YOLO-Seg exports.
 - `mechanical_hand_pose/`: keypoints, splits and YOLO-Pose exports.
 
-Keep the session identifier in every downstream annotation record. See
-`docs/vision_training_pipeline.md` for the complete workflow and contract.
+Keep the session identifier in every downstream annotation record. Dataset
+Studio stores real captures in the sibling `../ARM-SOFT-data` directory by
+default. See the [Dataset Studio guide](../docs/guides/dataset-studio.md) for
+the current workflow and storage rules.

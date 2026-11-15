@@ -2,7 +2,7 @@
 
 This guide rebuilds the exact YOLO detection dataset used by the team. The pipeline downloads both sources, converts their annotations, combines them, validates the result and records its provenance.
 
-The pinned v1 definition is [`configs/datasets/openimages_d405_v1.yaml`](../configs/datasets/openimages_d405_v1.yaml). It fixes:
+The pinned v1 definition is [`configs/datasets/openimages_d405_v1.yaml`](../../configs/datasets/openimages_d405_v1.yaml). It fixes:
 
 - class order: `ball`, `can`, `box`, `bottle`, `pen_pencil`, `door_handle`;
 - 500 Open Images images per class and seed `0`;

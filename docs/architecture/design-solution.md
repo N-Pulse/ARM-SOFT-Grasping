@@ -4,7 +4,7 @@
 > **Academic year:** 2026-2027 · **Team:** Computer Vision
 > **Version:** 1.2.2 · **Status:** In Review
 > **Project phase:** Proof of Concept · **Last modified:** 2026-10-26
-> **Repository path:** `docs/design/2026-2027/computer-vision/README.md`
+> **Repository path:** `docs/architecture/design-solution.md`
 
 ## Document control
 

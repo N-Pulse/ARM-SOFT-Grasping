@@ -1,7 +1,7 @@
-# Point Cloud Pipeline
+# Point-cloud guide
 
-This branch tests a reusable RGB-D to point-cloud stage without changing the
-raw capture or the object-segmentation workflow.
+The reusable RGB-D to point-cloud stage does not modify raw captures or the
+object-segmentation workflow.
 
 ```text
 RealSense / simulator / captured session

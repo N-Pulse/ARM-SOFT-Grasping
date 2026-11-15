@@ -145,6 +145,7 @@ Full options are in [training/README.md](training/README.md).
 | `docs/dataset_pipeline_handover.md` | Open Images + Hugging Face pipeline |
 | `docs/object_detection_handover.md` | Detector status and training handover |
 | `docs/point_cloud_pipeline.md` | RGB-D point-cloud workflow |
+| `docs/future_work/` | Proposed ideas for future development |
 | `docs/team_git_and_features.md` | Git workflow and feature map |
 
 ## 6. Team Git workflow

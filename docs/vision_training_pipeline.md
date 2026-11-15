@@ -185,6 +185,47 @@ python tools/train_object_segmentation.py \
   --model yolo11n-seg.pt --epochs 100 --device cpu --name yolo_seg_v1
 ```
 
+For RGB-D experiments, use `armsoft.augmentation.RGBDAugmentor` before export
+or inside a dataset loader. It applies one geometric transform to colour,
+depth, and masks, preserves each annotation's `class_id`/`class_name`, uses
+nearest neighbour for depth and masks, and returns updated intrinsics for
+scale, translation, and horizontal flip. The default profile is conservative:
+no vertical flips or large rotations, small colour changes, and RealSense-like
+depth dropout/noise. Copy-paste and background replacement are intentionally
+not included because they require a curated object/background library.
+
+```python
+from armsoft.augmentation import RGBDAugmentor
+
+augmented = RGBDAugmentor(seed=7).augment(
+    frame, masks=[object_mask], annotations=[frame_annotation.objects[0]]
+)
+augmented.frame.color_bgr       # augmented RGB
+augmented.frame.depth_m         # aligned augmented depth
+augmented.masks                 # transformed binary masks
+augmented.annotations           # same classes, transformed polygons/boxes
+augmented.frame.intrinsics      # calibration for supported pixel transforms
+```
+
+For fixed-angle camera rotations, set `rotation_choices`, for example
+`AugmentationConfig(rotation_choices=(-45, -30, -15, 15, 30, 45))`. This is
+opt-in; the default remains the small random rotation range. To rotate only a
+segmented object while leaving its scene background unchanged, call
+`RGBDAugmentor.rotate_object(frame, mask, annotation, angle_deg)`. The mask is
+required so RGB, depth, and the annotation move together. The original object
+region plus a configurable safety margin is inpainted/fill-replaced before
+compositing, so object pixels omitted by an imperfect mask do not remain
+underneath the rotated object. A value of `90` rotates an upright object into a
+horizontal orientation. The camera intrinsics remain unchanged because the
+image coordinate system stays fixed.
+
+For RGB-only background experiments, use
+`RGBDAugmentor.replace_background(frame, mask, annotation, style="gradient")`.
+Supported synthetic styles are `solid`, `gradient`, and `noise`. The object
+pixels and label are preserved while the RGB background changes; depth is
+unchanged by design, so this output should not be treated as physically
+consistent RGB-D data.
+
 对于需要修改 polygon 边界的样本，JSON 是 annotation source of truth；可以接入
 CVAT/Label Studio 转换器。当前键盘审核器只负责接受/拒绝 proposal，不冒充完整的
 polygon editor。

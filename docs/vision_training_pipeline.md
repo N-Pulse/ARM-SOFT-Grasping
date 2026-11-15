@@ -205,6 +205,13 @@ underneath the rotated object. A value of `90` rotates an upright object into a
 horizontal orientation. The camera intrinsics remain unchanged because the
 image coordinate system stays fixed.
 
+For RGB-only background experiments, use
+`RGBDAugmentor.replace_background(frame, mask, annotation, style="gradient")`.
+Supported synthetic styles are `solid`, `gradient`, and `noise`. The object
+pixels and label are preserved while the RGB background changes; depth is
+unchanged by design, so this output should not be treated as physically
+consistent RGB-D data.
+
 对于需要修改 polygon 边界的样本，JSON 是 annotation source of truth；可以接入
 CVAT/Label Studio 转换器。当前键盘审核器只负责接受/拒绝 proposal，不冒充完整的
 polygon editor。

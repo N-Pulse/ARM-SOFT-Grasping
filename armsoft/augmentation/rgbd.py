@@ -175,6 +175,63 @@ class RGBDAugmentor:
             annotations=[transformed],
         )
 
+    def replace_background(
+        self,
+        frame: RGBDFrame,
+        mask: np.ndarray,
+        annotation: ObjectAnnotation,
+        style: str = "gradient",
+        cleanup_margin_px: int = 0,
+    ) -> AugmentedSample:
+        """Replace the RGB background with a synthetic background.
+
+        Depth is intentionally preserved unchanged. This is appropriate for
+        RGB-only detector experiments; it must not be used as physically
+        consistent RGB-D training data.
+        """
+        self._validate_frame(frame)
+        height, width = frame.depth_m.shape
+        object_mask = self._validate_mask(mask, height, width).astype(bool)
+        if cleanup_margin_px < 0:
+            raise ValueError("cleanup_margin_px must be non-negative")
+        if cleanup_margin_px:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (2 * cleanup_margin_px + 1, 2 * cleanup_margin_px + 1),
+            )
+            cleanup_mask = cv2.dilate(
+                object_mask.astype(np.uint8), kernel,
+            ).astype(bool)
+        else:
+            cleanup_mask = object_mask
+        background = self._synthetic_background(height, width, style)
+        color = background
+        color[object_mask] = frame.color_bgr[object_mask]
+        transformed = replace(annotation)
+        return AugmentedSample(
+            frame=replace(frame, color_bgr=color),
+            masks=[object_mask],
+            annotations=[transformed],
+        )
+
+    def _synthetic_background(
+        self, height: int, width: int, style: str,
+    ) -> np.ndarray:
+        if style == "solid":
+            value = self.rng.integers(30, 220, size=3, dtype=np.uint8)
+            return np.broadcast_to(value, (height, width, 3)).copy()
+        if style == "gradient":
+            top = self.rng.integers(30, 180, size=3).astype(np.float32)
+            bottom = self.rng.integers(80, 240, size=3).astype(np.float32)
+            weights = np.linspace(0, 1, height, dtype=np.float32)[:, None, None]
+            rows = top[None, None, :] * (1 - weights) + bottom[None, None, :] * weights
+            return np.broadcast_to(rows, (height, width, 3)).astype(np.uint8).copy()
+        if style == "noise":
+            return self.rng.integers(
+                0, 256, size=(height, width, 3), dtype=np.uint8,
+            )
+        raise ValueError("style must be one of: solid, gradient, noise")
+
     @staticmethod
     def _background_depth(
         depth: np.ndarray,

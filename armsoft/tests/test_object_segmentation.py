@@ -200,6 +200,26 @@ class RGBDAugmentationTests(unittest.TestCase):
                 frame, mask, annotation, 90, cleanup_margin_px=-1,
             )
 
+    def test_synthetic_background_preserves_object_and_depth(self):
+        color = np.zeros((20, 20, 3), dtype=np.uint8)
+        color[8:12, 8:12] = (10, 20, 30)
+        depth = np.ones((20, 20), dtype=np.float32)
+        mask = np.zeros((20, 20), dtype=bool)
+        mask[8:12, 8:12] = True
+        frame = RGBDFrame(color, depth, CameraIntrinsics(20, 20, 10, 10, 10, 10))
+        annotation = ObjectAnnotation(
+            class_id=3, class_name="can",
+            polygon_xy=[[8, 8], [11, 8], [11, 11], [8, 11]],
+            bbox_xyxy=[8, 8, 11, 11], source="test",
+        )
+        result = RGBDAugmentor(seed=1).replace_background(
+            frame, mask, annotation, style="solid",
+        )
+        self.assertTrue(np.array_equal(result.frame.depth_m, depth))
+        self.assertTrue(np.array_equal(result.frame.color_bgr[9, 9], color[9, 9]))
+        self.assertFalse(np.array_equal(result.frame.color_bgr[0, 0], color[0, 0]))
+        self.assertEqual(result.annotations[0].class_name, "can")
+
 
 if __name__ == "__main__":
     unittest.main()

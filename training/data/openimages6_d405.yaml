@@ -1,0 +1,12 @@
+# openimages6 plus the D405 train (repeated) and val frames (build_d405_datasets.py).
+path: ../datasets/openimages6_d405
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: ball
+  1: can
+  2: box
+  3: bottle
+  4: pen_pencil
+  5: door_handle

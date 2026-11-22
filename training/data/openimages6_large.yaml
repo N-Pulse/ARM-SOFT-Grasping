@@ -1,0 +1,12 @@
+# openimages6 with more train images; val and test are the same frozen images.
+path: ../datasets/openimages6_large
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: ball
+  1: can
+  2: box
+  3: bottle
+  4: pen_pencil
+  5: door_handle

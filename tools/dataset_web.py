@@ -3,18 +3,23 @@
 from __future__ import annotations
 import argparse, csv, json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time
 from datetime import datetime
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 import cv2
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from armsoft.data import CaptureSessionWriter, SESSION_SCHEMA_VERSION, data_root
+from armsoft.models import discover_runtime_models
 from armsoft.object_segmentation.annotations import FrameAnnotation, ObjectAnnotation
 from armsoft.object_segmentation.export import to_yolo_lines
+from armsoft.perception import adapt_ultralytics_result
+from armsoft.perception import box_core_depth as perception_box_core_depth
+from armsoft.perception import deproject_pixel
+from armsoft.pointcloud import PointCloudConfig, PointCloudPipeline, save_ply
 from armsoft.preprocessing import DepthFilterConfig, apply_depth_filter
 from armsoft.sources import create_frame_source
 from armsoft.sources.base import RGBDFrame
+from armsoft.studio import create_studio_handler
 
 ROOT=Path(__file__).resolve().parents[1]; WEB=ROOT/"web/dataset-console"; SAFE=re.compile(r"^(?!\.{1,2}$)(?!\.)[\w.-]{1,80}$")
 MAX_REQUEST_BYTES=1024*1024
@@ -36,6 +41,17 @@ def jpeg(im):
     ok, data=cv2.imencode(".jpg", im, [cv2.IMWRITE_JPEG_QUALITY,86])
     if not ok: raise RuntimeError("JPEG encoding failed")
     return data.tobytes()
+
+def box_core_depth(depth,box,fraction=.5):
+    """Compatibility wrapper for the shared perception depth fusion."""
+    return perception_box_core_depth(depth,box,fraction)
+
+def live_object(names,boxes,index,u,v,z,intrinsics):
+    """Live-test record for one detection at pixel (u,v) with depth z in metres (None if unknown)."""
+    class_id=int(boxes.cls[index].item()) if boxes is not None and index<len(boxes) else 0; score=float(boxes.conf[index].item()) if boxes is not None and index<len(boxes) else 0.0
+    xyz=deproject_pixel(u,v,z,intrinsics)
+    class_name=names.get(class_id,class_id) if isinstance(names,dict) else names[class_id]
+    return {"class_id":class_id,"class_name":str(class_name),"confidence":round(score,4),"distance_m":round(z,4) if z is not None else None,"xyz_m":[round(x,4) for x in xyz] if xyz else None}
 
 def draw_annotation_preview(image,objects):
     preview=image.copy(); overlay=image.copy()
@@ -68,8 +84,9 @@ class State:
                         cfg=DepthFilterConfig(self.config["min_depth"],self.config["max_depth"])
                         filtered,mask=apply_depth_filter(frame.color_bgr,frame.depth_m,cfg,frame.intrinsics,dim_background=True)
                         self.images={"raw":jpeg(frame.color_bgr),"filtered":jpeg(filtered),"mask":jpeg(cv2.cvtColor(mask.astype(np.uint8)*255,cv2.COLOR_GRAY2BGR))}
-                        if self.test_job and self.test_job.get("state") in {"loading","running"}:
-                            self.latest_frame=(frame.color_bgr.copy(),frame.depth_m.copy(),frame.intrinsics,frame.index,frame.timestamp,frame.source); self.latest_sequence+=1
+                        # Keep one current RGB-D frame ready for Live Test and point-cloud export.
+                        # This avoids a black preview while the test thread waits for a post-start frame.
+                        self.latest_frame=(frame.color_bgr.copy(),frame.depth_m.copy(),frame.intrinsics,frame.index,frame.timestamp,frame.source); self.latest_sequence+=1
                         if self.job:
                             self.job["seen"]+=1
                             if (self.job["seen"]-1)%self.job["every"]==0:
@@ -82,6 +99,9 @@ class State:
                                 if self.job["saved"]>=self.job["target"]: self.finish()
                     count+=1; now=time.monotonic()
                     if now-tick>=1: self.fps=count/(now-tick); tick=now; count=0
+                    # The synthetic renderer has no hardware frame clock. Limit it so
+                    # it cannot consume every CPU core and starve the inference thread.
+                    if self.source_name=="sim": self.stop.wait(1/30)
         except Exception as e: self.error=str(e)
         finally: self.connected=False; self.finish()
     def begin(self,name,target,every,notes):
@@ -638,29 +658,61 @@ class State:
 
     def test_inputs(self):
         runs=[]
+        bundled_root=ROOT/"models"/"catalog"
+        for model in discover_runtime_models(bundled_root):
+            runs.append({"id":f"bundled/{model.id}","name":model.display_name,"model":model.base_model,"dataset":model.dataset_version,"task":model.task,"version":model.model_version,"source":"bundled"})
+        runtime_root=self.root.parents[1]/"models"/"runtime"
+        for model in discover_runtime_models(runtime_root):
+            runs.append({"id":f"runtime/{model.id}","name":model.display_name,"model":model.base_model,"dataset":model.dataset_version,"task":model.task,"version":model.model_version,"source":"runtime"})
         for run in self.training_runs()["runs"]:
-            if run.get("complete") and run.get("best_weights"): runs.append({"name":run["name"],"model":run.get("base_model"),"dataset":run.get("dataset")})
+            if run.get("complete") and run.get("best_weights"):
+                base=str(run.get("base_model") or "")
+                task="detection" if "-seg" not in base else "segmentation"
+                runs.append({"id":f"object/{run['name']}","name":run["name"],"model":base,"dataset":run.get("dataset"),"task":task})
+        pose_root=self.root.parents[1]/"runs"/"mechanical_hand_pose"
+        if pose_root.exists():
+            for path in sorted((p for p in pose_root.iterdir() if p.is_dir()),key=lambda p:p.stat().st_mtime,reverse=True):
+                weights=path/"weights"/"best.pt"; metadata=path/"armsoft_training.json"
+                if not weights.is_file() or not metadata.is_file(): continue
+                try: details=json.loads(metadata.read_text(encoding="utf-8"))
+                except (OSError,json.JSONDecodeError): continue
+                runs.append({"id":f"pose/{path.name}","name":path.name,"model":details.get("base_model","YOLO Pose"),"dataset":details.get("dataset",""),"task":"pose"})
         devices=compute_devices()
         return {"runs":runs,"devices":devices,"camera_connected":self.connected}
 
+    def _test_model(self,model_id):
+        if not isinstance(model_id,str) or "/" not in model_id: raise ValueError("Select a completed training run with best.pt")
+        family,name=model_id.split("/",1)
+        if family not in {"object","pose","runtime","bundled"} or not SAFE.fullmatch(name): raise ValueError("Select a valid local model")
+        if family in {"runtime","bundled"}:
+            model_root=self.root.parents[1]/"models"/"runtime" if family=="runtime" else ROOT/"models"/"catalog"
+            records={model.id:model for model in discover_runtime_models(model_root)}
+            model=records.get(name)
+            if model is None: raise ValueError("Registered model is missing or invalid")
+            return {"id":model_id,"name":model.display_name,"task":model.task,"weights":model.weights,"base_model":model.base_model,"version":model.model_version}
+        relative=Path("runs")/("object_segmentation" if family=="object" else "mechanical_hand_pose")/name
+        root=self.root.parents[1].resolve(); run=(root/relative).resolve(); weights=run/"weights"/"best.pt"; metadata=run/"armsoft_training.json"
+        if root not in run.parents or not weights.is_file() or not metadata.is_file(): raise ValueError("Completed best.pt not found for this model")
+        details=json.loads(metadata.read_text(encoding="utf-8")); base=str(details.get("base_model") or "")
+        task="pose" if family=="pose" else ("segmentation" if "-seg" in base else "detection")
+        return {"id":model_id,"name":name,"task":task,"weights":weights,"base_model":base}
+
     def test_start(self,data):
-        run_name=str(data.get("run_name","")); device=str(data.get("device","cpu"))
-        if not SAFE.fullmatch(run_name): raise ValueError("Select a completed training run")
+        model_id=str(data.get("model_id") or (f"object/{data.get('run_name')}" if data.get("run_name") else "")); device=str(data.get("device","cpu"))
+        model_record=self._test_model(model_id)
         if device not in {item["id"] for item in compute_devices()}: raise ValueError("Choose an available inference device")
         try: imgsz=int(data.get("imgsz",416)); confidence=float(data.get("confidence",.25)); target_fps=float(data.get("target_fps",10))
         except (TypeError,ValueError): raise ValueError("Invalid live-test settings")
         if not 128<=imgsz<=1280 or imgsz%32: raise ValueError("Image size must be a multiple of 32 between 128 and 1280")
         if not .01<=confidence<=1 or not 1<=target_fps<=30: raise ValueError("Confidence or FPS limit is invalid")
-        root=(self.root.parents[1]/"runs"/"object_segmentation").resolve(); run=(root/run_name).resolve(); weights=run/"weights"/"best.pt"
-        if root not in run.parents or not weights.is_file() or not (run/"armsoft_training.json").is_file(): raise ValueError("Completed best.pt not found for this run")
         with self.lock:
             if not self.connected: raise ValueError("Connect the camera before starting live testing")
             if self.training_job and self.training_job.get("state") in {"running","stopping"}: raise ValueError("Wait for training to finish before live testing")
             if self.test_job and self.test_job.get("state") in {"loading","running","stopping"}: raise ValueError("Live testing is already running or stopping")
-            self.test_stop.clear(); self.test_image=None; self.latest_frame=None
+            self.test_stop.clear(); self.test_image=None
             self.failure_session=None; self.failure_last_signature=None
-            self.test_job={"state":"loading","run_name":run_name,"device":device,"imgsz":imgsz,"confidence":confidence,"target_fps":target_fps,"frames":0,"fps":0.0,"latency_ms":0.0,"objects":[],"error":"","failure_saved":0,"failure_skipped_similar":0,"started_utc":datetime.now().astimezone().isoformat()}
-            self.test_thread=threading.Thread(target=self._run_live_test,args=(weights,),daemon=True); self.test_thread.start()
+            self.test_job={"state":"loading","model_id":model_id,"run_name":model_record["name"],"task":model_record["task"],"base_model":model_record["base_model"],"device":device,"imgsz":imgsz,"confidence":confidence,"target_fps":target_fps,"frames":0,"fps":0.0,"latency_ms":0.0,"objects":[],"error":"","failure_saved":0,"failure_skipped_similar":0,"started_utc":datetime.now().astimezone().isoformat()}
+            self.test_thread=threading.Thread(target=self._run_live_test,args=(model_record["weights"],),daemon=True); self.test_thread.start()
         return self.test_status()
 
     def _run_live_test(self,weights):
@@ -669,26 +721,19 @@ class State:
             model=YOLO(str(weights))
             with self.lock:
                 if self.test_job: self.test_job["state"]="running"
-            last_sequence=-1; fps_ema=0.0
+            last_sequence=-1; fps_ema=0.0; last_camera_frame=time.monotonic()
             while not self.test_stop.is_set():
                 with self.lock:
-                    item=self.latest_frame; sequence=self.latest_sequence; job=dict(self.test_job or {})
-                if item is None or sequence==last_sequence: time.sleep(.005); continue
+                    item=self.latest_frame; sequence=self.latest_sequence; job=dict(self.test_job or {}); connected=self.connected
+                if item is None or sequence==last_sequence:
+                    if not connected and time.monotonic()-last_camera_frame>2: raise RuntimeError("Camera disconnected. Reconnect the D405 and restart Live Test.")
+                    if time.monotonic()-last_camera_frame>5: raise RuntimeError("Camera is connected but no new RGB-D frames arrived. Stop other camera apps, reconnect the D405, and retry.")
+                    time.sleep(.005); continue
                 last_sequence=sequence; color,depth,intrinsics,_,_,_=item; started=time.perf_counter()
+                last_camera_frame=started
                 result=model.predict(source=color,imgsz=job["imgsz"],conf=job["confidence"],device=job["device"],verbose=False)[0]
-                latency=(time.perf_counter()-started)*1000; overlay=result.plot(); objects=[]
-                polygons=result.masks.xy if result.masks is not None else []
-                boxes=result.boxes
-                for index,polygon in enumerate(polygons):
-                    points=np.asarray(polygon,dtype=np.int32)
-                    if len(points)<3: continue
-                    object_mask=np.zeros(depth.shape,dtype=np.uint8); cv2.fillPoly(object_mask,[points],1)
-                    valid=(object_mask>0)&np.isfinite(depth)&(depth>0); z=float(np.median(depth[valid])) if valid.any() else None
-                    moments=cv2.moments(points); u=float(moments["m10"]/moments["m00"]) if moments["m00"] else float(points[:,0].mean()); v=float(moments["m01"]/moments["m00"]) if moments["m00"] else float(points[:,1].mean())
-                    class_id=int(boxes.cls[index].item()) if boxes is not None and index<len(boxes) else 0; score=float(boxes.conf[index].item()) if boxes is not None and index<len(boxes) else 0.0
-                    xyz=[(u-intrinsics.cx)*z/intrinsics.fx,(v-intrinsics.cy)*z/intrinsics.fy,z] if z is not None else None
-                    class_name=result.names.get(class_id,class_id) if isinstance(result.names,dict) else result.names[class_id]
-                    objects.append({"class_id":class_id,"class_name":str(class_name),"confidence":round(score,4),"distance_m":round(z,4) if z is not None else None,"xyz_m":[round(x,4) for x in xyz] if xyz else None})
+                latency=(time.perf_counter()-started)*1000; overlay=result.plot()
+                objects=[instance.to_dict() for instance in adapt_ultralytics_result(result,depth,intrinsics)]
                 instantaneous=1000/latency if latency>0 else 0; fps_ema=instantaneous if not fps_ema else .8*fps_ema+.2*instantaneous
                 with self.lock:
                     if not self.test_job: break
@@ -709,6 +754,24 @@ class State:
             if not self.test_job or self.test_job.get("state") not in {"loading","running"}: raise ValueError("Live testing is not running")
             self.test_stop.set(); self.test_job["state"]="stopping"
         return self.test_status()
+
+    def test_export_pointcloud(self,data):
+        with self.lock: item=self.latest_frame; job=dict(self.test_job or {})
+        if item is None: raise ValueError("No RGB-D frame is available for point-cloud export")
+        try:
+            voxel=float(data.get("voxel_size_m",.005)); max_points=int(data.get("max_points",100000))
+        except (TypeError,ValueError): raise ValueError("Point-cloud settings are invalid")
+        if not 0<=voxel<=.05 or not 100<=max_points<=500000: raise ValueError("Point-cloud settings are outside safe limits")
+        color,depth,intrinsics,index,timestamp,source=item
+        frame=RGBDFrame(color.copy(),depth.copy(),intrinsics,index,timestamp,source)
+        config=PointCloudConfig(min_depth_m=self.config["min_depth"],max_depth_m=self.config["max_depth"],voxel_size_m=voxel,max_points=max_points)
+        result=PointCloudPipeline(config).process(frame)
+        root=(self.root.parents[1]/"derived"/"pointcloud").resolve(); stamp=datetime.now().strftime("live_%Y%m%d_%H%M%S_%f"); target=(root/stamp).resolve()
+        if root not in target.parents or target.exists(): raise ValueError("Could not create a unique point-cloud artifact")
+        target.mkdir(parents=True); ply=save_ply(target/"scene.ply",result)
+        metadata={"schema":"armsoft.live-pointcloud.v1","created_utc":datetime.now().astimezone().isoformat(),"frame":{"index":index,"timestamp":timestamp,"source":source},"model":{"id":job.get("model_id"),"task":job.get("task"),"objects":job.get("objects",[])},"config":config.to_dict(),**result.summary()}
+        (target/"metadata.json").write_text(json.dumps(metadata,indent=2)+"\n",encoding="utf-8")
+        return {"artifact":stamp,"ply":str(ply),"metadata":str(target/"metadata.json"),"summary":result.summary()}
 
     def test_save_failure(self,data):
         failure_type=str(data.get("failure_type","other")); note=str(data.get("note","")).strip()
@@ -751,112 +814,7 @@ class State:
         subprocess.run([sys.executable,str(ROOT/"tools"/"build_data_catalog.py"),"--data-root",str(self.root.parents[1])],capture_output=True)
         return {"session":name,"saved":saved,"skipped_similar":False,"failure_type":failure_type}
 
-class Handler(SimpleHTTPRequestHandler):
-    state=None
-    def __init__(self,*a,**kw): super().__init__(*a,directory=str(WEB),**kw)
-    def end_headers(self):
-        if not any(header.lower().startswith(b"cache-control:") for header in self._headers_buffer):
-            self.send_header("Cache-Control","no-store, max-age=0")
-        self.send_header("Content-Security-Policy","default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
-        self.send_header("X-Content-Type-Options","nosniff")
-        self.send_header("X-Frame-Options","DENY")
-        self.send_header("Referrer-Policy","no-referrer")
-        super().end_headers()
-    def log_message(self,fmt,*a):
-        if not self.path.startswith("/api/frame/"): super().log_message(fmt,*a)
-    def reply(self,data,code=200,typ="application/json; charset=utf-8"):
-        if not isinstance(data,bytes): data=json.dumps(data,ensure_ascii=False).encode()
-        self.send_response(code); self.send_header("Content-Type",typ); self.send_header("Content-Length",str(len(data))); self.send_header("Cache-Control","no-store"); self.end_headers(); self.wfile.write(data)
-    def do_GET(self):
-        u=urlparse(self.path)
-        if u.path=="/api/status": return self.reply(self.state.status())
-        if u.path=="/api/sessions": return self.reply({"sessions":self.state.sessions()})
-        if u.path=="/api/session":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.session_detail(q["name"][0]))
-            except Exception: return self.send_error(404,"Session not found")
-        if u.path=="/api/catalog":
-            catalog=self.state.root.parents[1]/"catalog"/"index.json"
-            try: return self.reply(json.loads(catalog.read_text(encoding="utf-8")))
-            except (OSError,json.JSONDecodeError): return self.reply({"sessions":[]})
-        if u.path=="/api/storage": return self.reply(self.state.storage_report())
-        if u.path=="/api/preprocess/status": return self.reply(self.state.preprocess_status())
-        if u.path=="/api/annotation/status": return self.reply(self.state.annotation_status())
-        if u.path=="/api/annotation/result":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.annotation_result(q["session"][0]))
-            except Exception: return self.send_error(404,"Annotation result not found")
-        if u.path=="/api/annotation-image":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.annotation_image(q["session"][0],q["frame"][0]).read_bytes(),200,"image/png")
-            except Exception: return self.send_error(404)
-        if u.path=="/api/review/session":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.review_session(q["name"][0]))
-            except Exception: return self.send_error(404,"Review session not found")
-        if u.path=="/api/review/frame":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.review_frame(q["session"][0],q["frame"][0]))
-            except Exception: return self.send_error(404,"Review frame not found")
-        if u.path=="/api/dataset/inputs": return self.reply(self.state.dataset_inputs())
-        if u.path=="/api/dataset/exports": return self.reply(self.state.dataset_exports())
-        if u.path=="/api/train/inputs": return self.reply(self.state.training_inputs())
-        if u.path=="/api/train/status": return self.reply(self.state.training_status())
-        if u.path=="/api/train/runs": return self.reply(self.state.training_runs())
-        if u.path=="/api/test/inputs": return self.reply(self.state.test_inputs())
-        if u.path=="/api/test/status": return self.reply(self.state.test_status())
-        if u.path=="/api/test/frame":
-            with self.state.lock: data=self.state.test_image
-            return self.reply(data,200,"image/jpeg") if data else self.send_error(503,"No inference frame")
-        if u.path=="/api/preprocess/result":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.derived_result(q["session"][0],q["version"][0]))
-            except Exception: return self.send_error(404,"Derived result not found")
-        if u.path=="/api/derived-image":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.derived_image(q["session"][0],q["version"][0],q["kind"][0],q["frame"][0]).read_bytes(),200,"image/png")
-            except Exception: return self.send_error(404)
-        if u.path.startswith("/api/frame/"):
-            with self.state.lock: data=self.state.images.get(u.path.rsplit('/',1)[-1])
-            return self.reply(data,200,"image/jpeg") if data else self.send_error(503,"No frame")
-        if u.path=="/api/session-image":
-            q=parse_qs(u.query)
-            try: return self.reply(self.state.image(q["session"][0],q["frame"][0]).read_bytes(),200,"image/png")
-            except Exception: return self.send_error(404)
-        if u.path=="/": self.path="/index.html"
-        return super().do_GET()
-    def do_POST(self):
-        try:
-            origin=self.headers.get("Origin")
-            if origin and urlparse(origin).netloc!=self.headers.get("Host"): return self.reply({"ok":False,"error":"Cross-origin requests are not allowed"},403)
-            length=int(self.headers.get("Content-Length",0))
-            if length<0 or length>MAX_REQUEST_BYTES: return self.reply({"ok":False,"error":"Request body is too large"},413)
-            d=json.loads(self.rfile.read(length) or b"{}")
-            if not isinstance(d,dict): raise ValueError("JSON request body must be an object")
-            if self.path=="/api/config":
-                lo,hi=float(d["min_depth"]),float(d["max_depth"])
-                if not .001<=lo<hi<=10: raise ValueError("Depth range is invalid")
-                with self.state.lock: self.state.config={"min_depth":lo,"max_depth":hi}
-            elif self.path=="/api/capture/start": self.state.begin(str(d.get("name") or datetime.now().strftime("object_%Y%m%d_%H%M%S")),int(d.get("frames",100)),int(d.get("every",3)),str(d.get("notes","")))
-            elif self.path=="/api/capture/stop": self.state.finish()
-            elif self.path=="/api/session/delete": return self.reply({"ok":True,"result":self.state.delete_session(str(d.get("name","")),str(d.get("confirmation","")))})
-            elif self.path=="/api/preprocess/start": return self.reply({"ok":True,"job":self.state.preprocess_start(d)})
-            elif self.path=="/api/preprocess/delete": return self.reply({"ok":True,"result":self.state.preprocess_delete(str(d.get("session","")),str(d.get("version","")),str(d.get("confirmation","")))})
-            elif self.path=="/api/annotation/start": return self.reply({"ok":True,"job":self.state.annotation_start(d)})
-            elif self.path=="/api/annotation/delete": return self.reply({"ok":True,"result":self.state.annotation_delete(str(d.get("session","")),str(d.get("confirmation","")))})
-            elif self.path=="/api/review/save": return self.reply({"ok":True,"result":self.state.review_save(d)})
-            elif self.path=="/api/dataset/validate": return self.reply({"ok":True,"report":self.state.dataset_validate(d)})
-            elif self.path=="/api/dataset/export": return self.reply({"ok":True,"result":self.state.dataset_export(d)})
-            elif self.path=="/api/dataset/delete": return self.reply({"ok":True,"result":self.state.dataset_delete(str(d.get("version","")),str(d.get("confirmation","")))})
-            elif self.path=="/api/train/start": return self.reply({"ok":True,"job":self.state.training_start(d)})
-            elif self.path=="/api/train/stop": return self.reply({"ok":True,"job":self.state.training_stop()})
-            elif self.path=="/api/train/delete": return self.reply({"ok":True,"result":self.state.training_delete(str(d.get("name","")),str(d.get("confirmation","")))})
-            elif self.path=="/api/test/start": return self.reply({"ok":True,"job":self.state.test_start(d)})
-            elif self.path=="/api/test/stop": return self.reply({"ok":True,"job":self.state.test_stop_live()})
-            elif self.path=="/api/test/save-failure": return self.reply({"ok":True,"result":self.state.test_save_failure(d)})
-            else: return self.send_error(404)
-            return self.reply({"ok":True})
-        except Exception as e: return self.reply({"ok":False,"error":str(e)},400)
+Handler=create_studio_handler(WEB,MAX_REQUEST_BYTES)
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument("--host",default="127.0.0.1"); p.add_argument("--port",type=int,default=8765); p.add_argument("--source",choices=("camera","sim"),default="camera"); p.add_argument("--data-root",type=Path,default=data_root()); p.add_argument("--capture-root",type=Path); p.add_argument("--allow-remote",action="store_true",help="allow binding beyond localhost; there is no authentication"); a=p.parse_args()

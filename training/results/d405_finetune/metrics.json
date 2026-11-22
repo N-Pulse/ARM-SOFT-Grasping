@@ -1,0 +1,375 @@
+{
+  "b2_yolo26s_d405": {
+    "imgsz": 416,
+    "sessions": {
+      "can_7": {
+        "split": "test",
+        "frames": 11,
+        "ap50": {
+          "can": 0.995
+        },
+        "boxes": {
+          "can": 11
+        },
+        "found": {
+          "can": 11
+        },
+        "wrong_class": {},
+        "extra": {}
+      },
+      "test-box-2": {
+        "split": "test",
+        "frames": 19,
+        "ap50": {
+          "box": 0.995
+        },
+        "boxes": {
+          "box": 19
+        },
+        "found": {
+          "box": 19
+        },
+        "wrong_class": {},
+        "extra": {
+          "box": 3,
+          "can": 1
+        }
+      },
+      "can_5": {
+        "split": "val",
+        "frames": 8,
+        "ap50": {
+          "can": 0.995
+        },
+        "boxes": {
+          "can": 8
+        },
+        "found": {
+          "can": 8
+        },
+        "wrong_class": {},
+        "extra": {}
+      },
+      "box-beige-1": {
+        "split": "val",
+        "frames": 20,
+        "ap50": {
+          "box": 0.995
+        },
+        "boxes": {
+          "box": 20
+        },
+        "found": {
+          "box": 20
+        },
+        "wrong_class": {},
+        "extra": {}
+      }
+    },
+    "classes": {
+      "test": {
+        "ap50": {
+          "can": 0.995,
+          "box": 0.995
+        },
+        "boxes": {
+          "can": 11,
+          "box": 19
+        },
+        "found": {
+          "can": 11,
+          "box": 19
+        },
+        "wrong_class": {},
+        "extra": {
+          "box": 3,
+          "can": 1
+        }
+      },
+      "val": {
+        "ap50": {
+          "can": 0.995,
+          "box": 0.995
+        },
+        "boxes": {
+          "can": 8,
+          "box": 20
+        },
+        "found": {
+          "can": 8,
+          "box": 20
+        },
+        "wrong_class": {},
+        "extra": {}
+      }
+    },
+    "negatives": {
+      "right-hand-3fingers-1": {
+        "frames": 20,
+        "frames_with_detection": 1,
+        "detections": 1,
+        "by_class": {
+          "pen_pencil": 1
+        }
+      },
+      "right-hand-thumbs-up-1": {
+        "frames": 20,
+        "frames_with_detection": 1,
+        "detections": 1,
+        "by_class": {
+          "box": 1
+        }
+      },
+      "right-hand-thumbs-up-2": {
+        "frames": 20,
+        "frames_with_detection": 15,
+        "detections": 15,
+        "by_class": {
+          "can": 15
+        }
+      },
+      "mug_1": {
+        "frames": 20,
+        "frames_with_detection": 20,
+        "detections": 34,
+        "by_class": {
+          "can": 20,
+          "box": 14
+        }
+      },
+      "ellipsoid": {
+        "frames": 20,
+        "frames_with_detection": 20,
+        "detections": 20,
+        "by_class": {
+          "can": 20
+        }
+      },
+      "ellipsoid_2": {
+        "frames": 20,
+        "frames_with_detection": 19,
+        "detections": 20,
+        "by_class": {
+          "can": 20
+        }
+      },
+      "ellipsoid_3": {
+        "frames": 20,
+        "frames_with_detection": 14,
+        "detections": 14,
+        "by_class": {
+          "can": 14
+        }
+      }
+    },
+    "open_images": {
+      "near": {
+        "map50": 0.02751371398854492,
+        "ap50": {
+          "ball": 0.029166666666666667,
+          "can": 0.035655940524384824,
+          "box": 0.01961841782028294,
+          "bottle": 0.015,
+          "pen_pencil": 0.06564125891993511,
+          "door_handle": 0.0
+        }
+      },
+      "far": {
+        "map50": 0.047980641480493684,
+        "ap50": {
+          "ball": 0.0025,
+          "can": 0.23499643435552042,
+          "box": 0.02476413288523621,
+          "bottle": 0.0,
+          "pen_pencil": 0.025623281642205453,
+          "door_handle": 0.0
+        }
+      }
+    }
+  },
+  "b2_yolo26s_mix": {
+    "imgsz": 416,
+    "sessions": {
+      "can_7": {
+        "split": "test",
+        "frames": 11,
+        "ap50": {
+          "can": 0.995
+        },
+        "boxes": {
+          "can": 11
+        },
+        "found": {
+          "can": 11
+        },
+        "wrong_class": {},
+        "extra": {
+          "bottle": 3
+        }
+      },
+      "test-box-2": {
+        "split": "test",
+        "frames": 19,
+        "ap50": {
+          "box": 0.995
+        },
+        "boxes": {
+          "box": 19
+        },
+        "found": {
+          "box": 19
+        },
+        "wrong_class": {},
+        "extra": {
+          "box": 1,
+          "bottle": 2
+        }
+      },
+      "can_5": {
+        "split": "val",
+        "frames": 8,
+        "ap50": {
+          "can": 0.995
+        },
+        "boxes": {
+          "can": 8
+        },
+        "found": {
+          "can": 8
+        },
+        "wrong_class": {},
+        "extra": {}
+      },
+      "box-beige-1": {
+        "split": "val",
+        "frames": 20,
+        "ap50": {
+          "box": 0.995
+        },
+        "boxes": {
+          "box": 20
+        },
+        "found": {
+          "box": 20
+        },
+        "wrong_class": {},
+        "extra": {
+          "pen_pencil": 1
+        }
+      }
+    },
+    "classes": {
+      "test": {
+        "ap50": {
+          "can": 0.995,
+          "box": 0.995
+        },
+        "boxes": {
+          "can": 11,
+          "box": 19
+        },
+        "found": {
+          "can": 11,
+          "box": 19
+        },
+        "wrong_class": {},
+        "extra": {
+          "bottle": 5,
+          "box": 1
+        }
+      },
+      "val": {
+        "ap50": {
+          "can": 0.995,
+          "box": 0.995
+        },
+        "boxes": {
+          "can": 8,
+          "box": 20
+        },
+        "found": {
+          "can": 8,
+          "box": 20
+        },
+        "wrong_class": {},
+        "extra": {
+          "pen_pencil": 1
+        }
+      }
+    },
+    "negatives": {
+      "right-hand-3fingers-1": {
+        "frames": 20,
+        "frames_with_detection": 0,
+        "detections": 0,
+        "by_class": {}
+      },
+      "right-hand-thumbs-up-1": {
+        "frames": 20,
+        "frames_with_detection": 0,
+        "detections": 0,
+        "by_class": {}
+      },
+      "right-hand-thumbs-up-2": {
+        "frames": 20,
+        "frames_with_detection": 0,
+        "detections": 0,
+        "by_class": {}
+      },
+      "mug_1": {
+        "frames": 20,
+        "frames_with_detection": 0,
+        "detections": 0,
+        "by_class": {}
+      },
+      "ellipsoid": {
+        "frames": 20,
+        "frames_with_detection": 20,
+        "detections": 20,
+        "by_class": {
+          "ball": 20
+        }
+      },
+      "ellipsoid_2": {
+        "frames": 20,
+        "frames_with_detection": 20,
+        "detections": 20,
+        "by_class": {
+          "ball": 20
+        }
+      },
+      "ellipsoid_3": {
+        "frames": 20,
+        "frames_with_detection": 20,
+        "detections": 20,
+        "by_class": {
+          "ball": 20
+        }
+      }
+    },
+    "open_images": {
+      "near": {
+        "map50": 0.5925225132759825,
+        "ap50": {
+          "ball": 0.7021110688591837,
+          "can": 0.6803557335012098,
+          "box": 0.4920043649190053,
+          "bottle": 0.5412769642646285,
+          "pen_pencil": 0.6206874019075515,
+          "door_handle": 0.5186995462043159
+        }
+      },
+      "far": {
+        "map50": 0.3182871530106281,
+        "ap50": {
+          "ball": 0.17593579763877149,
+          "can": 0.44410062594795446,
+          "box": 0.30621123962611574,
+          "bottle": 0.4138442497694883,
+          "pen_pencil": 0.23877664933409637,
+          "door_handle": 0.33085435574734223
+        }
+      }
+    }
+  }
+}

@@ -79,6 +79,18 @@ class DatasetWebSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "best.pt"):
             self.state.test_start({"run_name": "missing", "device": "cpu"})
 
+    def test_starting_live_test_preserves_latest_camera_frame(self):
+        model = self.data / "models" / "runtime" / "detect-v1"; model.mkdir(parents=True)
+        (model / "best.pt").write_bytes(b"weights")
+        (model / "model.json").write_text(json.dumps({
+            "schema": "armsoft.runtime-model.v1", "id": "detect-v1",
+            "task": "detection", "weights": "best.pt",
+        }))
+        marker = object(); self.state.latest_frame = marker; self.state.connected = True
+        with patch("tools.dataset_web.threading.Thread"):
+            self.state.test_start({"model_id": "runtime/detect-v1", "device": "cpu"})
+        self.assertIs(self.state.latest_frame, marker)
+
     def test_failure_case_is_saved_as_normal_rgbd_session(self):
         intrinsics = CameraIntrinsics(4, 3, 2.0, 2.0, 2.0, 1.5)
         self.state.latest_frame = (
@@ -105,6 +117,59 @@ class DatasetWebSafetyTests(unittest.TestCase):
         self.assertFalse(first["skipped_similar"])
         self.assertTrue(second["skipped_similar"])
         self.assertEqual(len(list((self.capture / first["session"] / "color").glob("*.png"))), 1)
+
+    def test_live_pointcloud_export_stays_in_shared_derived_root(self):
+        intrinsics = CameraIntrinsics(4, 3, 2.0, 2.0, 2.0, 1.5)
+        self.state.latest_frame = (
+            np.zeros((3, 4, 3), dtype=np.uint8),
+            np.ones((3, 4), dtype=np.float32),
+            intrinsics, 9, 321.0, "test-camera",
+        )
+        self.state.test_job = {"model_id": "object/demo", "task": "segmentation", "objects": []}
+        result = self.state.test_export_pointcloud({"voxel_size_m": 0, "max_points": 100})
+        ply = Path(result["ply"])
+        self.assertTrue(ply.is_file())
+        self.assertEqual(ply.parents[1], (self.data / "derived" / "pointcloud").resolve())
+        self.assertTrue(Path(result["metadata"]).is_file())
+
+    def test_pose_run_is_registered_for_live_test(self):
+        run = self.data / "runs" / "mechanical_hand_pose" / "pose_v1"
+        (run / "weights").mkdir(parents=True)
+        (run / "weights" / "best.pt").write_bytes(b"weights")
+        (run / "armsoft_training.json").write_text(json.dumps({"base_model": "yolo11n-pose.pt", "dataset": "pose.yaml"}))
+        registered = self.state.test_inputs()["runs"]
+        pose = next(item for item in registered if item["id"] == "pose/pose_v1")
+        self.assertEqual(pose["task"], "pose")
+
+    def test_registered_runtime_model_is_available_to_live_test(self):
+        model = self.data / "models" / "runtime" / "seg-v2"; model.mkdir(parents=True)
+        (model / "best.pt").write_bytes(b"weights")
+        (model / "model.json").write_text(json.dumps({
+            "schema": "armsoft.runtime-model.v1", "id": "seg-v2",
+            "display_name": "Object Seg v2", "task": "segmentation",
+            "weights": "best.pt", "base_model": "best.pt", "model_version": "2.0.0",
+        }))
+        registered = self.state.test_inputs()["runs"]
+        self.assertIn("runtime/seg-v2", [item["id"] for item in registered])
+        selected = self.state._test_model("runtime/seg-v2")
+        self.assertEqual(selected["task"], "segmentation")
+        self.assertTrue(selected["weights"].is_file())
+
+    def test_bundled_catalog_model_is_available_to_live_test(self):
+        repository = Path(self.temp.name) / "repository"
+        model = repository / "models" / "catalog" / "detect-v1"; model.mkdir(parents=True)
+        (model / "best.pt").write_bytes(b"weights")
+        (model / "model.json").write_text(json.dumps({
+            "schema": "armsoft.runtime-model.v1", "id": "detect-v1",
+            "display_name": "D405 Detect v1", "task": "detection",
+            "weights": "best.pt", "base_model": "YOLO26s", "model_version": "1.0.0",
+        }))
+        with patch("tools.dataset_web.ROOT", repository):
+            registered = self.state.test_inputs()["runs"]
+            self.assertEqual(registered[0]["id"], "bundled/detect-v1")
+            selected = self.state._test_model("bundled/detect-v1")
+        self.assertEqual(selected["task"], "detection")
+        self.assertTrue(selected["weights"].is_file())
 
     def test_finishing_capture_rebuilds_catalog(self):
         intrinsics = CameraIntrinsics(4, 3, 2.0, 2.0, 2.0, 1.5)

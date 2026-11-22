@@ -1,0 +1,12 @@
+# Approved D405 frames from the Dataset Studio, split by session (build_d405_datasets.py).
+path: ../datasets/d405
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: ball
+  1: can
+  2: box
+  3: bottle
+  4: pen_pencil
+  5: door_handle

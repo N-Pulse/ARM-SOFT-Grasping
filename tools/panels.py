@@ -219,5 +219,3 @@ def caption(width, name, scene, result, conf):
     label(bar, truth, (300, 26), (190, 190, 190), 0.5, 1)
     label(bar, got, (300, 56), colour, 0.5, 1)
     return bar
-
-

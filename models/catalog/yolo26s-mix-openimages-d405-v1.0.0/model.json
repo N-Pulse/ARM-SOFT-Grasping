@@ -1,0 +1,23 @@
+{
+  "author": "ARM-SOFT team",
+  "base_model": "YOLO26s",
+  "classes": {
+    "0": "ball",
+    "1": "can",
+    "2": "box",
+    "3": "bottle",
+    "4": "pen_pencil",
+    "5": "door_handle"
+  },
+  "dataset_version": "Open Images 6 classes + D405 v1",
+  "display_name": "YOLO26s Open Images + D405 v1",
+  "framework": "ultralytics",
+  "id": "yolo26s-mix-openimages-d405-v1.0.0",
+  "model_version": "1.0.0",
+  "notes": "Experimental first D405 checkpoint. Validate on representative D405 scenes before deployment.",
+  "schema": "armsoft.runtime-model.v1",
+  "sha256": "2bcfd146ee2e34c13b65f94e54a548be46569f5aa9adc83c3380df9c04790d4e",
+  "status": "experimental",
+  "task": "detection",
+  "weights": "best.pt"
+}

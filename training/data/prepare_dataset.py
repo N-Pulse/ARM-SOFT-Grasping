@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -33,7 +34,7 @@ from training.data.validate_yolo_dataset import validate_dataset  # noqa: E402
 from training.data.yolo_format import CLASSES  # noqa: E402
 from training.paths import DATASETS_DIR, REPO_DIR  # noqa: E402
 
-DEFAULT_CONFIG = REPO_DIR / "configs" / "datasets" / "openimages_d405_v1.yaml"
+DEFAULT_CONFIG = REPO_DIR / "configs" / "datasets" / "openimages_d405_v2.yaml"
 DEFAULT_START_MODEL = "models/catalog/yolo26s-mix-openimages-d405-v1.0.0/best.pt"
 
 
@@ -58,6 +59,14 @@ def load_config(path: Path) -> dict:
                                  or any(not isinstance(s, str) or ".." in s or s.startswith("/")
                                         for s in subroots)):
         raise ValueError("d405.subroots must be a list of relative folder names ('' = top)")
+    augmented = config.get("augmented_huggingface")
+    if augmented:
+        required = {"repo_id", "revision", "output", "archive", "sha256"}
+        missing = required - set(augmented)
+        if missing:
+            raise ValueError("augmented_huggingface is missing: " + ", ".join(sorted(missing)))
+        if len(str(augmented["sha256"])) != 64:
+            raise ValueError("augmented_huggingface.sha256 must be a full SHA-256 digest")
     return config
 
 
@@ -171,6 +180,62 @@ def download_huggingface(config: dict, refresh: bool) -> Path:
         "downloaded_at": datetime.now(timezone.utc).isoformat(),
     }, indent=2) + "\n", encoding="utf-8")
     return output
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def download_augmented(config: dict, refresh: bool) -> Path:
+    """Download and verify the optional pre-generated experimental augmentation release."""
+    settings = config.get("augmented_huggingface")
+    if not settings:
+        raise ValueError("this dataset config has no augmented_huggingface section")
+    output = repo_path(settings["output"])
+    archive = output / settings["archive"]
+    marker = output / "DOWNLOAD.json"
+    recorded = _read_json(marker)
+    expected = str(settings["sha256"])
+    if (recorded and archive.is_file() and not refresh
+            and recorded.get("revision") == settings["revision"]
+            and recorded.get("sha256") == expected):
+        print(f"[skip] verified augmented release already downloaded: {archive}")
+        return archive
+    try:
+        from huggingface_hub import snapshot_download  # noqa: PLC0415
+    except ImportError as exc:
+        raise RuntimeError("huggingface_hub is required to download augmented data") from exc
+    if refresh and output.exists():
+        shutil.rmtree(output)
+    output.mkdir(parents=True, exist_ok=True)
+    release = settings.get("release", "")
+    patterns = [settings["archive"], "README.md"]
+    if release:
+        patterns.append(f"metadata/{release}/*")
+    snapshot_download(repo_id=settings["repo_id"],
+                      repo_type=settings.get("repo_type", "dataset"),
+                      revision=settings["revision"], local_dir=output,
+                      allow_patterns=patterns)
+    if not archive.is_file():
+        raise FileNotFoundError(f"augmented archive was not downloaded: {archive}")
+    actual = _sha256(archive)
+    if actual != expected:
+        raise RuntimeError(f"augmented archive checksum mismatch: expected {expected}, got {actual}")
+    marker.write_text(json.dumps({
+        "repo_id": settings["repo_id"], "revision": settings["revision"],
+        "archive": settings["archive"], "sha256": actual,
+        "source_revision": settings.get("source_revision"),
+        "status": settings.get("status", "experimental"),
+        "downloaded_at": datetime.now(timezone.utc).isoformat(),
+    }, indent=2) + "\n", encoding="utf-8")
+    print(f"[ready] verified experimental augmented archive: {archive}")
+    print("[warning] this archive is not merged automatically; validate its recipe and source "
+          "mapping before using it for training")
+    return archive
 
 
 # --------------------------------------------------------------------------- build
@@ -355,6 +420,9 @@ def print_train_command(config: dict, data_yaml: Path) -> None:
     if (REPO_DIR / DEFAULT_START_MODEL).is_file():
         lines.append(f"  --model {DEFAULT_START_MODEL}")
     lines.append(f"  --data {data_arg}")
+    profile = config.get("local_augmentation", {}).get("profile")
+    if profile:
+        lines.append(f"  --augmentation-profile {profile}")
     if config.get("quick_run"):
         lines.append("  --epochs 1 --fraction 0.1      # quick run: smoke test only")
     print("\nNext, train with:\n    " + " \\\n    ".join(lines) + "\n")
@@ -404,6 +472,8 @@ def check(config: dict) -> dict:
         "mixed": DATASETS_DIR / config["mixed"]["output_name"],
         "yaml": repo_path(config["mixed"]["yaml"]),
     }
+    if config.get("augmented_huggingface"):
+        paths["augmented_hf"] = repo_path(config["augmented_huggingface"]["output"])
     print(f"Outputs for {config['name']}" + (" (quick run)" if config.get("quick_run") else ""))
     status = {name: path.exists() for name, path in paths.items()}
     for name, path in paths.items():
@@ -417,7 +487,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("action", choices=["check", "download-openimages", "download-hf",
-                                           "build", "validate", "all"])
+                                           "download-augmented", "build", "validate", "all"])
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--per-class", type=int,
                         help="Open Images images per class; a value different from the config "
@@ -440,6 +510,8 @@ def main(argv=None) -> int:
         download_openimages(config, args.openimages_python, args.refresh_sources)
     elif args.action == "download-hf":
         download_huggingface(config, args.refresh_sources)
+    elif args.action == "download-augmented":
+        download_augmented(config, args.refresh_sources)
     elif args.action == "build":
         build(config, args.force)
     elif args.action == "validate":

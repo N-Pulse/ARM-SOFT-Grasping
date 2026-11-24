@@ -2,7 +2,7 @@
 
 This guide rebuilds the exact YOLO detection dataset used by the team. The pipeline downloads both sources, converts their annotations, combines them, validates the result and records its provenance.
 
-The pinned v1 definition is [`configs/datasets/openimages_d405_v1.yaml`](../../configs/datasets/openimages_d405_v1.yaml). It fixes:
+The current pinned definition is [`configs/datasets/openimages_d405_v2.yaml`](../../configs/datasets/openimages_d405_v2.yaml). It fixes:
 
 - class order: `ball`, `can`, `box`, `bottle`, `pen_pencil`, `door_handle`;
 - 500 Open Images images per class and seed `0`;
@@ -10,7 +10,15 @@ The pinned v1 definition is [`configs/datasets/openimages_d405_v1.yaml`](../../c
 - D405 train/validation/test sessions and excluded frames;
 - D405 repeat factor used in the mixed training split.
 
-Do not edit the v1 config to create a different dataset. Copy it to a new version instead.
+The canonical Hugging Face source contains only reviewed data in the structure-v2 layout:
+
+```text
+raw/{object,arm,non_target}/<session>/
+annotations/{object,arm,non_target}_segmentation/<session>/
+metadata/
+```
+
+Do not edit the v2 config to create a different dataset. Copy it to a new version instead.
 
 ## 1. Get the code
 
@@ -40,7 +48,7 @@ python -m pip install -r requirements.txt
 
 ## 2. Get Hugging Face access
 
-1. Open the `DouaaKDR/Npulse` dataset page on Hugging Face.
+1. Open the `npulseDataCV/npulse_cv` dataset page on Hugging Face.
 2. Request access and wait until it is approved.
 3. Create a fine-grained Hugging Face token with permission to read gated repositories.
 4. Install the client and log in:
@@ -76,7 +84,8 @@ py -3.11 -m venv training/.venv-download
 Run this from the repository root with the main `.venv` activated:
 
 ```bash
-python training/data/prepare_dataset.py check
+python training/data/prepare_dataset.py check \
+  --config configs/datasets/openimages_d405_v2.yaml
 ```
 
 Resolve every reported missing dependency or access problem before continuing.
@@ -84,27 +93,34 @@ Resolve every reported missing dependency or access problem before continuing.
 ## 5. Run a small reproducibility test
 
 ```bash
-python training/data/prepare_dataset.py all --per-class 50
+python training/data/prepare_dataset.py all \
+  --config configs/datasets/openimages_d405_v2.yaml \
+  --per-class 50
 ```
 
-This creates separate `_pc50` sources, datasets and YAML files. It does not overwrite or mix with the full v1 dataset.
+This creates separate `_pc50` sources, datasets and YAML files. It does not overwrite or mix with the full v2 dataset.
 
 Validate it again without downloading:
 
 ```bash
-python training/data/prepare_dataset.py validate --per-class 50
+python training/data/prepare_dataset.py validate \
+  --config configs/datasets/openimages_d405_v2.yaml \
+  --per-class 50
 ```
 
 ## 6. Build the full pinned dataset
 
 ```bash
-python training/data/prepare_dataset.py all
+python training/data/prepare_dataset.py all \
+  --config configs/datasets/openimages_d405_v2.yaml
 ```
 
 To build a dataset specifically for copying or zipping to another machine, use real copies instead of hard links:
 
 ```bash
-python training/data/prepare_dataset.py all --link-mode copy
+python training/data/prepare_dataset.py all \
+  --config configs/datasets/openimages_d405_v2.yaml \
+  --link-mode copy
 ```
 
 The command performs these stages:
@@ -116,33 +132,59 @@ The command performs these stages:
 5. validate images, labels, class IDs, coordinates, split separation and decodability;
 6. publish both datasets only after validation succeeds.
 
-## 7. Verify the result
+## 7. Choose augmentation
+
+### Recommended: local online augmentation
+
+Use the versioned profile when training. Ultralytics generates a new variation during training
+and applies it only to the train split; validation and test stay unchanged:
 
 ```bash
-python training/data/prepare_dataset.py validate
+python training/train.py \
+  --name yolo26s_mix_v2_local_aug \
+  --model models/catalog/yolo26s-mix-openimages-d405-v2.0.0/best.pt \
+  --data training/data/openimages6_d405_v2.yaml \
+  --augmentation-profile configs/augmentation/yolo_detection_v1.yaml
 ```
 
-The verified v1 build should contain:
+Use `--no-augmentation` only for a controlled baseline comparison.
 
-| Dataset | Train | Validation | Test |
-| --- | ---: | ---: | ---: |
-| `d405_v1` | 122 | 28 | 30 |
-| `openimages6_d405_v1` | 2686 | 473 | 445 |
+### Alternative: download the pre-generated HF release
+
+The separate `npulseDataCV/npulse_cv_augmented_experiments` repository exists for teams that
+cannot generate augmentation locally:
+
+```bash
+python training/data/prepare_dataset.py download-augmented \
+  --config configs/datasets/openimages_d405_v2.yaml
+```
+
+The pipeline pins the release commit and verifies the 7z SHA-256. `augmented_v1` is experimental:
+it was created from older source revision `2fb650d153`, and its exact recipe and source-to-output
+mapping are incomplete. It is therefore downloaded but deliberately not merged automatically.
+Do not place augmented samples in validation or test.
+
+## 8. Verify the result
+
+```bash
+python training/data/prepare_dataset.py validate \
+  --config configs/datasets/openimages_d405_v2.yaml
+```
 
 Main outputs:
 
 ```text
-training/datasets/d405_v1/
-training/datasets/openimages6_d405_v1/
-training/data/openimages6_d405_v1.yaml
-training/sources/npulse-ac4f808/
+training/datasets/d405_v2/
+training/datasets/openimages6_d405_v2/
+training/data/openimages6_d405_v2.yaml
+training/sources/npulse_cv-a1eb31e/
 ```
 
 Each published dataset includes `dataset_manifest.json`, `validation_report.json` and `stats.json`. These record what was downloaded, how it was built and whether validation passed.
 
 All downloaded and generated data is ignored by Git.
 
-## 8. Safe reruns and recovery
+## 9. Safe reruns and recovery
 
 - Normal reruns reuse matching downloads.
 - `--refresh-sources` downloads the sources again.
@@ -154,16 +196,18 @@ Examples:
 
 ```bash
 # Re-download both sources and rebuild, archiving the existing output
-python training/data/prepare_dataset.py all --refresh-sources --force
+python training/data/prepare_dataset.py all \
+  --config configs/datasets/openimages_d405_v2.yaml \
+  --refresh-sources --force
 
 # Execute stages separately for troubleshooting
-python training/data/prepare_dataset.py download-openimages
-python training/data/prepare_dataset.py download-hf
-python training/data/prepare_dataset.py build
-python training/data/prepare_dataset.py validate
+python training/data/prepare_dataset.py download-openimages --config configs/datasets/openimages_d405_v2.yaml
+python training/data/prepare_dataset.py download-hf --config configs/datasets/openimages_d405_v2.yaml
+python training/data/prepare_dataset.py build --config configs/datasets/openimages_d405_v2.yaml
+python training/data/prepare_dataset.py validate --config configs/datasets/openimages_d405_v2.yaml
 ```
 
-## 9. Create a new dataset version
+## 10. Create a new dataset version
 
 When the Hugging Face dataset gains new approved D405 sessions:
 
@@ -192,4 +236,6 @@ updates would silently change a supposedly reproducible training dataset.
 | Existing dataset blocks publication | Inspect it first; use `--force` only when replacement is intended |
 | Validation fails | Read both `validation_report.json` files in the printed `.failed/<time>/` directory |
 | Disk use is high | Keep the default hard-link mode locally; use copy mode only when portability requires it |
+| Augmented archive is very large | Prefer local online augmentation; download the HF archive only when needed |
+| Augmented release cannot be reproduced | Do not merge it automatically; complete its recipe and source mapping first |
 

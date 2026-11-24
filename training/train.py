@@ -17,6 +17,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from training.paths import DEFAULT_DATA, DEFAULT_MODEL, RUNS_DIR, resolve_data_yaml  # noqa: E402
@@ -38,6 +40,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="Ultralytics optimizer, for example auto, SGD, Adam or AdamW")
     ap.add_argument("--lr0", type=float,
                     help="initial learning rate; omit to use the Ultralytics default")
+    ap.add_argument("--augmentation-profile", type=Path,
+                    help="YAML of Ultralytics train-only augmentation parameters")
+    ap.add_argument("--no-augmentation", action="store_true",
+                    help="disable Ultralytics augmentation (for controlled comparisons)")
     ap.add_argument("--fraction", type=float, default=1.0,
                     help="fraction of the train split to use (smoke tests)")
     ap.add_argument("--seed", type=int, default=0)
@@ -55,6 +61,20 @@ def build_train_kwargs(args: argparse.Namespace, data_path) -> dict:
                   exist_ok=args.exist_ok, plots=True)
     if args.lr0 is not None:
         kwargs["lr0"] = args.lr0
+    if args.no_augmentation and args.augmentation_profile:
+        raise ValueError("choose either --augmentation-profile or --no-augmentation")
+    if args.no_augmentation:
+        kwargs["augment"] = False
+    elif args.augmentation_profile:
+        profile = yaml.safe_load(args.augmentation_profile.read_text(encoding="utf-8"))
+        if not isinstance(profile, dict) or not profile:
+            raise ValueError("augmentation profile must be a non-empty YAML mapping")
+        allowed = {"hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "shear",
+                   "perspective", "flipud", "fliplr", "mosaic", "mixup", "copy_paste"}
+        unknown = set(profile) - allowed
+        if unknown:
+            raise ValueError("unknown augmentation parameters: " + ", ".join(sorted(unknown)))
+        kwargs.update(profile)
     return kwargs
 
 

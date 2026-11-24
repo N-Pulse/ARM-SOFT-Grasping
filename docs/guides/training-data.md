@@ -167,7 +167,7 @@ python training/data/prepare_dataset.py validate
 
 When the Hugging Face dataset gains new approved D405 sessions:
 
-1. copy `configs/datasets/openimages_d405_v1.yaml` to a v2 filename;
+1. copy the latest `configs/datasets/openimages_d405_v*.yaml` to the next version;
 2. change `name`, both output names, generated YAML name, HF revision and HF output folder;
 3. add every new session to exactly one entry in `d405.session_splits`;
 4. extend `class_map` if Dataset Studio contains new class names;
@@ -179,6 +179,8 @@ python training/data/prepare_dataset.py all \
 ```
 
 Never point two config revisions at the same Hugging Face output directory.
+Pin `huggingface.revision` to the full commit SHA; do not use `main`, because later HF
+updates would silently change a supposedly reproducible training dataset.
 
 ## Common problems
 

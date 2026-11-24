@@ -10,8 +10,9 @@ Build two YOLO datasets from a downloaded Dataset Studio data root:
 
 Only approved frames of the sessions in studio_format.SESSION_SPLITS are used,
 minus studio_format.EXCLUDED_FRAMES (rejected after visual control).
-Sessions may live in sub-roots of the snapshot (e.g. ``yanis/annotations/...``), and
-negative sessions (no target object) are written as images with empty label files.
+Legacy sessions may live in snapshot sub-roots. Canonical snapshots keep object, arm and
+non-target annotations in separate task folders; negative sessions are written as images
+with empty label files.
 The mixed dataset keeps every class present while the model adapts to D405 images.
 The D405 test split stays out of it and is used for evaluation only.
 """
@@ -23,7 +24,7 @@ import json
 import os
 import shutil
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -33,6 +34,8 @@ from training.data.yolo_format import class_counts  # noqa: E402
 from training.paths import DATASETS_DIR  # noqa: E402
 
 TRAIN_REPEAT = 5                        # D405 is about 6 % of the train images otherwise
+OBJECT_TASKS = ("object_segmentation",)
+NEGATIVE_TASKS = ("arm_segmentation", "non_target_segmentation", "object_segmentation")
 
 
 def find_session_root(root: Path, session: str, subroots=None) -> Path:
@@ -53,9 +56,40 @@ def find_session_root(root: Path, session: str, subroots=None) -> Path:
     return found[0]
 
 
-def approved_frames(root: Path, session: str, excluded=None, subroots=None):
-    root = find_session_root(root, session, subroots)
-    folder = root / "annotations" / "object_segmentation" / session / "annotations"
+def find_annotation_folder(root: Path, session: str, subroots=None,
+                           annotation_tasks=OBJECT_TASKS) -> tuple[Path, Path]:
+    """Return ``(studio_root, annotations_folder)`` for one unambiguous session."""
+    subroots = [""] if not subroots else list(subroots)
+    found = []
+    for sub in subroots:
+        studio_root = root / sub if sub else root
+        for task in annotation_tasks:
+            folder = studio_root / "annotations" / task / session / "annotations"
+            if folder.is_dir():
+                found.append((studio_root, folder))
+    if len(found) > 1:
+        raise SystemExit(f"session {session} exists in several annotation locations: "
+                         + ", ".join(str(folder) for _, folder in found))
+    if not found:
+        raise SystemExit(f"no annotation for session {session} under {root} "
+                         f"(sub-roots searched: {subroots}; tasks: {list(annotation_tasks)})")
+    return found[0]
+
+
+def source_image(root: Path, annotation: dict) -> Path:
+    """Resolve canonical relative source paths, with legacy Studio-path compatibility."""
+    source_session = str(annotation["source_session"])
+    relative = PurePosixPath(source_session.replace("\\", "/"))
+    if (not relative.is_absolute() and relative.parts
+            and relative.parts[0] == "raw" and ".." not in relative.parts):
+        return root.joinpath(*relative.parts) / annotation["source_color"]
+    raw = raw_session_name(source_session)
+    return root / "raw" / "object" / raw / annotation["source_color"]
+
+
+def approved_frames(root: Path, session: str, excluded=None, subroots=None,
+                    annotation_tasks=OBJECT_TASKS):
+    root, folder = find_annotation_folder(root, session, subroots, annotation_tasks)
     paths = sorted(folder.glob("*.json"))
     if not paths:
         raise SystemExit(f"no annotation for session {session} under {folder}")
@@ -63,8 +97,7 @@ def approved_frames(root: Path, session: str, excluded=None, subroots=None):
         annotation = json.loads(path.read_text(encoding="utf-8"))
         if (annotation["review_status"] == "approved"
                 and not is_excluded(session, annotation["frame_id"], excluded)):
-            raw = raw_session_name(annotation["source_session"])
-            yield root / "raw" / "object" / raw / annotation["source_color"], annotation
+            yield source_image(root, annotation), annotation
 
 
 def copy_or_link(src: Path, dst: Path, link_mode: str = "copy") -> str:
@@ -138,7 +171,9 @@ def build_datasets(root: Path, base: Path, d405: Path, mixed: Path,
         negatives = list(negative_sessions.get(split, []))
         for session in list(sessions) + negatives:
             negative = session in negatives
-            for src, annotation in approved_frames(root, session, excluded_frames, subroots):
+            tasks = NEGATIVE_TASKS if negative else OBJECT_TASKS
+            for src, annotation in approved_frames(root, session, excluded_frames, subroots,
+                                                   tasks):
                 lines = [] if negative else frame_lines(annotation, class_map)
                 negative_frames += negative
                 stem = f"{session}__{annotation['frame_id']}"

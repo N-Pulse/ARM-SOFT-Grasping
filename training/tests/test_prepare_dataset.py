@@ -210,14 +210,14 @@ def test_v2_config_is_valid_and_its_sessions_are_disjoint():
     from training.data.studio_format import sessions_are_disjoint
     config = P.load_config(CONFIG_V2)
     d405 = config["d405"]
-    assert config["huggingface"]["revision"].startswith("5a6e9a3")
+    assert config["huggingface"]["revision"].startswith("a1eb31e")
     assert config["huggingface"]["output"] != P.load_config(CONFIG)["huggingface"]["output"]
     every = {f"{kind}:{split}": sessions
              for kind, splits in (("pos", d405["session_splits"]), ("neg", d405["negative_sessions"]))
              for split, sessions in splits.items()}
     assert sessions_are_disjoint(every)
-    v1_test = P.load_config(CONFIG)["d405"]["session_splits"]["test"]
-    assert set(v1_test) <= set(d405["session_splits"]["test"])    # v1 test kept for comparison
+    # v1 test sessions are retained, with names normalized by HF structure-v2.
+    assert {"can_7", "test_box_2"} <= set(d405["session_splits"]["test"])
 
 
 def _studio_session(root: Path, session: str, class_name: str, value: int) -> None:
@@ -227,6 +227,18 @@ def _studio_session(root: Path, session: str, class_name: str, value: int) -> No
     (folder / "frame_000000.json").write_text(json.dumps({
         "review_status": "approved", "frame_id": "frame_000000",
         "source_session": f"C:\\data\\raw\\object\\{session}",
+        "source_color": "color/frame_000000.png", "width": 640, "height": 480,
+        "objects": [{"class_name": class_name, "bbox_xyxy": [10, 10, 100, 200]}]}))
+
+
+def _canonical_session(root: Path, task: str, raw_kind: str, session: str,
+                       class_name: str, value: int) -> None:
+    folder = root / "annotations" / task / session / "annotations"
+    folder.mkdir(parents=True)
+    write_png(root / "raw" / raw_kind / session / "color" / "frame_000000.png", value)
+    (folder / "frame_000000.json").write_text(json.dumps({
+        "review_status": "approved", "frame_id": "frame_000000",
+        "source_session": f"raw/{raw_kind}/{session}",
         "source_color": "color/frame_000000.png", "width": 640, "height": 480,
         "objects": [{"class_name": class_name, "bbox_xyxy": [10, 10, 100, 200]}]}))
 
@@ -275,3 +287,22 @@ def test_a_session_found_in_two_sub_roots_is_an_error(tmp_path):
         raise AssertionError("ambiguous session must fail")
     except SystemExit:
         pass
+
+
+def test_canonical_structure_reads_object_arm_and_non_target_paths(tmp_path):
+    config = _fake_sources(tmp_path)
+    hf = Path(config["huggingface"]["output"])
+    _canonical_session(hf, "object_segmentation", "object", "canonical_box", "box", 240)
+    _canonical_session(hf, "arm_segmentation", "arm", "canonical_hand", "human_hand", 241)
+    _canonical_session(hf, "non_target_segmentation", "non_target", "canonical_shape",
+                       "ellipsoid", 242)
+    d405 = config["d405"]
+    d405["class_map"] = {"can": "can", "box": "box"}
+    d405["session_splits"] = {"train": ["s_train", "canonical_box"],
+                              "val": ["s_val"], "test": ["s_test"]}
+    d405["negative_sessions"] = {"train": ["canonical_hand"],
+                                 "val": ["canonical_shape"]}
+    d405_out, mixed = _build(tmp_path, config)
+    assert (d405_out / "images" / "train" / "canonical_box__frame_000000.png").is_file()
+    assert (d405_out / "labels" / "train" / "canonical_hand__frame_000000.txt").read_text() == ""
+    assert (mixed / "labels" / "val" / "canonical_shape__frame_000000.txt").read_text() == ""

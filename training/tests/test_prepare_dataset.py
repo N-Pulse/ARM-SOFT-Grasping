@@ -199,3 +199,79 @@ def test_huggingface_download_pins_and_records_the_revision(tmp_path):
     assert calls[0]["revision"] == config["huggingface"]["revision"]
     marker = json.loads((tmp_path / "hf" / "DOWNLOAD.json").read_text())
     assert marker["revision"] == config["huggingface"]["revision"]
+
+
+# --------------------------------------------------------------------------- v2: sub-roots, negatives
+
+CONFIG_V2 = REPO_DIR / "configs" / "datasets" / "openimages_d405_v2.yaml"
+
+
+def test_v2_config_is_valid_and_its_sessions_are_disjoint():
+    from training.data.studio_format import sessions_are_disjoint
+    config = P.load_config(CONFIG_V2)
+    d405 = config["d405"]
+    assert config["huggingface"]["revision"].startswith("5a6e9a3")
+    assert config["huggingface"]["output"] != P.load_config(CONFIG)["huggingface"]["output"]
+    every = {f"{kind}:{split}": sessions
+             for kind, splits in (("pos", d405["session_splits"]), ("neg", d405["negative_sessions"]))
+             for split, sessions in splits.items()}
+    assert sessions_are_disjoint(every)
+    v1_test = P.load_config(CONFIG)["d405"]["session_splits"]["test"]
+    assert set(v1_test) <= set(d405["session_splits"]["test"])    # v1 test kept for comparison
+
+
+def _studio_session(root: Path, session: str, class_name: str, value: int) -> None:
+    folder = root / "annotations" / "object_segmentation" / session / "annotations"
+    folder.mkdir(parents=True)
+    write_png(root / "raw" / "object" / session / "color" / "frame_000000.png", value)
+    (folder / "frame_000000.json").write_text(json.dumps({
+        "review_status": "approved", "frame_id": "frame_000000",
+        "source_session": f"C:\\data\\raw\\object\\{session}",
+        "source_color": "color/frame_000000.png", "width": 640, "height": 480,
+        "objects": [{"class_name": class_name, "bbox_xyxy": [10, 10, 100, 200]}]}))
+
+
+def test_build_reads_sub_roots_and_writes_negative_frames_with_empty_labels(tmp_path):
+    config = _fake_sources(tmp_path)
+    hf = Path(config["huggingface"]["output"])
+    _studio_session(hf / "yanis", "handle_sub", "door_handle", 210)
+    _studio_session(hf, "egg", "ellipsoid", 220)
+    _studio_session(hf / "yanis", "hand_val", "left_hand", 230)
+    d405 = config["d405"]
+    d405["subroots"] = ["", "yanis"]
+    d405["class_map"] = {"can": "can", "door_handle": "door_handle"}
+    d405["session_splits"] = {"train": ["s_train", "handle_sub"], "val": ["s_val"],
+                              "test": ["s_test"]}
+    d405["negative_sessions"] = {"train": ["egg"], "val": ["hand_val"]}
+    d405_out, mixed = _build(tmp_path, config)
+    label = (d405_out / "labels" / "train" / "handle_sub__frame_000000.txt").read_text()
+    assert label.startswith(f"{CLASSES.index('door_handle')} ")
+    assert (d405_out / "labels" / "train" / "egg__frame_000000.txt").read_text() == ""
+    assert (mixed / "labels" / "val" / "hand_val__frame_000000.txt").read_text() == ""
+    stats = json.loads((d405_out / "stats.json").read_text())
+    assert stats["train"]["negative_images"] == 1 and stats["val"]["negative_images"] == 1
+    report = json.loads((mixed / "validation_report.json").read_text())
+    # 1 Open Images + (1 can + 1 handle + 1 egg) x 5 repeats
+    assert report["valid"] and report["splits"]["train"]["images"] == 16
+
+
+def test_a_session_cannot_be_positive_and_negative(tmp_path):
+    config = _fake_sources(tmp_path)
+    config["d405"]["negative_sessions"] = {"train": ["s_val"]}
+    try:
+        _build(tmp_path, config)
+        raise AssertionError("overlapping positive/negative sessions must fail")
+    except ValueError:
+        pass
+
+
+def test_a_session_found_in_two_sub_roots_is_an_error(tmp_path):
+    from training.data.build_d405_datasets import find_session_root
+    _studio_session(tmp_path, "dup", "can", 1)
+    _studio_session(tmp_path / "yanis", "dup", "can", 2)
+    assert find_session_root(tmp_path, "dup") == tmp_path            # default: top level only
+    try:
+        find_session_root(tmp_path, "dup", ["", "yanis"])
+        raise AssertionError("ambiguous session must fail")
+    except SystemExit:
+        pass

@@ -1,0 +1,31 @@
+{
+  "author": "ARM-SOFT team",
+  "base_model": "YOLO26s (continued from yolo26s-mix-openimages-d405-v1.0.0)",
+  "classes": {
+    "0": "ball",
+    "1": "can",
+    "2": "box",
+    "3": "bottle",
+    "4": "pen_pencil",
+    "5": "door_handle"
+  },
+  "dataset_version": "openimages6_d405_v2 (Open Images 6 classes + HF npulseDataCV/npulse_cv@5a6e9a3)",
+  "display_name": "★ YOLO26s Open Images + D405 v2 (candidate)",
+  "framework": "ultralytics",
+  "id": "yolo26s-mix-openimages-d405-v2.0.0",
+  "model_version": "2.0.0",
+  "imgsz": 416,
+  "source_run": "b3_yolo26s_mix_v3_lr2e4 (Colab T4), best epoch 28 of 50",
+  "metrics_val_openimages6_d405_v2": {
+    "mAP50": 0.808,
+    "mAP50_95": 0.617,
+    "precision": 0.817,
+    "recall": 0.723
+  },
+  "notes": "Candidate. Val numbers are on the v2 val set and are not comparable with v1.0.0 (0.606 on v1 val). Promote to recommended only after both models are evaluated on the same split.",
+  "schema": "armsoft.runtime-model.v1",
+  "sha256": "c9a3701d6dc9bb87d224a8f794cc1633604638f4dd738895485543b89ed7261d",
+  "status": "candidate",
+  "task": "detection",
+  "weights": "best.pt"
+}

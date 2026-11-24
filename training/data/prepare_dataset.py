@@ -50,6 +50,14 @@ def load_config(path: Path) -> dict:
     splits = d405.get("session_splits")
     if splits is not None and set(splits) != {"train", "val", "test"}:
         raise ValueError("d405.session_splits must define exactly train, val and test")
+    negatives = d405.get("negative_sessions") or {}
+    if set(negatives) - {"train", "val", "test"}:
+        raise ValueError("d405.negative_sessions may only use train, val and test")
+    subroots = d405.get("subroots")
+    if subroots is not None and (not isinstance(subroots, list)
+                                 or any(not isinstance(s, str) or ".." in s or s.startswith("/")
+                                        for s in subroots)):
+        raise ValueError("d405.subroots must be a list of relative folder names ('' = top)")
     return config
 
 
@@ -270,6 +278,8 @@ def build(config: dict, force: bool) -> tuple[Path, Path]:
             session_splits=d405_settings.get("session_splits"),
             excluded_frames=d405_settings.get("excluded_frames"),
             class_map=d405_settings.get("class_map"),
+            subroots=d405_settings.get("subroots"),
+            negative_sessions=d405_settings.get("negative_sessions"),
         )
         reports = {
             "d405": validate_dataset(d405_stage, config["classes"]),
@@ -306,7 +316,7 @@ def build(config: dict, force: bool) -> tuple[Path, Path]:
             },
             "build": {key: d405_settings.get(key) for key in
                       ("train_repeat", "link_mode", "class_map", "session_splits",
-                       "excluded_frames")},
+                       "excluded_frames", "subroots", "negative_sessions")},
             "outputs": {"d405": d405_final.name, "mixed": mixed_final.name},
             "d405_stats": stats,
             "validation": {key: _split_counts(value) for key, value in reports.items()},

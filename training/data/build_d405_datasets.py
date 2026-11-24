@@ -10,6 +10,8 @@ Build two YOLO datasets from a downloaded Dataset Studio data root:
 
 Only approved frames of the sessions in studio_format.SESSION_SPLITS are used,
 minus studio_format.EXCLUDED_FRAMES (rejected after visual control).
+Sessions may live in sub-roots of the snapshot (e.g. ``yanis/annotations/...``), and
+negative sessions (no target object) are written as images with empty label files.
 The mixed dataset keeps every class present while the model adapts to D405 images.
 The D405 test split stays out of it and is used for evaluation only.
 """
@@ -33,7 +35,26 @@ from training.paths import DATASETS_DIR  # noqa: E402
 TRAIN_REPEAT = 5                        # D405 is about 6 % of the train images otherwise
 
 
-def approved_frames(root: Path, session: str, excluded=None):
+def find_session_root(root: Path, session: str, subroots=None) -> Path:
+    """Return the Dataset Studio root (``root`` or ``root/<subroot>``) holding ``session``.
+
+    A session found in two sub-roots is an error: the split would be ambiguous.
+    """
+    subroots = [""] if not subroots else list(subroots)
+    found = [root / sub if sub else root for sub in subroots
+             if ((root / sub if sub else root)
+                 / "annotations" / "object_segmentation" / session).is_dir()]
+    if len(found) > 1:
+        raise SystemExit(f"session {session} exists in several sub-roots: "
+                         + ", ".join(str(path) for path in found))
+    if not found:
+        raise SystemExit(f"no annotation for session {session} under {root} "
+                         f"(sub-roots searched: {subroots})")
+    return found[0]
+
+
+def approved_frames(root: Path, session: str, excluded=None, subroots=None):
+    root = find_session_root(root, session, subroots)
     folder = root / "annotations" / "object_segmentation" / session / "annotations"
     paths = sorted(folder.glob("*.json"))
     if not paths:
@@ -77,11 +98,14 @@ def make_tree(out: Path) -> None:
 
 def build_datasets(root: Path, base: Path, d405: Path, mixed: Path,
                    train_repeat: int = TRAIN_REPEAT, link_mode: str = "copy",
-                   session_splits=None, excluded_frames=None, class_map=None) -> dict:
+                   session_splits=None, excluded_frames=None, class_map=None,
+                   subroots=None, negative_sessions=None) -> dict:
     """Build D405-only and mixed YOLO datasets at explicit output paths.
 
     ``session_splits``, ``excluded_frames`` and ``class_map`` default to the values in
     ``studio_format``; the versioned pipeline passes them from its config file.
+    ``subroots`` lists folders of the snapshot that are Dataset Studio roots ("" = top).
+    ``negative_sessions`` (split -> sessions) adds approved frames with empty labels.
     """
     session_splits = SESSION_SPLITS if session_splits is None else session_splits
     excluded_frames = EXCLUDED_FRAMES if excluded_frames is None else excluded_frames
@@ -93,8 +117,14 @@ def build_datasets(root: Path, base: Path, d405: Path, mixed: Path,
         raise ValueError("link_mode must be copy or hardlink")
     if not base.is_dir():
         raise FileNotFoundError(f"base YOLO dataset does not exist: {base}")
-    if not sessions_are_disjoint(session_splits):
-        raise ValueError("a session appears in two splits")
+    negative_sessions = {} if negative_sessions is None else negative_sessions
+    if set(negative_sessions) - {"train", "val", "test"}:
+        raise ValueError("negative_sessions may only use train, val and test")
+    every = {f"{kind}:{split}": list(sessions)
+             for kind, splits in (("pos", session_splits), ("neg", negative_sessions))
+             for split, sessions in splits.items()}
+    if not sessions_are_disjoint(every):
+        raise ValueError("a session appears in two splits, or as both positive and negative")
 
     make_tree(d405)
     if mixed.exists():
@@ -104,10 +134,13 @@ def build_datasets(root: Path, base: Path, d405: Path, mixed: Path,
 
     stats = {}
     for split, sessions in session_splits.items():
-        all_lines, frames = [], 0
-        for session in sessions:
-            for src, annotation in approved_frames(root, session, excluded_frames):
-                lines = frame_lines(annotation, class_map)
+        all_lines, frames, negative_frames = [], 0, 0
+        negatives = list(negative_sessions.get(split, []))
+        for session in list(sessions) + negatives:
+            negative = session in negatives
+            for src, annotation in approved_frames(root, session, excluded_frames, subroots):
+                lines = [] if negative else frame_lines(annotation, class_map)
+                negative_frames += negative
                 stem = f"{session}__{annotation['frame_id']}"
                 write_frame(src, lines, d405, split, stem, link_mode)
                 all_lines += lines
@@ -118,10 +151,12 @@ def build_datasets(root: Path, base: Path, d405: Path, mixed: Path,
                 elif split == "val":
                     write_frame(src, lines, mixed, split, stem, link_mode)
         stats[split] = {"images": frames, "sessions": sessions,
+                        "negative_sessions": negatives, "negative_images": negative_frames,
                         "instances": class_counts(all_lines)}
         print(f"[{split}] {stats[split]}")
     stats["excluded_frames"] = excluded_frames
     stats["train_repeat"] = train_repeat
+    stats["subroots"] = list(subroots) if subroots else [""]
     stats["link_mode"] = link_mode
     download = root / "DOWNLOAD.json"
     if download.exists():

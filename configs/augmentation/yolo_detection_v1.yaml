@@ -1,0 +1,15 @@
+# Online augmentation profile for YOLO object-detection training.
+# Applied by Ultralytics to the training split only; validation and test stay unchanged.
+hsv_h: 0.015
+hsv_s: 0.50
+hsv_v: 0.30
+degrees: 8.0
+translate: 0.08
+scale: 0.20
+shear: 0.0
+perspective: 0.0
+flipud: 0.0
+fliplr: 0.5
+mosaic: 0.5
+mixup: 0.0
+copy_paste: 0.0

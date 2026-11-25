@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sys
 import types
 from pathlib import Path
@@ -199,6 +200,33 @@ def test_huggingface_download_pins_and_records_the_revision(tmp_path):
     assert calls[0]["revision"] == config["huggingface"]["revision"]
     marker = json.loads((tmp_path / "hf" / "DOWNLOAD.json").read_text())
     assert marker["revision"] == config["huggingface"]["revision"]
+
+
+def test_augmented_download_is_explicit_pinned_and_checksum_verified(tmp_path):
+    config = P.load_config(CONFIG_V2)
+    payload = b"small augmented archive for test"
+    settings = config["augmented_huggingface"]
+    settings["output"] = str(tmp_path / "augmented")
+    settings["archive"] = "releases/test.7z"
+    settings["sha256"] = hashlib.sha256(payload).hexdigest()
+    calls = []
+
+    def snapshot_download(**kwargs):
+        calls.append(kwargs)
+        archive = Path(kwargs["local_dir"]) / settings["archive"]
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(payload)
+        return kwargs["local_dir"]
+
+    fake = types.SimpleNamespace(snapshot_download=snapshot_download)
+    with mock.patch.dict(sys.modules, {"huggingface_hub": fake}):
+        archive = P.download_augmented(config, refresh=False)
+        P.download_augmented(config, refresh=False)
+    assert archive.read_bytes() == payload and len(calls) == 1
+    assert calls[0]["revision"] == settings["revision"]
+    assert settings["archive"] in calls[0]["allow_patterns"]
+    marker = json.loads((tmp_path / "augmented" / "DOWNLOAD.json").read_text())
+    assert marker["sha256"] == settings["sha256"]
 
 
 # --------------------------------------------------------------------------- v2: sub-roots, negatives

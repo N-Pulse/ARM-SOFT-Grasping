@@ -77,7 +77,10 @@ Camera notes:
 
 ## 3. Build the training dataset
 
-The pipeline downloads six Open Images classes and the team D405 dataset from Hugging Face, combines them and validates the YOLO detection dataset. Pinned inputs are defined in `configs/datasets/openimages_d405_v1.yaml`.
+The pipeline downloads six Open Images classes and the approved team D405 data from
+[`npulseDataCV/npulse_cv`](https://huggingface.co/datasets/npulseDataCV/npulse_cv),
+combines them and validates the YOLO detection dataset. The current pinned definition is
+`configs/datasets/openimages_d405_v2.yaml`.
 
 One-time setup:
 
@@ -88,26 +91,44 @@ training/.venv-download/bin/python -m pip install fiftyone pyyaml
 hf auth login
 ```
 
-Request access to the gated `DouaaKDR/Npulse` dataset before logging in. Then run:
+Request access to `npulseDataCV/npulse_cv` before logging in. Then run:
 
 ```bash
-python training/data/prepare_dataset.py check
-python training/data/prepare_dataset.py all --per-class 50  # quick test
-python training/data/prepare_dataset.py all                 # full build
-python training/data/prepare_dataset.py validate
+python training/data/prepare_dataset.py check --config configs/datasets/openimages_d405_v2.yaml
+python training/data/prepare_dataset.py all --config configs/datasets/openimages_d405_v2.yaml --per-class 50
+python training/data/prepare_dataset.py all --config configs/datasets/openimages_d405_v2.yaml
+python training/data/prepare_dataset.py validate --config configs/datasets/openimages_d405_v2.yaml
 ```
 
 Outputs:
 
-- `training/datasets/openimages6_d405_v1/` — mixed training dataset;
-- `training/datasets/d405_v1/` — D405-only evaluation dataset;
-- `training/data/openimages6_d405_v1.yaml` — YOLO training configuration.
+- `training/datasets/openimages6_d405_v2/` — mixed training dataset;
+- `training/datasets/d405_v2/` — D405-only evaluation dataset;
+- `training/data/openimages6_d405_v2.yaml` — YOLO training configuration.
+
+The recommended augmentation is applied locally during training:
+
+```bash
+python training/train.py \
+  --data training/data/openimages6_d405_v2.yaml \
+  --augmentation-profile configs/augmentation/yolo_detection_v1.yaml \
+  --name local_aug_v1
+```
+
+Teams that cannot run the local augmentation workflow can download the separate experimental
+release. It is checksum-verified but not automatically mixed because its recipe and source
+mapping are incomplete:
+
+```bash
+python training/data/prepare_dataset.py download-augmented \
+  --config configs/datasets/openimages_d405_v2.yaml
+```
 
 Generated data is ignored by Git. Follow the [training-data guide](docs/guides/training-data.md) for setup, build, validation, and versioning.
 
 ## 4. Train a detector
 
-The experimental team checkpoint is stored at:
+The stable starting checkpoint is stored at:
 
 ```text
 models/catalog/yolo26s-mix-openimages-d405-v1.0.0/best.pt
@@ -119,7 +140,8 @@ One-epoch smoke test:
 python training/train.py \
   --name smoke_yolo26s_mix_continue \
   --model models/catalog/yolo26s-mix-openimages-d405-v1.0.0/best.pt \
-  --data training/data/openimages6_d405_v1.yaml \
+  --data training/data/openimages6_d405_v2.yaml \
+  --augmentation-profile configs/augmentation/yolo_detection_v1.yaml \
   --epochs 1 --fraction 0.05 --imgsz 416 --batch 4 \
   --device cpu --optimizer AdamW --lr0 0.0002 --patience 1
 ```

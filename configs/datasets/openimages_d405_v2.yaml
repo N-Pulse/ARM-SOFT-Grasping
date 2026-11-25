@@ -8,7 +8,7 @@
 # Decisions (2026-11-24): marble -> ball, yellow_marker -> pen_pencil. Which door-handle
 # sessions show the same physical handle is unknown, so test door handles may have been seen
 # in train; treat door_handle test numbers as optimistic.
-version: 1
+version: 2
 name: openimages6_d405_v2
 classes:            # fixed order = YOLO class ids 0-5
   - ball
@@ -28,6 +28,24 @@ huggingface:
   repo_type: dataset
   revision: a1eb31e870b2337760481ab443ef7a3d66a9516c
   output: training/sources/npulse_cv-a1eb31e
+
+# Optional pre-generated augmentation release. It is downloaded only by the
+# `download-augmented` action and is never mixed into the canonical build automatically.
+# This release was made from an older source revision and lacks a complete recipe/mapping,
+# so prefer the reproducible local online augmentation profile below.
+augmented_huggingface:
+  repo_id: npulseDataCV/npulse_cv_augmented_experiments
+  repo_type: dataset
+  revision: c8321c777fb06f32ac45c4e293c8aee39e5a88f6
+  output: training/sources/npulse_cv_augmented-c8321c7
+  release: augmented_v1
+  archive: releases/augmented_v1/augmented-v1.7z
+  sha256: 9e5517359ee3c38a57b2ab69ded790ea415bd43ceca580166216ffad10860b27
+  source_revision: 2fb650d153
+  status: experimental
+
+local_augmentation:
+  profile: configs/augmentation/yolo_detection_v1.yaml
 
 d405:
   output_name: d405_v2

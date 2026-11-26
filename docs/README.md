@@ -11,6 +11,7 @@ Use this page as the documentation entry point. Stable user instructions, system
 | [Colab training](guides/colab-training.md) | Continue YOLO training on a Colab GPU |
 | [Point clouds](guides/point-cloud.md) | Generate, inspect, and export RGB-D point clouds |
 | [Runtime models](guides/runtime-models.md) | Register and share model checkpoints |
+| [Arduino UNO Q deployment](guides/uno-q-deployment.md) | Connect the D405, deploy YOLO, and view live detection |
 
 ## Architecture
 

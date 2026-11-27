@@ -129,7 +129,7 @@ def make_tree(out: Path) -> None:
         (out / "labels" / split).mkdir(parents=True)
 
 
-def build_datasets(root: Path, base: Path, d405: Path, mixed: Path,
+def build_datasets(root: Path, base: Path | list[Path], d405: Path, mixed: Path,
                    train_repeat: int = TRAIN_REPEAT, link_mode: str = "copy",
                    session_splits=None, excluded_frames=None, class_map=None,
                    subroots=None, negative_sessions=None) -> dict:
@@ -139,6 +139,8 @@ def build_datasets(root: Path, base: Path, d405: Path, mixed: Path,
     ``studio_format``; the versioned pipeline passes them from its config file.
     ``subroots`` lists folders of the snapshot that are Dataset Studio roots ("" = top).
     ``negative_sessions`` (split -> sessions) adds approved frames with empty labels.
+    ``base`` is one external YOLO dataset or a list of them (e.g. Open Images then LVIS);
+    their images and labels are merged split by split into the mixed dataset.
     """
     session_splits = SESSION_SPLITS if session_splits is None else session_splits
     excluded_frames = EXCLUDED_FRAMES if excluded_frames is None else excluded_frames
@@ -148,8 +150,10 @@ def build_datasets(root: Path, base: Path, d405: Path, mixed: Path,
         raise ValueError("train_repeat must be at least 1")
     if link_mode not in {"copy", "hardlink"}:
         raise ValueError("link_mode must be copy or hardlink")
-    if not base.is_dir():
-        raise FileNotFoundError(f"base YOLO dataset does not exist: {base}")
+    bases = [Path(b) for b in base] if isinstance(base, (list, tuple)) else [Path(base)]
+    for folder in bases:
+        if not folder.is_dir():
+            raise FileNotFoundError(f"base YOLO dataset does not exist: {folder}")
     negative_sessions = {} if negative_sessions is None else negative_sessions
     if set(negative_sessions) - {"train", "val", "test"}:
         raise ValueError("negative_sessions may only use train, val and test")
@@ -162,8 +166,24 @@ def build_datasets(root: Path, base: Path, d405: Path, mixed: Path,
     make_tree(d405)
     if mixed.exists():
         shutil.rmtree(mixed)
-    shutil.copytree(base, mixed, ignore=shutil.ignore_patterns("*.cache", "stats.json"),
-                    copy_function=(lambda src, dst: copy_or_link(Path(src), Path(dst), link_mode)))
+    # External YOLO sources (Open Images, then LVIS) are merged split by split; their file
+    # stems never collide (LVIS stems are prefixed "lvis_"), and a collision is an error.
+    for split in ("train", "val", "test"):
+        for kind in ("images", "labels"):
+            (mixed / kind / split).mkdir(parents=True, exist_ok=True)
+    for folder in bases:
+        for split in ("train", "val", "test"):
+            for kind in ("images", "labels"):
+                source = folder / kind / split
+                if not source.is_dir():
+                    continue
+                target = mixed / kind / split
+                for src in sorted(source.iterdir()):
+                    if not src.is_file() or src.suffix == ".cache":
+                        continue
+                    if (target / src.name).exists():
+                        raise FileExistsError(f"two base datasets share the file {kind}/{split}/{src.name}")
+                    copy_or_link(src, target / src.name, link_mode)
 
     stats = {}
     for split, sessions in session_splits.items():

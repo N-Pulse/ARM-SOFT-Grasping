@@ -334,3 +334,61 @@ def test_canonical_structure_reads_object_arm_and_non_target_paths(tmp_path):
     assert (d405_out / "images" / "train" / "canonical_box__frame_000000.png").is_file()
     assert (d405_out / "labels" / "train" / "canonical_hand__frame_000000.txt").read_text() == ""
     assert (mixed / "labels" / "val" / "canonical_shape__frame_000000.txt").read_text() == ""
+
+
+# --------------------------------------------------------------------------- LVIS (v3)
+
+CONFIG_V3 = REPO_DIR / "configs" / "datasets" / "openimages_lvis_d405_v3.yaml"
+
+
+def test_v3_config_adds_lvis_and_keeps_the_v2_d405_part():
+    v2 = P.load_config(REPO_DIR / "configs" / "datasets" / "openimages_d405_v2.yaml")
+    v3 = P.load_config(CONFIG_V3)
+    assert v3["lvis"]["per_class"] == 500 and v3["lvis"]["max_objects"] == 3
+    assert v3["openimages"] == v2["openimages"] and v3["huggingface"] == v2["huggingface"]
+    for key in ("session_splits", "negative_sessions", "class_map", "excluded_frames"):
+        assert v3["d405"][key] == v2["d405"][key]
+    for section, key in (("d405", "output_name"), ("mixed", "output_name"), ("mixed", "yaml")):
+        assert v3[section][key] != v2[section][key]                   # never overwrites v2
+
+
+def test_quick_run_also_renames_the_lvis_output():
+    quick = P.effective_config(P.load_config(CONFIG_V3), per_class=20)
+    assert quick["lvis"]["per_class"] == 20 and quick["lvis"]["output"].endswith("_pc20")
+
+
+def test_lvis_download_is_skipped_only_for_identical_settings(tmp_path):
+    config = P.load_config(CONFIG_V3)
+    out = tmp_path / "lvis"
+    out.mkdir()
+    (out / "stats.json").write_text("{}")
+    config["lvis"]["output"] = str(out)
+    (out / "DOWNLOAD.json").write_text(json.dumps(P.lvis_request(config)))
+    with mock.patch.object(P.subprocess, "run") as run:
+        P.download_lvis(config, refresh=False)
+        run.assert_not_called()
+        config["lvis"]["max_objects"] = 5
+        try:
+            P.download_lvis(config, refresh=False)
+            raise AssertionError("different settings must not be reused silently")
+        except RuntimeError:
+            pass
+
+
+def test_build_merges_open_images_and_lvis(tmp_path):
+    config = _fake_sources(tmp_path)
+    lvis = tmp_path / "lvis"
+    for value, split in enumerate(("train", "val", "test"), 50):
+        write_png(lvis / "images" / split / f"lvis_{split}.png", value)
+        (lvis / "labels" / split).mkdir(parents=True)
+        (lvis / "labels" / split / f"lvis_{split}.txt").write_text("3 0.5 0.5 0.2 0.2\n")
+    (lvis / "stats.json").write_text("{}")
+    config["lvis"] = {"output": str(lvis), "per_class": 7}
+    _, mixed = _build(tmp_path, config)
+    report = json.loads((mixed / "validation_report.json").read_text())
+    assert report["valid"]
+    assert report["splits"]["train"]["images"] == 7       # 1 OI + 1 LVIS + 1 D405 frame x 5
+    assert report["splits"]["test"]["images"] == 2        # 1 OI + 1 LVIS
+    assert (mixed / "images" / "train" / "lvis_train.png").is_file()
+    manifest = json.loads((mixed / "dataset_manifest.json").read_text())
+    assert manifest["sources"]["lvis"]["config"]["output"] == str(lvis)

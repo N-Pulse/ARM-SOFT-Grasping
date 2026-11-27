@@ -67,6 +67,11 @@ def load_config(path: Path) -> dict:
             raise ValueError("augmented_huggingface is missing: " + ", ".join(sorted(missing)))
         if len(str(augmented["sha256"])) != 64:
             raise ValueError("augmented_huggingface.sha256 must be a full SHA-256 digest")
+    lvis = config.get("lvis")
+    if lvis:
+        missing = {"output", "per_class"} - set(lvis)
+        if missing:
+            raise ValueError("lvis is missing: " + ", ".join(sorted(missing)))
     return config
 
 
@@ -84,6 +89,9 @@ def effective_config(config: dict, per_class: int | None = None,
         config["name"] += suffix
         config["openimages"]["per_class"] = per_class
         config["openimages"]["output"] += suffix
+        if config.get("lvis"):
+            config["lvis"]["per_class"] = per_class
+            config["lvis"]["output"] += suffix
         config["d405"]["output_name"] += suffix
         config["mixed"]["output_name"] += suffix
         data_yaml = Path(config["mixed"]["yaml"])
@@ -179,6 +187,48 @@ def download_huggingface(config: dict, refresh: bool) -> Path:
         "resolved_path": str(Path(resolved).resolve()),
         "downloaded_at": datetime.now(timezone.utc).isoformat(),
     }, indent=2) + "\n", encoding="utf-8")
+    return output
+
+
+def lvis_request(config: dict) -> dict:
+    settings = config["lvis"]
+    return {"per_class": int(settings["per_class"]), "seed": int(settings.get("seed", 0)),
+            "source_splits": list(settings.get("source_splits", ["train", "val"])),
+            "max_objects": int(settings.get("max_objects", 3)),
+            "max_overlap": float(settings.get("max_overlap", 0.1)),
+            "min_area": float(settings.get("min_area", 0.005)),
+            "exclude": sorted(int(i) for i in settings.get("exclude_images", []) or [])}
+
+
+def download_lvis(config: dict, refresh: bool) -> Path:
+    """Build the LVIS YOLO source with download_lvis.py; reuse it only for identical settings."""
+    if not config.get("lvis"):
+        raise ValueError("this dataset config has no lvis section")
+    output = repo_path(config["lvis"]["output"])
+    requested = lvis_request(config)
+    marker = output / "DOWNLOAD.json"
+    if (output / "stats.json").is_file() and not refresh:
+        if _read_json(marker) == requested:
+            print(f"[skip] LVIS already prepared: {output}")
+            return output
+        raise RuntimeError(
+            f"LVIS output already exists with different or unknown settings: {output}. "
+            "Use --refresh-sources to rebuild it."
+        )
+    command = [sys.executable, str(REPO_DIR / "training/data/download_lvis.py"),
+               "--per-class", str(requested["per_class"]), "--seed", str(requested["seed"]),
+               "--out", str(output), "--source-splits", *requested["source_splits"],
+               "--max-objects", str(requested["max_objects"]),
+               "--max-overlap", str(requested["max_overlap"]),
+               "--min-area", str(requested["min_area"])]
+    if requested["exclude"]:
+        command += ["--exclude", *map(str, requested["exclude"])]
+    cache = config["lvis"].get("cache")
+    if cache:
+        command += ["--cache", str(repo_path(cache))]
+    print("[run]", " ".join(command))
+    subprocess.run(command, cwd=REPO_DIR, check=True)
+    marker.write_text(json.dumps(requested, indent=2) + "\n", encoding="utf-8")
     return output
 
 
@@ -318,6 +368,9 @@ def build(config: dict, force: bool) -> tuple[Path, Path]:
     hf_root = repo_path(config["huggingface"]["output"])
     if not (base / "stats.json").is_file():
         raise FileNotFoundError(f"Open Images source is not ready: {base}")
+    lvis = repo_path(config["lvis"]["output"]) if config.get("lvis") else None
+    if lvis is not None and not (lvis / "stats.json").is_file():
+        raise FileNotFoundError(f"LVIS source is not ready: {lvis}")
     if not (hf_root / "annotations").is_dir() or not (hf_root / "raw").is_dir():
         raise FileNotFoundError(f"Hugging Face Dataset Studio root is not ready: {hf_root}")
 
@@ -337,7 +390,7 @@ def build(config: dict, force: bool) -> tuple[Path, Path]:
     succeeded = False
     try:
         stats = build_datasets(
-            hf_root, base, d405_stage, mixed_stage,
+            hf_root, [base, lvis] if lvis is not None else base, d405_stage, mixed_stage,
             train_repeat=int(d405_settings.get("train_repeat", 5)),
             link_mode=d405_settings.get("link_mode", "hardlink"),
             session_splits=d405_settings.get("session_splits"),
@@ -365,6 +418,7 @@ def build(config: dict, force: bool) -> tuple[Path, Path]:
         (mixed_stage / "stats.json").write_text(json.dumps({
             "splits": _split_counts(reports["mixed"]),
             "openimages_source": _read_json(base / "stats.json"),
+            "lvis_source": _read_json(lvis / "stats.json") if lvis is not None else None,
             "d405": stats,
         }, indent=2) + "\n", encoding="utf-8")
         manifest = {
@@ -378,6 +432,9 @@ def build(config: dict, force: bool) -> tuple[Path, Path]:
                                "download": _read_json(base / "DOWNLOAD.json")},
                 "huggingface": {"config": config["huggingface"],
                                 "download": _read_json(hf_root / "DOWNLOAD.json")},
+                **({"lvis": {"config": config["lvis"],
+                             "download": _read_json(lvis / "DOWNLOAD.json")}}
+                   if lvis is not None else {}),
             },
             "build": {key: d405_settings.get(key) for key in
                       ("train_repeat", "link_mode", "class_map", "session_splits",
@@ -474,6 +531,8 @@ def check(config: dict) -> dict:
     }
     if config.get("augmented_huggingface"):
         paths["augmented_hf"] = repo_path(config["augmented_huggingface"]["output"])
+    if config.get("lvis"):
+        paths["lvis"] = repo_path(config["lvis"]["output"])
     print(f"Outputs for {config['name']}" + (" (quick run)" if config.get("quick_run") else ""))
     status = {name: path.exists() for name, path in paths.items()}
     for name, path in paths.items():
@@ -486,8 +545,9 @@ def check(config: dict) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("action", choices=["check", "download-openimages", "download-hf",
-                                           "download-augmented", "build", "validate", "all"])
+    parser.add_argument("action", choices=["check", "download-openimages", "download-lvis",
+                                           "download-hf", "download-augmented", "build",
+                                           "validate", "all"])
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--per-class", type=int,
                         help="Open Images images per class; a value different from the config "
@@ -508,6 +568,8 @@ def main(argv=None) -> int:
         check(config)
     elif args.action == "download-openimages":
         download_openimages(config, args.openimages_python, args.refresh_sources)
+    elif args.action == "download-lvis":
+        download_lvis(config, args.refresh_sources)
     elif args.action == "download-hf":
         download_huggingface(config, args.refresh_sources)
     elif args.action == "download-augmented":
@@ -523,6 +585,8 @@ def main(argv=None) -> int:
         return 0 if report["valid"] else 1
     elif args.action == "all":
         download_openimages(config, args.openimages_python, args.refresh_sources)
+        if config.get("lvis"):
+            download_lvis(config, args.refresh_sources)
         download_huggingface(config, args.refresh_sources)
         build(config, args.force)
     return 0

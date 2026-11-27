@@ -74,7 +74,9 @@ Delete a preprocessing version to remove only reproducible derived images, masks
 3. Set class ID/name, minimum area, and maximum instances.
 4. Generate annotations.
 
-Annotations reference the raw RGB instead of copying it. Regenerating pending proposals preserves approved and rejected decisions. Raw mode can use MobileSAM proposals or blank annotations for manual drawing.
+Annotations reference the raw RGB instead of copying it. Regenerating pending proposals preserves approved and rejected decisions. Raw mode can use SAM proposals or blank annotations for manual drawing.
+
+**SAM 2.1** (default) and **MobileSAM** draw the object outline inside each depth proposal, or propose masks on the raw RGB. SAM 2.1 tiny was more accurate on thin objects (door handles, pens) in a test on approved D405 sessions: 18/18 hand-drawn objects at IoU ≥ 0.8, against 15/18 for MobileSAM, at about 0.9 s instead of 0.5 s per object on a laptop CPU. Both read their weights from `<data root>/models/annotation/`: `sam2.1_t.pt` (78 MB) is downloaded there automatically on first use; `mobile_sam.pt` must already be there.
 
 ## Review
 

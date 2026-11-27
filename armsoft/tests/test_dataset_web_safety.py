@@ -202,6 +202,27 @@ class DatasetWebSafetyTests(unittest.TestCase):
         self.assertEqual(command[command.index("--roi") + 1], "0.1,0.2,0.8,0.9")
         self.assertIn("--auto-table", command)
 
+    def test_annotation_methods_pass_the_chosen_sam_weights(self):
+        session = self.capture / "demo"; session.mkdir(); (session / "session.json").write_text("{}")
+        models = self.data / "models" / "annotation"
+        request = {"session": "demo", "version": "__raw__"}
+        with patch("tools.dataset_web.threading.Thread") as thread:
+            self.state.annotation_start({**request, "method": "sam2"})
+        command = thread.call_args.kwargs["args"][0]
+        # SAM 2.1 does not need to be present: Ultralytics downloads it on first use.
+        self.assertEqual(Path(command[command.index("--sam-model") + 1]).resolve(),
+                         (models / "sam2.1_t.pt").resolve())
+
+        with self.assertRaisesRegex(ValueError, "MobileSAM model not found"):
+            State("sim", self.capture).annotation_start({**request, "method": "mobile_sam"})
+        with self.assertRaisesRegex(ValueError, "Unknown annotation method"):
+            State("sim", self.capture).annotation_start({**request, "method": "sam3"})
+
+    def test_annotation_label_names_the_model_that_made_it(self):
+        from tools.dataset_web import sam_label
+        self.assertEqual(sam_label("sam-box:/data/models/annotation/sam2.1_t.pt"), "SAM 2.1")
+        self.assertEqual(sam_label("sam-auto:/data/models/annotation/mobile_sam.pt"), "MobileSAM")
+
 
 if __name__ == "__main__":
     unittest.main()

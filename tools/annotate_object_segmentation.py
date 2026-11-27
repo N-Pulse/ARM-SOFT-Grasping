@@ -108,7 +108,7 @@ def main() -> int:
     parser.add_argument("--min-area", type=int, default=500)
     parser.add_argument("--max-instances", type=int, default=20)
     parser.add_argument("--sam-model",
-                        help="optional Ultralytics SAM weights, e.g. mobile_sam.pt")
+                        help="optional Ultralytics SAM weights, e.g. sam2.1_t.pt or mobile_sam.pt")
     parser.add_argument("--force", action="store_true",
                         help="replace existing pending annotations")
     parser.add_argument("--progress-file", type=Path,

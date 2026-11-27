@@ -23,6 +23,12 @@ from armsoft.studio import create_studio_handler
 
 ROOT=Path(__file__).resolve().parents[1]; WEB=ROOT/"web/dataset-console"; SAFE=re.compile(r"^(?!\.{1,2}$)(?!\.)[\w.-]{1,80}$")
 MAX_REQUEST_BYTES=1024*1024
+# Annotation proposal method -> (weights file in <data root>/models/annotation, display name).
+# SAM 2.1 tiny is an Ultralytics release asset: missing weights are downloaded there on first use.
+SAM_MODELS={"sam2":("sam2.1_t.pt","SAM 2.1"),"mobile_sam":("mobile_sam.pt","MobileSAM")}
+def sam_label(method):
+    """Display name of the SAM model recorded in an annotation run (e.g. 'sam-box:/x/sam2.1_t.pt')."""
+    return "SAM 2.1" if Path(method.split(":",1)[-1]).name.startswith("sam2") else "MobileSAM"
 def sudo_owner():
     """Return the invoking Unix user IDs, or None on Windows/non-sudo runs."""
     if os.name!="posix" or not hasattr(os,"geteuid") or os.geteuid()!=0 or not os.environ.get("SUDO_UID"): return None
@@ -281,7 +287,7 @@ class State:
     def annotation_start(self,data):
         name=str(data.get("session","")); version=str(data.get("version","")); method=str(data.get("method","depth"))
         if not SAFE.fullmatch(name) or not SAFE.fullmatch(version): raise ValueError("Invalid session or preprocessing version")
-        if method not in {"depth","mobile_sam"}: raise ValueError("Unknown annotation method")
+        if method not in {"depth",*SAM_MODELS}: raise ValueError("Unknown annotation method")
         source=(self.root/name).resolve(); data_root=self.root.parents[1]
         raw_bypass=version=="__raw__"
         derived=(data_root/"derived"/"object"/name/version).resolve() if not raw_bypass else None
@@ -298,9 +304,10 @@ class State:
         try: progress_file.unlink()
         except FileNotFoundError: pass
         command.extend(["--progress-file",str(progress_file)])
-        model=data_root/"models"/"annotation"/"mobile_sam.pt"
-        if method=="mobile_sam":
-            if not model.is_file(): raise ValueError(f"MobileSAM model not found: {model}")
+        if method in SAM_MODELS:
+            weights,label=SAM_MODELS[method]; model=data_root/"models"/"annotation"/weights
+            if method=="mobile_sam" and not model.is_file(): raise ValueError(f"{label} model not found: {model}")
+            model.parent.mkdir(parents=True,exist_ok=True)
             command.extend(["--sam-model",str(model)])
         if bool(data.get("force",False)): command.append("--force")
         total=len(list((source/"color").glob("frame_*.png")))
@@ -364,7 +371,7 @@ class State:
         run_data=json.loads(run.read_text(encoding="utf-8"))
         run_data.setdefault("preprocessing_version",Path(run_data.get("derived_masks","")).name or "unknown")
         method=run_data.get("proposal_method","depth-components")
-        run_data["method_label"]=("MobileSAM automatic masks on Raw RGB" if method.startswith("sam-auto:") else "Manual annotation on Raw RGB" if method=="manual-raw" else "MobileSAM + depth proposals" if method.startswith("sam-box:") else "Depth components only")
+        run_data["method_label"]=(f"{sam_label(method)} automatic masks on Raw RGB" if method.startswith("sam-auto:") else "Manual annotation on Raw RGB" if method=="manual-raw" else f"{sam_label(method)} + depth proposals" if method.startswith("sam-box:") else "Depth components only")
         return {"session":name,"run":run_data,"frames":frames,"states":states,"objects":objects}
 
     def annotation_delete(self,name,confirmation):

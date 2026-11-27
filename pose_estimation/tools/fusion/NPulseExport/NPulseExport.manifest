@@ -1,0 +1,9 @@
+{
+  "autodeskProduct": "Fusion360",
+  "type": "script",
+  "author": "N-Pulse",
+  "description": {"": "Export meshes and joints for N-Pulse synthetic RGB-D data"},
+  "version": "1.0.0",
+  "runOnStartup": false,
+  "supportedOS": "windows|mac"
+}

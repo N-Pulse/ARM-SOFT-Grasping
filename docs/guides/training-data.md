@@ -226,6 +226,50 @@ Never point two config revisions at the same Hugging Face output directory.
 Pin `huggingface.revision` to the full commit SHA; do not use `main`, because later HF
 updates would silently change a supposedly reproducible training dataset.
 
+## 11. Add LVIS as a second external source (v3)
+
+[`configs/datasets/openimages_lvis_d405_v3.yaml`](../../configs/datasets/openimages_lvis_d405_v3.yaml)
+is v2 plus an LVIS v1 subset. Open Images and the D405 part are unchanged; only the output
+names differ, so v2 is never overwritten.
+
+Why LVIS: it has all our object classes with precise masks, many images per class and small
+objects, similar to what the D405 sees at 50 cm to 1 m. Its annotations are CC BY 4.0; its
+images are COCO / Flickr images with their own licences, so do not redistribute them.
+
+How images are picked (`training/data/download_lvis.py`, rules in `training/data/lvis_format.py`):
+
+- LVIS categories are mapped to our classes, for example `bottle`, `water_bottle` and
+  `wine_bottle` to `bottle`, and `doorknob` to `door_handle`. Check the door handles
+  visually: in LVIS, `doorknob` mixes oven, fridge and car handles with round knobs, while
+  CV-REQ-002 asks for lever-style door handles.
+- An image is rejected if one of its classes is not exhaustively annotated (LVIS is federated),
+  if it has more than `max_objects` boxes of our classes, if two of those boxes overlap more
+  than `max_overlap` IoU, or if no box covers `min_area` of the image.
+- Up to `per_class` images are picked per class with a fixed seed (all of them when a class
+  has fewer usable images), then split 70/15/15. Each file name holds the LVIS image id
+  (`lvis_<id>.jpg`).
+
+No account and no extra environment are needed. Only the LVIS annotation files and the
+picked COCO images are downloaded, into `training/datasets/_lvis_cache/`.
+
+```bash
+# quick test: 20 images per class, separate _pc20 names
+python training/data/prepare_dataset.py all --config configs/datasets/openimages_lvis_d405_v3.yaml --per-class 20
+
+# full v3 dataset
+python training/data/prepare_dataset.py all --config configs/datasets/openimages_lvis_d405_v3.yaml
+
+# check the picked images visually (one row per class, all boxes drawn)
+python training/data/preview_dataset.py --dataset training/datasets/lvis6
+```
+
+To drop a bad LVIS image after visual control, add its id to `lvis.exclude_images` in the
+config and rebuild with `--refresh-sources --force`. The selection rules and the
+image count can be changed in the `lvis` section; any change rebuilds the LVIS source.
+
+Compare OI + D405 (v2), and OI + LVIS + D405 (v3) on the same D405 test sessions before
+keeping LVIS.
+
 ## Common problems
 
 | Problem | Action |

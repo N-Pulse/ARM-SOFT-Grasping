@@ -1,0 +1,116 @@
+# Pinned inputs of the Open Images + LVIS + D405 detection dataset, version 3.
+# Build with: python training/data/prepare_dataset.py all --config configs/datasets/openimages_lvis_d405_v3.yaml
+# Change any value below -> bump `name` (and the output names) to a new version.
+#
+# v3 vs v2: adds an LVIS v1 subset (training/data/download_lvis.py) next to the same frozen
+# Open Images subset. The D405 part is identical to v2 (same HF revision, sessions and splits).
+# LVIS selection follows the team rule of few, non-overlapping objects per image:
+# at most 3 boxes of our classes, no two boxes overlapping more than 0.1 IoU, and the
+# picked object covering at least 0.5 % of the image. Up to 500 images per class; a class
+# with fewer usable images gets all of them. LVIS "doorknob" -> door_handle is kept but mixes
+# oven, fridge and car handles with round knobs (CV-REQ-002 asks for lever handles): check
+# those images visually and list bad ones in lvis.exclude_images.
+version: 3
+name: openimages6_lvis_d405_v3
+classes:            # fixed order = YOLO class ids 0-5
+  - ball
+  - can
+  - box
+  - bottle
+  - pen_pencil
+  - door_handle
+
+openimages:
+  output: training/datasets/openimages6     # unchanged: same frozen Open Images subset as v1
+  per_class: 500
+  seed: 0
+
+lvis:
+  output: training/datasets/lvis6
+  cache: training/datasets/_lvis_cache   # annotation JSONs + downloaded COCO images
+  per_class: 500
+  seed: 0
+  source_splits: [train, val]            # LVIS splits to pick from; we re-split 70/15/15
+  max_objects: 3
+  max_overlap: 0.1
+  min_area: 0.005
+  exclude_images: []                     # LVIS image ids rejected after visual control
+
+huggingface:
+  repo_id: npulseDataCV/npulse_cv
+  repo_type: dataset
+  revision: a1eb31e870b2337760481ab443ef7a3d66a9516c
+  output: training/sources/npulse_cv-a1eb31e
+
+# Optional pre-generated augmentation release. It is downloaded only by the
+# `download-augmented` action and is never mixed into the canonical build automatically.
+# This release was made from an older source revision and lacks a complete recipe/mapping,
+# so prefer the reproducible local online augmentation profile below.
+augmented_huggingface:
+  repo_id: npulseDataCV/npulse_cv_augmented_experiments
+  repo_type: dataset
+  revision: c8321c777fb06f32ac45c4e293c8aee39e5a88f6
+  output: training/sources/npulse_cv_augmented-c8321c7
+  release: augmented_v1
+  archive: releases/augmented_v1/augmented-v1.7z
+  sha256: 9e5517359ee3c38a57b2ab69ded790ea415bd43ceca580166216ffad10860b27
+  source_revision: 2fb650d153
+  status: experimental
+
+local_augmentation:
+  profile: configs/augmentation/yolo_detection_v1.yaml
+
+d405:
+  output_name: d405_v3
+  train_repeat: 2           # D405 train is ~4x larger than v1; 5 would crowd out Open Images
+  link_mode: hardlink       # hardlink = one copy on disk; use --link-mode copy before zipping
+  # structure-v2 has one canonical Dataset Studio root.
+  subroots: [""]
+  # Canonical HF class name -> YOLO class. Match by name, never by Studio class id.
+  class_map:
+    ball: ball
+    can: can
+    box: box
+    bottle: bottle
+    pen_pencil: pen_pencil
+    door_handle: door_handle
+  # Whole sessions per split. v1 test sessions stay in test; test adds new objects.
+  session_splits:
+    train: [can_1, can_2, can_3, can_4, can_6, can_8, can_9,
+            test_black_box_3, test_box_3, test_box_4, test_box_7,
+            door_handle_1, door_handle_3, door_handle_5, door_handle_circular_1, door_handle_regular_1,
+            red_pen_0, stylo_4colors_1, stylo_4colors_2, yellow_marker, yellow_marker_1,
+            marble_1]
+    val: [can_5, box_beige_1, test_box_8,
+          door_handle_4, door_handle_regular_2,
+          red_pen_1, stylo_4colors_3, yellow_marker_2]
+    test: [can_7, can_10, test_box_2, test_box_9,
+           door_handle_6, door_handle_circular_2,
+           stylo_green_1, marbles_1]
+  # Approved frames whose objects are none of the six classes: written with empty labels,
+  # so the model learns not to fire on eggs and hands.
+  negative_sessions:
+    train: [ellipsoid, ellipsoid_2, left_hand_relaxed, left_hand_relaxed_1,
+            right_hand_relaxed_0, right_hand_relaxed_1, right_hand_thumbs_up_2,
+            proth_right_hand, proth_right_hand_1]
+    val: [ellipsoid_3, left_hand_relaxed_2, right_hand_relaxed_2, proth_right_hand_2]
+    test: [right_hand_3fingers_1, right_hand_thumbs_up_1]
+  # Not used: test_box_1 (only 1 approved frame). Approved but rejected after visual
+  # control (carried over from v1):
+  excluded_frames:
+    can_4:
+      frame_000007: 3 of its 4 boxes are on the empty table
+      frame_000008: box cuts the top of the can
+      frame_000009: box cuts the top of the can
+    can_5:
+      frame_000004: box cuts the top of the can
+      frame_000008: box cuts the top of the can
+      frame_000009: box cuts the top of the can
+      frame_000010: box cuts the top of the can
+      frame_000011: box cuts the top of the can
+      frame_000013: box cuts the top of the can
+      frame_000014: box cuts the top of the can
+
+mixed:
+  output_name: openimages6_lvis_d405_v3
+  yaml: training/data/openimages6_lvis_d405_v3.yaml
